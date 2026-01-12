@@ -327,7 +327,7 @@
       "id": "p8-5",
       "title": "Phase 8: Main binary",
       "description": "Create poly-bot main binary. Parse CLI args (--mode, --config, --start, --end, --speed, --sweep), load config, initialize selected mode, run main loop, graceful shutdown.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p8-1", "p8-2", "p8-3", "p8-4"],
       "files": ["crates/poly-bot/src/main.rs"],
       "acceptance": ["All modes work from CLI", "Config loads correctly", "Shutdown is clean"]

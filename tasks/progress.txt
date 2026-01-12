@@ -2270,3 +2270,69 @@ Notes for next tasks:
 - Shadow mode ready for feed validation and opportunity benchmarking
 
 ---
+
+### [2026-01-12] Task p8-5: Main binary
+Files created:
+- crates/poly-bot/src/main.rs
+
+Files modified:
+- crates/poly-bot/src/lib.rs (added BacktestMode exports)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-bot: PASSED (446 tests, 7 new)
+- cargo run -p poly-bot -- --help: PASSED
+
+CLI features implemented:
+- `poly-bot --mode <MODE>`: Select trading mode (live, paper, shadow, backtest)
+- `poly-bot --config <FILE>`: Custom config file path (default: config/bot.toml)
+- `poly-bot --clickhouse-url <URL>`: Override ClickHouse URL
+- `poly-bot --assets <ASSETS>`: Comma-separated assets to trade
+- `poly-bot --start <DATE>`: Backtest start date (YYYY-MM-DD)
+- `poly-bot --end <DATE>`: Backtest end date (YYYY-MM-DD)
+- `poly-bot --speed <SPEED>`: Backtest speed multiplier (0=max, 1.0=real-time)
+- `poly-bot --sweep`: Enable parameter sweep mode
+
+Main binary features:
+- Config file loading with fallback to defaults
+- Environment variable overrides (POLY_PRIVATE_KEY, POLY_API_KEY, etc.)
+- CLI argument overrides (highest priority)
+- ClickHouse connection test and table creation
+- Mode-specific initialization:
+  - Live: LiveMode with credentials validation
+  - Paper: PaperMode with simulated execution
+  - Shadow: ShadowMode for feed validation
+  - Backtest: BacktestMode with date range and sweep support
+- Graceful shutdown on Ctrl+C/SIGTERM
+- Final metrics logging for backtest mode
+- Sweep results summary with best parameter combination
+
+Shutdown handling:
+- Unix: SIGTERM and SIGINT via tokio::signal
+- Windows: Ctrl+C via tokio::signal::ctrl_c()
+- Spawns async shutdown handler that sets control.request_shutdown()
+- Each mode has its own shutdown coordination with observability tasks
+
+Tests added (7 new):
+- test_cli_parsing
+- test_cli_mode_override
+- test_cli_backtest_options
+- test_cli_assets_override
+- test_cli_clickhouse_override
+- test_cli_config_path
+- test_cli_combined_options
+
+Key decisions:
+- Using clap derive for CLI argument parsing (consistent with poly-collect, poly-import)
+- Config loading priority: CLI > env vars > config file > defaults
+- Backtest-specific args (--start, --end, --speed, --sweep) only apply in backtest mode
+- Each mode creates its own shutdown handler with state reference
+- Detailed backtest summary including sweep results and best run
+
+Notes for Phase 8 completion:
+- Phase 8 (trading modes) is now COMPLETE!
+- All four modes implemented: live, paper, shadow, backtest
+- Main binary wires everything together with full CLI support
+- Ready for Phase 9 (testing and validation)
+
+---

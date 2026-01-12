@@ -87,4 +87,7 @@ pub use observability::{
     AnomalyDetector, AnomalySeverity, AnomalyStats, AnomalyStatsSnapshot, AnomalyType,
     SharedAnomalyDetector,
 };
-pub use mode::{LiveMode, LiveModeConfig, PaperMode, PaperModeConfig, ShadowMode, ShadowModeConfig};
+pub use mode::{
+    BacktestMode, BacktestModeConfig, BacktestResult, LiveMode, LiveModeConfig, PaperMode,
+    PaperModeConfig, PnLReport, ShadowMode, ShadowModeConfig, SweepParameter,
+};
