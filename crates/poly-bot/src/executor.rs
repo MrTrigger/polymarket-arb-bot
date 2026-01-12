@@ -26,6 +26,7 @@
 
 pub mod backtest;
 pub mod chase;
+pub mod fill;
 pub mod live;
 pub mod paper;
 pub mod shadow;

@@ -46,6 +46,9 @@ pub use executor::shadow::{
 pub use executor::chase::{
     ChaseConfig, ChaseFill, ChaseResult, ChaseStopReason, PriceChaser,
 };
+pub use executor::fill::{
+    FillData, FillHandler, FillHandlerConfig, FillResult, InventorySnapshot, PartialFillState,
+};
 pub use state::{
     ActiveWindow, ControlFlags, GlobalState, InventoryPosition, InventoryState, LiveOrderBook,
     MetricsCounters, MetricsSnapshot, SharedMarketData, ShadowOrderState, WindowPhase,

@@ -210,9 +210,9 @@
       "id": "p5-4",
       "title": "Phase 5: Fill handling",
       "description": "Implement fill processing. Parse fill events, update inventory, fire shadow bid, handle partial fills, send to observability channel.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p5-3"],
-      "files": ["crates/poly-bot/src/executor/mod.rs"],
+      "files": ["crates/poly-bot/src/executor/fill.rs", "crates/poly-bot/src/executor.rs", "crates/poly-bot/src/lib.rs"],
       "acceptance": ["Fills update inventory", "Triggers shadows correctly", "Handles partials"]
     },
     {

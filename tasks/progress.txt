@@ -1297,3 +1297,99 @@ Notes for next tasks:
 - PriceChaser can wrap LiveExecutor for aggressive fills
 
 ---
+
+### [2026-01-12] Task p5-4: Fill handling
+Files created:
+- crates/poly-bot/src/executor/fill.rs
+
+Files modified:
+- crates/poly-bot/src/executor.rs (added fill module)
+- crates/poly-bot/src/lib.rs (added fill type exports)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-bot: PASSED (221 tests, 17 new)
+
+FillHandler features:
+- FillHandlerConfig with configurable parameters:
+  - enable_shadow: toggle shadow firing on fills
+  - shadow_latency_target_us: target latency for shadow fires (default 2000us)
+  - log_slow_shadows: log when shadow exceeds target
+  - min_fill_size: filter dust fills (default 0.01)
+- process_fill(): main entry point for fill processing
+  - Validates fill size against minimum
+  - Updates partial fill tracking
+  - Updates inventory in GlobalState
+  - Fires shadow bid for opposite outcome
+  - Sends result to observability channel
+  - Updates metrics (volume, P&L)
+- process_order_fill(): convenience for OrderFill type
+- process_partial_fill(): convenience for PartialOrderFill type
+
+FillData struct:
+- Complete fill information for processing
+- order_id, request_id, event_id, token_id, outcome
+- size, price, fee, is_partial, cumulative_size, requested_size
+- Helper methods: total_cost(), net_proceeds(), fill_ratio(), is_complete()
+- from_full_fill() and from_partial_fill() constructors
+
+PartialFillState tracking:
+- Tracks cumulative filled size per order
+- Weighted average price calculation across partials
+- Total fees accumulated
+- Shadow fired flag (fires only on first partial)
+- First/last fill timestamps
+- update() method for incremental updates
+- mark_shadow_fired() to prevent duplicate shadow fires
+
+FillResult struct:
+- Comprehensive fill processing result
+- fill: the processed FillData
+- shadow_fired: whether shadow was triggered
+- shadow_latency_us: shadow fire timing (if fired)
+- shadow_order_id: shadow order ID (if fired)
+- inventory_after: InventorySnapshot after fill
+- processed_at: processing timestamp
+
+InventorySnapshot struct:
+- Point-in-time inventory state for fill result
+- event_id, yes_shares, no_shares
+- yes_cost_basis, no_cost_basis
+- total_exposure, matched_pairs
+- from_position() constructor from InventoryPosition
+
+Key decisions:
+- Shadow fires only on first partial fill (prevents duplicate shadows)
+- Inventory updates use GlobalState shared state
+- Observability uses try_send() for fire-and-forget (non-blocking)
+- Partial fills tracked separately with incremental size calculation
+- Cleanup method for stale partial fill state
+- All prices use rust_decimal::Decimal (NEVER f64)
+
+Tests added (17 new):
+- test_fill_data_total_cost
+- test_fill_data_fill_ratio
+- test_fill_data_is_complete
+- test_fill_data_from_order_fill
+- test_fill_data_from_partial_fill
+- test_partial_fill_state_update
+- test_partial_fill_state_shadow_fired
+- test_fill_handler_config_default
+- test_fill_handler_creation
+- test_fill_handler_track_partial
+- test_fill_handler_full_fill_always_fires_shadow
+- test_fill_handler_cleanup_stale
+- test_fill_handler_process_fill
+- test_fill_handler_inventory_update
+- test_fill_handler_with_observability
+- test_inventory_snapshot_from_position
+- test_fill_result_serialization
+
+Notes for next tasks:
+- p6-3 (leg risk handling) now unblocked (depends: p5-4 done, p6-1)
+- p6-1 (pre-trade risk checks) ready (depends: p3-3 done)
+- p6-2 (circuit breakers) ready (depends: p3-2 done)
+- FillHandler can integrate with LiveExecutor for real order fills
+- Shadow bid integration uses SharedShadowManager from shadow.rs
+
+---
