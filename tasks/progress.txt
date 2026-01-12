@@ -704,3 +704,76 @@ Notes for next tasks:
 - LiveDataSource ready for live/paper/shadow modes
 
 ---
+
+### [2026-01-12] Task p3-5: Executor trait
+Files created:
+- crates/poly-bot/src/executor.rs (trait and types)
+- crates/poly-bot/src/executor/paper.rs (PaperExecutor)
+- crates/poly-bot/src/executor/backtest.rs (BacktestExecutor)
+- crates/poly-bot/src/executor/live.rs (LiveExecutor stub)
+
+Files modified:
+- crates/poly-bot/src/lib.rs (added executor module exports)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-bot: PASSED (97 tests, 34 new)
+
+Executor trait features:
+- place_order(&mut self, OrderRequest) -> Result<OrderResult, ExecutorError>
+- cancel_order(&mut self, order_id) -> Result<OrderCancellation, ExecutorError>
+- order_status(&self, order_id) -> Option<OrderResult>
+- pending_orders(&self) -> Vec<PendingOrder>
+- available_balance(&self) -> Decimal
+- shutdown(&mut self)
+
+OrderRequest types:
+- OrderRequest with limit(), market(), ioc() constructors
+- OrderType enum (Limit, Market, Ioc, Gtc)
+- max_cost() calculation for balance checks
+
+OrderResult enum:
+- Filled(OrderFill) - fully filled
+- PartialFill(PartialOrderFill) - partially filled
+- Rejected(OrderRejection) - order rejected
+- Pending(PendingOrder) - waiting for execution
+- Cancelled(OrderCancellation) - order cancelled
+- Helper methods: is_filled(), is_rejected(), filled_size(), filled_cost()
+
+PaperExecutor features:
+- Simulated fills without real money
+- Configurable initial balance, fill latency, fee rate
+- Balance enforcement and position limits
+- Market order slippage simulation
+- Position tracking (yes_shares, no_shares, cost_basis)
+- Order history and status queries
+
+BacktestExecutor features:
+- Fills simulated by walking historical order book depth
+- Partial fills when liquidity is insufficient
+- Limit price enforcement (only fill at or better than limit)
+- Configurable minimum fill ratio for partial fills
+- Position and balance tracking
+- BacktestStats for performance analysis
+
+LiveExecutor (stub):
+- Placeholder for real order submission
+- Returns errors for all operations
+- Will be fully implemented in Phase 5 (p5-3)
+
+Key decisions:
+- Executor trait uses async_trait for async methods
+- All prices/quantities use rust_decimal::Decimal
+- PaperExecutor doesn't consume order book (simplistic simulation)
+- BacktestExecutor walks order book but doesn't modify it
+- Partial fills tracked separately from full fills
+- Order history stored for status queries
+
+Notes for next tasks:
+- Phase 3 now COMPLETE! All data_source and executor abstractions ready
+- p4-1 (arb detection), p4-2 (toxic flow), p5-1 (shadow) now unblocked
+- p6-1 (risk checks), p6-2 (circuit breaker), p7-1 (decision types) also unblocked
+- Strategy code can use Executor trait polymorphically
+- Same code works for live, paper, and backtest modes
+
+---

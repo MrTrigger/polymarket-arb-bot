@@ -16,9 +16,11 @@
 //! - `state`: Global shared state with lock-free access
 //! - `types`: Order book, market state, and inventory types
 //! - `data_source`: Data source abstraction (live WebSocket, replay from ClickHouse)
+//! - `executor`: Order execution abstraction (live, paper, backtest)
 
 pub mod config;
 pub mod data_source;
+pub mod executor;
 pub mod state;
 pub mod types;
 
@@ -29,6 +31,13 @@ pub use data_source::{
 };
 pub use data_source::live::{ActiveMarket, LiveDataSource, LiveDataSourceConfig};
 pub use data_source::replay::{ReplayConfig, ReplayDataSource};
+pub use executor::{
+    Executor, ExecutorError, OrderCancellation, OrderFill, OrderRejection, OrderRequest,
+    OrderResult, OrderType, PartialOrderFill, PendingOrder,
+};
+pub use executor::backtest::{BacktestExecutor, BacktestExecutorConfig, BacktestPosition, BacktestStats};
+pub use executor::live::{LiveExecutor, LiveExecutorConfig};
+pub use executor::paper::{PaperExecutor, PaperExecutorConfig, PaperPosition};
 pub use state::{
     ActiveWindow, ControlFlags, GlobalState, InventoryPosition, InventoryState, LiveOrderBook,
     MetricsCounters, MetricsSnapshot, SharedMarketData, ShadowOrderState, WindowPhase,

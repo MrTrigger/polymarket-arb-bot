@@ -138,9 +138,9 @@
       "id": "p3-5",
       "title": "Phase 3: Executor trait",
       "description": "Define Executor trait with place_order(), cancel_order(). Define OrderResult enum (Filled, PartialFill, Rejected). Stub LiveExecutor, implement PaperExecutor (simulated fills), implement BacktestExecutor (simulates against historical book).",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p3-3"],
-      "files": ["crates/poly-bot/src/executor.rs", "crates/poly-bot/src/executor/paper.rs", "crates/poly-bot/src/executor/backtest.rs"],
+      "files": ["crates/poly-bot/src/executor.rs", "crates/poly-bot/src/executor/paper.rs", "crates/poly-bot/src/executor/backtest.rs", "crates/poly-bot/src/executor/live.rs"],
       "acceptance": ["Same strategy code works with real or simulated execution", "PaperExecutor simulates fills"]
     },
     {
