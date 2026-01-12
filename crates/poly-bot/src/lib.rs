@@ -22,6 +22,7 @@ pub mod config;
 pub mod data_source;
 pub mod executor;
 pub mod state;
+pub mod strategy;
 pub mod types;
 
 pub use config::{BotConfig, ObservabilityConfig};
@@ -42,4 +43,5 @@ pub use state::{
     ActiveWindow, ControlFlags, GlobalState, InventoryPosition, InventoryState, LiveOrderBook,
     MetricsCounters, MetricsSnapshot, SharedMarketData, ShadowOrderState, WindowPhase,
 };
+pub use strategy::{ArbDetector, ArbOpportunity, ArbRejection, ArbThresholds};
 pub use types::{Inventory, MarketState, OrderBook, PriceLevel};

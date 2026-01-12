@@ -777,3 +777,68 @@ Notes for next tasks:
 - Same code works for live, paper, and backtest modes
 
 ---
+
+### [2026-01-12] Task p4-1: Arbitrage detection
+Files created:
+- crates/poly-bot/src/strategy/mod.rs
+- crates/poly-bot/src/strategy/arb.rs
+
+Files modified:
+- crates/poly-bot/src/lib.rs (added strategy module export)
+- crates/poly-bot/src/state.rs (added Serialize/Deserialize to WindowPhase)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-bot: PASSED (117 tests, 20 new)
+
+ArbThresholds features:
+- Time-based margin thresholds: early (2.5%), mid (1.5%), late (0.5%)
+- Configurable phase boundaries (early_threshold_secs, mid_threshold_secs)
+- Minimum time remaining to trade (min_time_remaining_secs)
+- for_phase() and phase_for_time() helpers
+
+ArbOpportunity struct:
+- Complete opportunity snapshot for decision making
+- Event ID, asset, token IDs
+- yes_ask, no_ask, combined_cost, margin, margin_bps
+- max_size (limited by smaller side liquidity)
+- seconds_remaining, phase, required_threshold
+- confidence score (0-100)
+- spot_price, strike_price for directional signals
+- detected_at_ms timestamp
+- expected_profit(), spot_suggests_yes(), has_significant_edge() helpers
+
+ArbDetector features:
+- detect(market) -> Result<ArbOpportunity, ArbRejection>
+- Validates time remaining, quotes, liquidity
+- Calculates margin and checks against phase-specific threshold
+- Confidence scoring based on 5 factors:
+  1. Margin above threshold (0-25 points)
+  2. Time phase (0-15 points) - late = higher confidence
+  3. Liquidity depth (0-20 points)
+  4. Spread tightness (0-15 points)
+  5. Spot price alignment (-5 to +10 points)
+- has_potential_arb() for fast filtering
+- Configurable min_confidence threshold
+
+ArbRejection enum:
+- NoQuotes: missing BBO
+- NoArbitrage: combined >= 1.0
+- BelowThreshold: margin below phase threshold
+- InsufficientTime: < min_time_remaining
+- NoLiquidity: size <= 0
+- LowConfidence: confidence < min_confidence
+
+Key decisions:
+- All prices use rust_decimal::Decimal (NEVER f64)
+- Confidence scoring provides signal quality indicator
+- Fast path: has_potential_arb() for quick filtering before full detection
+- ArbOpportunity is fully serializable for observability
+- WindowPhase now has Serialize/Deserialize for storage
+
+Notes for next tasks:
+- p4-2 (toxic flow), p4-3 (position sizing) now unblocked
+- Arb detector ready for strategy loop integration (p4-4)
+- Confidence scoring can be tuned based on backtest results
+
+---

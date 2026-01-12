@@ -614,7 +614,7 @@ impl ActiveWindow {
 }
 
 /// Window time phase for threshold selection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum WindowPhase {
     /// >5 minutes remaining (higher threshold).
     Early,

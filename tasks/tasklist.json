@@ -147,7 +147,7 @@
       "id": "p4-1",
       "title": "Phase 4: Arbitrage detection",
       "description": "Implement core arb detection: margin = 1.0 - (yes_ask + no_ask). Time-based threshold selection (2.5% early >5min, 1.5% mid 2-5min, 0.5% late <2min). Confidence scoring. Create ArbOpportunity struct.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p3-3"],
       "files": ["crates/poly-bot/src/strategy/mod.rs", "crates/poly-bot/src/strategy/arb.rs"],
       "acceptance": ["Detects opportunities correctly", "Time-based thresholds work", "Unit tests pass"]
