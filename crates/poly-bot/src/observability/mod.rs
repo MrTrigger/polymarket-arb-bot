@@ -13,6 +13,15 @@
 //! 2. **Async enrichment**: A background processor receives snapshots via bounded channel
 //!    and enriches them to full `DecisionContext` with string identifiers before storage.
 //!
+//! ## Counterfactual Analysis
+//!
+//! The counterfactual analyzer tracks skipped opportunities and, after market settlement,
+//! calculates what the P&L would have been. This enables:
+//!
+//! - Post-hoc evaluation of skip decisions (sizing, toxic flow, risk)
+//! - Identification of systematically bad decisions
+//! - Parameter tuning based on historical what-if analysis
+//!
 //! ## Performance Requirements
 //!
 //! - Hot path overhead: <10ns (single try_send with primitives)
@@ -25,6 +34,7 @@
 //! use poly_bot::observability::{
 //!     ObservabilityCapture, CaptureConfig, DecisionSnapshot,
 //!     ObservabilityProcessor, ProcessorConfig, InMemoryIdLookup,
+//!     CounterfactualAnalyzer, CounterfactualConfig, PendingDecision, Settlement,
 //! };
 //! use std::sync::Arc;
 //!
@@ -40,9 +50,15 @@
 //!     let processor = ObservabilityProcessor::with_defaults(id_lookup);
 //!     processor.run(rx, clickhouse_client, shutdown_rx).await;
 //! }
+//!
+//! // Counterfactual analysis
+//! let analyzer = CounterfactualAnalyzer::with_defaults();
+//! analyzer.record_decision(pending_decision).await;
+//! let counterfactuals = analyzer.analyze_settlement(settlement).await;
 //! ```
 
 pub mod capture;
+pub mod counterfactual;
 pub mod processor;
 pub mod types;
 
@@ -50,6 +66,10 @@ pub use capture::{
     create_capture_channel, create_shared_capture, CaptureConfig, CaptureReceiver, CaptureSender,
     CaptureStats, CaptureStatsSnapshot, ObservabilityCapture, SharedCapture,
     DEFAULT_CHANNEL_CAPACITY,
+};
+pub use counterfactual::{
+    create_shared_analyzer, CounterfactualAnalyzer, CounterfactualConfig, CounterfactualStats,
+    CounterfactualStatsSnapshot, PendingDecision, Settlement, SharedCounterfactualAnalyzer,
 };
 pub use processor::{
     create_shared_processor, hash_string, spawn_processor, DecisionRecord, IdLookup,

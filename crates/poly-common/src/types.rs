@@ -250,6 +250,52 @@ pub struct TradeHistory {
     pub trade_id: String,
 }
 
+/// Counterfactual analysis record for ClickHouse storage.
+#[derive(Debug, Clone, Serialize, Deserialize, Row)]
+pub struct CounterfactualRecord {
+    /// Original decision ID.
+    pub decision_id: u64,
+    /// Event ID.
+    pub event_id: String,
+    /// Settlement timestamp.
+    pub settlement_time: DateTime<Utc>,
+    /// Original action taken.
+    pub original_action: String,
+    /// Settlement outcome (YES/NO).
+    pub settlement_outcome: String,
+    /// Original size traded (0 if skipped).
+    #[serde(with = "rust_decimal::serde::str")]
+    pub original_size: Decimal,
+    /// Hypothetical size if we had traded.
+    #[serde(with = "rust_decimal::serde::str")]
+    pub hypothetical_size: Decimal,
+    /// Hypothetical cost if we had traded.
+    #[serde(with = "rust_decimal::serde::str")]
+    pub hypothetical_cost: Decimal,
+    /// Hypothetical P&L based on settlement.
+    #[serde(with = "rust_decimal::serde::str")]
+    pub hypothetical_pnl: Decimal,
+    /// Actual P&L (0 if skipped).
+    #[serde(with = "rust_decimal::serde::str")]
+    pub actual_pnl: Decimal,
+    /// Missed profit (hypothetical - actual).
+    #[serde(with = "rust_decimal::serde::str")]
+    pub missed_pnl: Decimal,
+    /// Was this a good decision in hindsight? (1 = yes, 0 = no).
+    pub was_correct: u8,
+    /// Reason for the assessment.
+    pub assessment_reason: String,
+    /// Margin at decision time.
+    #[serde(with = "rust_decimal::serde::str")]
+    pub decision_margin: Decimal,
+    /// Confidence at decision time.
+    pub decision_confidence: u8,
+    /// Toxic severity at decision time.
+    pub decision_toxic_severity: u8,
+    /// Seconds remaining at decision.
+    pub decision_seconds_remaining: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

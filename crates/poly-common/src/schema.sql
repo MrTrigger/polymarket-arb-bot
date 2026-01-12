@@ -97,3 +97,27 @@ CREATE TABLE IF NOT EXISTS decisions (
 ORDER BY (event_id, timestamp)
 PARTITION BY toYYYYMMDD(timestamp)
 TTL timestamp + INTERVAL 180 DAY;
+
+-- Counterfactual analysis (post-settlement what-if)
+CREATE TABLE IF NOT EXISTS counterfactuals (
+    decision_id UInt64,
+    event_id String,
+    settlement_time DateTime64(3, 'UTC'),
+    original_action LowCardinality(String),
+    settlement_outcome LowCardinality(String),
+    original_size Decimal(18, 8),
+    hypothetical_size Decimal(18, 8),
+    hypothetical_cost Decimal(18, 8),
+    hypothetical_pnl Decimal(18, 8),
+    actual_pnl Decimal(18, 8),
+    missed_pnl Decimal(18, 8),
+    was_correct UInt8,
+    assessment_reason String,
+    decision_margin Decimal(18, 8),
+    decision_confidence UInt8,
+    decision_toxic_severity UInt8,
+    decision_seconds_remaining UInt32
+) ENGINE = MergeTree()
+ORDER BY (event_id, settlement_time)
+PARTITION BY toYYYYMMDD(settlement_time)
+TTL settlement_time + INTERVAL 180 DAY;

@@ -1841,3 +1841,101 @@ Notes for next tasks:
 - InMemoryIdLookup should be populated from MarketDiscovery in live mode
 
 ---
+
+### [2026-01-12] Task p7-4: Counterfactual analysis
+Files created:
+- crates/poly-bot/src/observability/counterfactual.rs
+
+Files modified:
+- crates/poly-bot/src/observability/mod.rs (added counterfactual module export)
+- crates/poly-bot/src/lib.rs (added counterfactual type exports)
+- crates/poly-common/src/schema.sql (added counterfactuals table)
+- crates/poly-common/src/types.rs (added CounterfactualRecord)
+- crates/poly-common/src/clickhouse.rs (added counterfactual inserter)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-bot: PASSED (376 tests, 22 new)
+- cargo test -p poly-common: PASSED (8 tests)
+
+CounterfactualAnalyzer features:
+- PendingDecision: Tracks decisions awaiting settlement for counterfactual analysis
+  - with_actual(), with_hypothetical(), with_context() builder methods
+  - combined_cost(), hypothetical_pnl(), actual_pnl() calculations
+  - is_expired() for cleanup
+- Settlement: Represents market settlement (event_id, winning_outcome)
+  - from_outcome_type() constructor from OutcomeType enum
+- CounterfactualAnalyzer: Main analyzer for post-settlement what-if
+  - record_decision(): Store decision for later analysis
+  - analyze_settlement(): Generate counterfactuals when market settles
+  - cleanup_expired(): Remove stale pending decisions
+  - run_cleanup_loop(): Background task for periodic cleanup
+- CounterfactualConfig:
+  - max_pending_decisions (default 10,000)
+  - decision_expiry_secs (default 1800 = 30 min)
+  - significant_miss_threshold (default $1)
+  - review_size_threshold (default $10)
+  - toxic_skip_tolerance (default $5)
+  - send_to_channel for observability integration
+- CounterfactualStats: Atomic counters for monitoring
+  - decisions_recorded, settlements_analyzed, counterfactuals_generated
+  - correct_decisions, incorrect_decisions
+  - total_missed_profit_cents, total_actual_profit_cents
+  - flagged_for_review, expired_cleanups
+
+Assessment logic:
+- Execute + positive P&L = correct
+- Execute + negative P&L = incorrect
+- SkipSizing + positive hypothetical P&L = incorrect (missed profit)
+- SkipToxic within tolerance ($5) = correct
+- SkipToxic exceeds tolerance = incorrect
+- SkipRisk + positive hypothetical P&L = incorrect
+- SkipCircuitBreaker within $10 = correct
+
+ClickHouse storage:
+- Added counterfactuals table with full analysis fields
+- CounterfactualRecord type for storage
+- insert_counterfactuals() batch insert method
+- counterfactual_inserter() for streaming inserts
+
+Tests added (22 new):
+- test_counterfactual_config_default
+- test_pending_decision_new
+- test_pending_decision_with_actual
+- test_pending_decision_with_hypothetical
+- test_pending_decision_hypothetical_pnl
+- test_pending_decision_actual_pnl
+- test_pending_decision_actual_pnl_zero_size
+- test_pending_decision_is_expired
+- test_pending_decision_not_expired
+- test_settlement_new
+- test_settlement_no_wins
+- test_settlement_from_outcome_type
+- test_counterfactual_stats_snapshot
+- test_counterfactual_stats_reset
+- test_analyzer_record_decision
+- test_analyzer_multiple_decisions_per_event
+- test_analyzer_analyze_settlement_execute_profit
+- test_analyzer_analyze_settlement_skip_miss
+- test_analyzer_toxic_skip_within_tolerance
+- test_analyzer_toxic_skip_exceeds_tolerance
+- test_analyzer_cleanup_expired
+- test_analyzer_max_pending_decisions
+- test_analyzer_stats_accumulation
+- test_counterfactual_stats_total_profit
+
+Key decisions:
+- Pending decisions keyed by event_id with Vec for multiple decisions
+- Uses Arc<RwLock<HashMap>> for thread-safe async access
+- Configurable tolerance for toxic flow skips (avoids over-flagging)
+- Counterfactuals sent to observability channel for unified storage
+- Background cleanup loop for expired decisions
+- All prices use rust_decimal::Decimal (NEVER f64)
+
+Notes for next tasks:
+- p7-5 (anomaly detection) still ready (depends: p7-3 done)
+- p8-1 (live mode), p8-2 (paper mode), p8-3 (shadow mode), p8-4 (backtest) ready
+- CounterfactualAnalyzer can integrate with strategy loop via record_decision()
+- Settlement events from market window close trigger analyze_settlement()
+
+---

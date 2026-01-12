@@ -8,7 +8,7 @@ use clickhouse::inserter::Inserter;
 use clickhouse::Client;
 use thiserror::Error;
 
-use crate::{MarketWindow, OrderBookDelta, OrderBookSnapshot, PriceHistory, SpotPrice, TradeHistory};
+use crate::{CounterfactualRecord, MarketWindow, OrderBookDelta, OrderBookSnapshot, PriceHistory, SpotPrice, TradeHistory};
 
 /// Errors that can occur during ClickHouse operations.
 #[derive(Debug, Error)]
@@ -161,6 +161,11 @@ impl ClickHouseClient {
         self.create_inserter("trade_history")
     }
 
+    /// Creates an inserter for counterfactuals with auto-commit configuration.
+    pub fn counterfactual_inserter(&self) -> Result<Inserter<CounterfactualRecord>, ClickHouseError> {
+        self.create_inserter("counterfactuals")
+    }
+
     /// Creates a generic inserter with the configured auto-commit settings.
     fn create_inserter<T>(&self, table: &str) -> Result<Inserter<T>, ClickHouseError>
     where
@@ -267,6 +272,23 @@ impl ClickHouseClient {
         let mut insert = self.client.insert("trade_history")?;
         for trade in trades {
             insert.write(trade).await?;
+        }
+        insert.end().await?;
+        Ok(())
+    }
+
+    /// Performs a single batch insert of counterfactuals.
+    pub async fn insert_counterfactuals(
+        &self,
+        counterfactuals: &[CounterfactualRecord],
+    ) -> Result<(), ClickHouseError> {
+        if counterfactuals.is_empty() {
+            return Ok(());
+        }
+
+        let mut insert = self.client.insert("counterfactuals")?;
+        for cf in counterfactuals {
+            insert.write(cf).await?;
         }
         insert.end().await?;
         Ok(())

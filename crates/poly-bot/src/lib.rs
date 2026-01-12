@@ -76,3 +76,7 @@ pub use observability::{
     InMemoryIdLookup, ObservabilityProcessor, ProcessorConfig, ProcessorStats,
     ProcessorStatsSnapshot, SharedProcessor,
 };
+pub use observability::{
+    create_shared_analyzer, CounterfactualAnalyzer, CounterfactualConfig, CounterfactualStats,
+    CounterfactualStatsSnapshot, PendingDecision, Settlement, SharedCounterfactualAnalyzer,
+};

@@ -273,7 +273,7 @@
       "id": "p7-4",
       "title": "Phase 7: Counterfactual analysis",
       "description": "Implement post-settlement what-if analysis. Track skipped opportunities, after window settles calculate hypothetical P&L, store counterfactuals to ClickHouse, flag bad decisions for review.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p7-3"],
       "files": ["crates/poly-bot/src/observability/counterfactual.rs"],
       "acceptance": ["Calculates hypothetical P&L", "Stores counterfactuals", "Flags bad decisions"]
