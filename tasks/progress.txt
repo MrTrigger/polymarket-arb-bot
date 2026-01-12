@@ -2359,3 +2359,56 @@ Test coverage summary:
 - Config: TOML parsing, env overrides, CLI overrides, validation
 
 All core logic already had comprehensive test coverage from previous phases.
+
+---
+
+### [2026-01-12 14:30] Task: Phase 9: Integration tests
+Files changed:
+- crates/poly-bot/tests/integration_strategy.rs (new)
+- crates/poly-bot/tests/integration_replay.rs (new)
+- crates/poly-bot/tests/integration_observability.rs (new)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test: PASSED (66 new integration tests)
+
+Tests created:
+1. integration_strategy.rs (12 tests):
+   - Strategy + mock executor flow
+   - Arb detection with trading enabled/disabled
+   - Multiple market handling
+   - Spot price updates via GlobalState
+   - Circuit breaker logic
+   - Observability channel integration
+   - Metrics tracking
+   - Window close removes market
+
+2. integration_replay.rs (19 tests):
+   - ReplayConfig default values and custom config
+   - Event priority queue ordering
+   - MarketEvent display, timestamp, is_heartbeat
+   - Book snapshot/delta/window event fields
+   - Mock replay source implementation
+   - DataSource trait implementation
+
+3. integration_observability.rs (35 tests):
+   - CaptureConfig default/disabled
+   - CaptureStats tracking and snapshots
+   - Drop rate calculation
+   - Channel creation and receive
+   - Enable/disable capture
+   - Channel full handling (backpressure)
+   - Clone shares stats
+   - High throughput test
+   - SnapshotBuilder API coverage
+   - DecisionSnapshot accessors
+
+Learnings:
+- Integration tests placed in crates/poly-bot/tests/ not workspace root
+- SnapshotBuilder uses event_id(&str) not event_id_hash(u64) - hashes internally
+- ObservabilityEvent has Decision, Counterfactual, Anomaly variants (no Fill variant)
+- StrategyLoop.executor field is private - test via metrics and GlobalState
+- DecisionSnapshot uses _bps/_cents suffixes for packed integer fields
+
+Notes for next task:
+- p9-3 (Backtest validation) requires collected data and ClickHouse

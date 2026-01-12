@@ -345,9 +345,9 @@
       "id": "p9-2",
       "title": "Phase 9: Integration tests",
       "description": "Add integration tests: strategy + mock executor, replay data source, observability pipeline.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p8-5"],
-      "files": ["tests/integration_strategy.rs", "tests/integration_replay.rs", "tests/integration_observability.rs"],
+      "files": ["crates/poly-bot/tests/integration_strategy.rs", "crates/poly-bot/tests/integration_replay.rs", "crates/poly-bot/tests/integration_observability.rs"],
       "acceptance": ["End-to-end flow works", "Tests pass"]
     },
     {
