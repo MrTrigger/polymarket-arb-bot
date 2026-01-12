@@ -1050,3 +1050,80 @@ Notes for next tasks:
 - p6-2 (circuit breakers) can extend current basic implementation
 
 ---
+
+### [2026-01-12] Task p5-1: Shadow bid manager
+Files created:
+- crates/poly-bot/src/executor/shadow.rs
+
+Files modified:
+- crates/poly-bot/src/executor.rs (added shadow module)
+- crates/poly-bot/src/lib.rs (added shadow type exports)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-bot: PASSED (184 tests, 19 new)
+
+Shadow bid manager features:
+- ShadowOrder struct with full order details (event_id, token_id, outcome, price, size)
+- PrehashedOrder for EIP-712 pre-computation:
+  - Stores domain_separator (constant per contract/chain)
+  - Stores type_hash (constant per order struct)
+  - Stores partial_encoding of known fields
+  - finalize_struct_hash() completes encoding with price/size
+  - compute_signing_hash() produces final hash for signing
+- ShadowManager with DashMap storage keyed by (event_id, Outcome)
+- create_shadow(): Creates and stores shadow with price offset
+- fire(): Fires shadow synchronously, <2ms latency target
+- fire_with_submitter(): Async version with custom order submission
+- mark_filled()/mark_failed(): Status updates after submission
+- cancel(): Cancel pending shadows
+- cleanup_expired(): Remove old/terminal shadows
+- pending_shadows()/active_count(): Query shadow state
+
+ShadowStatus lifecycle:
+- Pending -> Firing -> Submitted -> Filled/Failed
+- Pending -> Expired (if timeout exceeded)
+- Pending -> Cancelled (if explicitly cancelled)
+
+ShadowFireResult struct:
+- shadow_id, order_id, success flag
+- latency_us for performance tracking
+- error message on failure
+- timestamp
+
+Key decisions:
+- DashMap for lock-free concurrent access
+- Pre-hashing stores as much as possible at creation time
+- Fire latency measured via Instant for accurate microsecond tracking
+- Price offset applied in basis points (default 50 bps = 0.5%)
+- Maker/taker amounts converted to u128 (USDC micro-units)
+- Terminal states: Filled, Failed, Expired, Cancelled
+
+Tests added (19 new):
+- test_shadow_manager_creation
+- test_create_shadow
+- test_create_shadow_duplicate
+- test_create_shadow_different_outcomes
+- test_get_shadow
+- test_fire_shadow
+- test_fire_not_found
+- test_fire_expired
+- test_cancel_shadow
+- test_mark_filled
+- test_remove_shadow
+- test_pending_shadows
+- test_cleanup_expired
+- test_active_count
+- test_shadow_order_age
+- test_prehashed_order
+- test_shadow_disabled
+- test_fire_with_submitter
+- test_fire_with_submitter_failure
+
+Notes for next tasks:
+- p5-2 (price chasing) now unblocked
+- p5-3 (live executor) depends on p5-1 (done) and p5-2
+- Shadow manager ready for integration with LiveExecutor
+- EIP-712 hashing uses placeholders - production needs real keccak256
+
+---

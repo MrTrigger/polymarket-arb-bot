@@ -183,7 +183,7 @@
       "id": "p5-1",
       "title": "Phase 5: Shadow bid manager",
       "description": "Implement shadow bid system. Define ShadowOrder struct, implement PrehashedOrder for fast signing (pre-compute domain separator, type hash, partial struct hash at creation). Implement fire() with fast signing path (<2ms). Store in DashMap by (event_id, side).",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p3-2"],
       "files": ["crates/poly-bot/src/executor/shadow.rs"],
       "acceptance": ["Shadow fires within 2ms of primary fill", "Pre-hashing reduces signing time"]

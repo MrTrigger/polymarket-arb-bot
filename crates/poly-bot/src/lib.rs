@@ -39,6 +39,10 @@ pub use executor::{
 pub use executor::backtest::{BacktestExecutor, BacktestExecutorConfig, BacktestPosition, BacktestStats};
 pub use executor::live::{LiveExecutor, LiveExecutorConfig};
 pub use executor::paper::{PaperExecutor, PaperExecutorConfig, PaperPosition};
+pub use executor::shadow::{
+    PrehashedOrder, ShadowError, ShadowFireResult, ShadowManager, ShadowOrder, ShadowStatus,
+    SharedShadowManager,
+};
 pub use state::{
     ActiveWindow, ControlFlags, GlobalState, InventoryPosition, InventoryState, LiveOrderBook,
     MetricsCounters, MetricsSnapshot, SharedMarketData, ShadowOrderState, WindowPhase,

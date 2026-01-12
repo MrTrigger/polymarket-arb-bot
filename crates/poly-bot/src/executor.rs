@@ -18,10 +18,16 @@
 //! - `LiveExecutor`: Real order submission (stubbed, requires wallet)
 //! - `PaperExecutor`: Simulated fills with configurable latency
 //! - `BacktestExecutor`: Simulates fills against historical order book
+//!
+//! ## Shadow Bidding
+//!
+//! The `shadow` module provides pre-hashed order support for fast secondary
+//! order submission (<2ms) when a primary order fills.
 
 pub mod backtest;
 pub mod live;
 pub mod paper;
+pub mod shadow;
 
 use std::fmt;
 
