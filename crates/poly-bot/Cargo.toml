@@ -16,6 +16,7 @@ serde_json = { workspace = true }
 
 # Financial math - NEVER use f64 for prices
 rust_decimal = { workspace = true }
+rust_decimal_macros = { workspace = true }
 
 # Time
 chrono = { workspace = true }
@@ -52,4 +53,3 @@ sha3 = { workspace = true }
 hex = { workspace = true }
 
 [dev-dependencies]
-rust_decimal_macros = "1.36"

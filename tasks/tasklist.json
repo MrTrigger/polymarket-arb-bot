@@ -318,7 +318,7 @@
       "id": "p8-4",
       "title": "Phase 8: Backtest mode",
       "description": "Implement backtesting. Load data from ClickHouse for date range, wire ReplayDataSource + BacktestExecutor, speed control (1x, 100x, max), generate P&L report, support parameter sweeps.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p3-4", "p3-5", "p4-4"],
       "files": ["crates/poly-bot/src/mode/backtest.rs"],
       "acceptance": ["Runs against historical data", "P&L report generated", "Parameter sweeps work"]

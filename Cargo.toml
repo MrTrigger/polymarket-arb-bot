@@ -23,6 +23,7 @@ serde_json = "1.0"
 
 # Financial math - NEVER use f64 for prices
 rust_decimal = { version = "1.36", features = ["serde", "serde-with-str"] }
+rust_decimal_macros = "1.36"
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }
