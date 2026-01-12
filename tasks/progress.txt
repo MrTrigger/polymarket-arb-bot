@@ -1,0 +1,42 @@
+# Progress Log
+
+## Project Config
+backend: rust
+frontend: none
+infra: kubernetes
+
+## Project Overview
+Polymarket 15-Minute Arbitrage Bot - HFT-optimized trading bot for crypto binary options arbitrage.
+
+### Key Architecture Decisions
+- Lock-free hot path using DashMap and atomics
+- Zero-copy WebSocket parsing where possible
+- Pre-hashed EIP-712 signing for shadow bids (<2ms)
+- Fire-and-forget observability (<10ns overhead)
+- Separate binaries: poly-collect (data), poly-import (historical), poly-bot (trading)
+
+### External Dependencies
+- polymarket-client-sdk: Official Polymarket Rust client (auth, discovery, orders)
+- tokio-tungstenite: Custom WebSocket (minimal overhead for Binance)
+- dashmap: Lock-free concurrent hash maps
+- rust_decimal: Financial math (NEVER use f64 for prices)
+- clickhouse: Data storage and replay
+
+### Performance Targets
+- WS message to state: <10us
+- Arb detection: <1us
+- Circuit breaker check: <10ns
+- Shadow bid fire: <2ms
+- Observability overhead: <10ns
+
+## Codebase Patterns
+[Agents add patterns they discover here]
+
+## Priority
+1. Phase 1 (poly-collect) is PRIORITY - start collecting data ASAP
+2. Phases 2-9 can be developed in parallel while data collects
+3. Every day of delay = less backtest data
+
+## Completed Work
+
+---
