@@ -57,6 +57,7 @@
 //! let counterfactuals = analyzer.analyze_settlement(settlement).await;
 //! ```
 
+pub mod anomaly;
 pub mod capture;
 pub mod counterfactual;
 pub mod processor;
@@ -79,4 +80,9 @@ pub use processor::{
 pub use types::{
     ActionType, Counterfactual, DecisionContext, DecisionSnapshot, ObservabilityEvent,
     OutcomeType, SnapshotBuilder,
+};
+pub use anomaly::{
+    create_shared_detector, create_shared_detector_with_capture, Anomaly, AnomalyConfig,
+    AnomalyDetector, AnomalySeverity, AnomalyStats, AnomalyStatsSnapshot, AnomalyType,
+    SharedAnomalyDetector,
 };

@@ -121,3 +121,21 @@ CREATE TABLE IF NOT EXISTS counterfactuals (
 ORDER BY (event_id, settlement_time)
 PARTITION BY toYYYYMMDD(settlement_time)
 TTL settlement_time + INTERVAL 180 DAY;
+
+-- Anomaly detection (observability)
+CREATE TABLE IF NOT EXISTS anomalies (
+    anomaly_id UInt64,
+    anomaly_type LowCardinality(String),
+    severity LowCardinality(String),
+    timestamp DateTime64(3, 'UTC'),
+    event_id Nullable(String),
+    token_id Nullable(String),
+    description String,
+    current_value Decimal(18, 8),
+    expected_value Decimal(18, 8),
+    deviation Decimal(18, 8),
+    context String
+) ENGINE = MergeTree()
+ORDER BY (anomaly_type, timestamp)
+PARTITION BY toYYYYMMDD(timestamp)
+TTL timestamp + INTERVAL 90 DAY;

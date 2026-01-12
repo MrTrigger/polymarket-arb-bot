@@ -282,7 +282,7 @@
       "id": "p7-5",
       "title": "Phase 7: Anomaly detection",
       "description": "Implement anomaly detection. Define AnomalyType enum, detect extreme margins/flash crashes/latency spikes, store anomalies with full context, optional alerting (log, webhook).",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p7-3"],
       "files": ["crates/poly-bot/src/observability/anomaly.rs"],
       "acceptance": ["Detects anomalies", "Stores with context", "Alerting works"]

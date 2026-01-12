@@ -80,3 +80,8 @@ pub use observability::{
     create_shared_analyzer, CounterfactualAnalyzer, CounterfactualConfig, CounterfactualStats,
     CounterfactualStatsSnapshot, PendingDecision, Settlement, SharedCounterfactualAnalyzer,
 };
+pub use observability::{
+    create_shared_detector, create_shared_detector_with_capture, Anomaly, AnomalyConfig,
+    AnomalyDetector, AnomalySeverity, AnomalyStats, AnomalyStatsSnapshot, AnomalyType,
+    SharedAnomalyDetector,
+};

@@ -1939,3 +1939,123 @@ Notes for next tasks:
 - Settlement events from market window close trigger analyze_settlement()
 
 ---
+
+### [2026-01-12] Task p7-5: Anomaly detection
+Files created:
+- crates/poly-bot/src/observability/anomaly.rs
+
+Files modified:
+- crates/poly-bot/src/observability/mod.rs (added anomaly module export)
+- crates/poly-bot/src/lib.rs (added anomaly types export)
+- crates/poly-common/src/schema.sql (added anomalies table)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-bot: PASSED (398 tests, 22 new)
+
+AnomalyType enum (12 types):
+- ExtremeMargin: Arb margin >10% (suspicious, may indicate stale data)
+- FlashCrash: Sudden price drop >5% in flash window
+- FlashSpike: Sudden price rise >5% in flash window
+- LatencySpike: Execution latency exceeds threshold
+- WideSpread: Bid-ask spread exceeds normal range
+- TightSpread: Spread abnormally tight (may indicate wash trading)
+- VolumeSpike: Sudden activity increase (>10x average)
+- VolumeDrought: Unusually low activity (<10% of average)
+- BookImbalance: One side of book has >80% of depth
+- StaleData: No updates for extended period (>30s)
+- CircuitBreakerTrip: Circuit breaker tripped event
+- ConnectionIssue: Connection error detected
+
+AnomalySeverity enum:
+- Info (0): Logged, no action needed
+- Low (1): Worth noting but not urgent
+- Medium (2): Should be investigated
+- High (3): Requires attention
+- Critical (4): Immediate action needed
+- score() method returns 0-100 for observability
+- should_alert() returns true for High/Critical
+
+AnomalyDetector features:
+- check_extreme_margin(): Detects suspicious arb margins
+- check_flash_price(): Async, tracks price changes per token
+- check_latency_spike(): Detects execution delays
+- check_spread(): Async, tracks rolling spread stats
+- check_volume(): Async, compares to rolling average
+- check_book_imbalance(): Detects one-sided order books
+- check_stale_data(): Async, tracks last update time
+- record_circuit_breaker_trip(): Records CB events
+- record_connection_issue(): Records connection errors
+- cleanup_stale_states(): Removes old token state
+
+RollingStats for efficient windowed statistics:
+- O(1) push, O(1) average calculation
+- Configurable window size
+- is_ready() when at least half full
+
+AnomalyConfig:
+- All thresholds configurable
+- Enable/disable flags for detection and alerting
+- alert_webhook_url for webhook alerts
+- alert_cooldown_secs to prevent alert spam
+- from_observability_config() constructor
+
+Alert system:
+- Logging at appropriate level (info/warn/error based on severity)
+- Fire-and-forget to observability channel
+- Optional webhook alerts for High/Critical
+- Cooldown between alerts of same type
+
+AnomalyStats:
+- detected: Total anomalies detected
+- by_type: Count per anomaly type (12 counters)
+- alerts_sent, alert_failures: Alert tracking
+- Atomic counters for thread safety
+
+ClickHouse storage:
+- Added anomalies table with full context fields
+- anomaly_id, anomaly_type, severity, timestamp
+- event_id, token_id (nullable)
+- description, current_value, expected_value, deviation
+- context field for additional JSON data
+
+Tests added (22 new):
+- test_anomaly_type_str
+- test_anomaly_severity
+- test_anomaly_severity_conversion
+- test_anomaly_creation
+- test_anomaly_to_observability_event
+- test_anomaly_config_default
+- test_anomaly_config_disabled
+- test_rolling_stats
+- test_detector_check_extreme_margin
+- test_detector_check_flash_price
+- test_detector_check_latency_spike
+- test_detector_check_spread
+- test_detector_check_volume
+- test_detector_check_book_imbalance
+- test_detector_cleanup_stale_states
+- test_detector_record_circuit_breaker
+- test_detector_record_connection_issue
+- test_detector_disabled
+- test_create_shared_detector
+- test_anomaly_stats
+- test_anomaly_stats_reset
+- test_anomaly_serialization
+
+Key decisions:
+- Volume comparison uses average BEFORE adding new value (to detect spikes)
+- Flash detection saves previous price before updating (for crash/spike direction)
+- RollingStats uses fixed-size circular buffer with O(1) operations
+- Webhook alerts use fire-and-forget tokio::spawn
+- Alert cooldown prevents spam of same anomaly type
+- All prices use rust_decimal::Decimal (NEVER f64)
+- serde rename_all for consistent JSON serialization
+
+Notes for next tasks:
+- Phase 7 (Observability) now COMPLETE!
+- p8-1 (live mode), p8-2 (paper mode), p8-3 (shadow mode), p8-4 (backtest) ready
+- AnomalyDetector can integrate with strategy loop for real-time detection
+- Webhook alerts ready for Slack/Discord integration
+
+---
