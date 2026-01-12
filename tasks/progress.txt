@@ -2336,3 +2336,26 @@ Notes for Phase 8 completion:
 - Ready for Phase 9 (testing and validation)
 
 ---
+
+---
+
+### [2026-01-12] Task p9-1: Phase 9: Unit tests
+Files reviewed:
+- crates/poly-bot/src/strategy/arb.rs (23 tests)
+- crates/poly-bot/src/types.rs (16 tests)
+- crates/poly-bot/src/risk/circuit_breaker.rs (23 tests)
+- crates/poly-bot/src/strategy/toxic.rs (21 tests)
+- crates/poly-bot/src/config.rs (14 tests)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-bot: PASSED (439 unit tests)
+
+Test coverage summary:
+- Arb detection: threshold selection, phase detection, confidence scoring, rejection reasons
+- Inventory state: state transitions (Balanced/Skewed/Exposed/Crisis), size multipliers
+- Circuit breaker: trip after failures, auto-reset, half-open state, concurrent access
+- Toxic flow: large order detection, sudden appearance, BBO shift, severity calculation
+- Config: TOML parsing, env overrides, CLI overrides, validation
+
+All core logic already had comprehensive test coverage from previous phases.

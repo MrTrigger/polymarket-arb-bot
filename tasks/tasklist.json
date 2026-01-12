@@ -336,7 +336,7 @@
       "id": "p9-1",
       "title": "Phase 9: Unit tests",
       "description": "Add unit tests for core logic: arb detection, inventory state transitions, circuit breaker, toxic flow detection, config loading.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p4-1", "p4-2", "p6-2", "p3-1"],
       "files": ["crates/poly-bot/src/strategy/arb.rs", "crates/poly-bot/src/types.rs", "crates/poly-bot/src/risk/circuit_breaker.rs"],
       "acceptance": ["cargo test passes", "Core logic covered"]
