@@ -382,3 +382,50 @@ Notes for next task (p2-2):
 - insert_trade_history already implemented in ClickHouse client
 
 ---
+
+### [2026-01-12] Task p2-2: Trade history importer
+Files created:
+- crates/poly-import/src/trades.rs
+
+Files modified:
+- crates/poly-import/src/lib.rs (added trades module export)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test: PASSED (43 tests total, 8 new)
+
+TradeImporter features:
+- Fetches from https://clob.polymarket.com/data/trades endpoint
+- Supports L2 authentication headers (POLY_ADDRESS, POLY_SIGNATURE, POLY_TIMESTAMP, POLY_NONCE)
+- Filters by market, start/end timestamps, maker_address, taker_address
+- Handles pagination via cursor (next_cursor in response)
+- Handles both array and object response formats
+- Parses timestamps (Unix seconds or ISO 8601 format)
+- Converts string prices/sizes to Decimal
+- Rate limiting with configurable requests_per_second (default 5.0)
+- Automatic retry with exponential backoff (3 retries, 1s initial)
+- Handles 429 Too Many Requests with Retry-After header
+- Batch inserts to ClickHouse (configurable batch_size, default 1000)
+- Import stats tracking (markets processed/failed, trades imported)
+- Multi-market import with progress logging
+
+API endpoint details:
+- GET /data/trades?market={condition_id}&after={unix}&before={unix}
+- Requires L2 Header authentication for most queries
+- Returns: { trades: [{ id, market, asset_id, side, size, price, match_time, status }] }
+- Pagination via next_cursor field
+
+Key decisions:
+- /data/trades requires authentication (unlike /prices-history which is public)
+- L2Auth struct holds the authentication headers
+- TradeImporter can work without auth (returns empty) or with auth
+- Timestamp parsing handles both Unix seconds and ISO 8601 strings
+- Response parsing handles both raw array and object with trades field
+- market and status fields in ApiTrade marked #[allow(dead_code)] (part of API but not stored)
+
+Notes for next task (p2-3):
+- Need to wire up CLI with prices and trades subcommands
+- Auth credentials should be passed via CLI or env vars
+- Consider adding token_id param (in addition to market) for trades
+
+---

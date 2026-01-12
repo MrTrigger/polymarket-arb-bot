@@ -84,7 +84,7 @@
       "id": "p2-2",
       "title": "Phase 2: Trade history importer",
       "description": "Implement trade history API client. Download trades for date range, store to ClickHouse trade_history table, handle pagination.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p1-2"],
       "files": ["crates/poly-import/src/trades.rs"],
       "acceptance": ["Can download trade history", "Stores to ClickHouse"]

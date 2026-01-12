@@ -4,3 +4,4 @@
 //! into ClickHouse for backtesting.
 
 pub mod prices;
+pub mod trades;
