@@ -429,3 +429,50 @@ Notes for next task (p2-3):
 - Consider adding token_id param (in addition to market) for trades
 
 ---
+
+### [2026-01-12] Task p2-3: Import CLI
+Files modified:
+- crates/poly-import/src/main.rs (complete rewrite from stub)
+- Cargo.toml (added "env" feature to clap dependency)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-import: PASSED (20 tests, 8 new)
+
+CLI features implemented:
+- `poly-import prices --start YYYY-MM-DD --end YYYY-MM-DD --tokens TOKEN1,TOKEN2`
+- `poly-import trades --start YYYY-MM-DD --end YYYY-MM-DD --markets MARKET1,MARKET2`
+- Global options: --clickhouse-url, --clickhouse-database, --log-level
+- Environment variable support via clap env feature
+- L2 authentication for trades via --poly-address, --poly-signature, --poly-timestamp, --poly-nonce
+- Configurable rate-limit and batch-size per subcommand
+- Optional --fidelity for prices (resolution in minutes)
+
+CLI subcommand options:
+- prices: -s/--start, -e/--end, -t/--tokens, -f/--fidelity, --rate-limit, --batch-size
+- trades: -s/--start, -e/--end, -m/--markets, --rate-limit, --batch-size, --poly-* auth options
+
+Error handling:
+- Validates date format (YYYY-MM-DD)
+- Validates token/market lists not empty
+- Tests ClickHouse connection before import
+- Creates tables if they don't exist
+- Progress logging via tracing
+
+Key decisions:
+- Using clap derive with "env" feature for environment variable support
+- Date parsing uses chrono::NaiveDate then converts to UTC DateTime
+- Start date = 00:00:00 UTC, End date = 23:59:59 UTC for full day coverage
+- Auth credentials optional but warned if missing for trades
+- Returns ExitCode::FAILURE on any error
+
+Notes for Phase 2 completion:
+- Phase 2 (poly-import) is now COMPLETE!
+- Ready to import historical price and trade data
+- Example usage:
+  ```
+  poly-import prices -s 2024-01-01 -e 2024-01-31 -t TOKEN_ID_1,TOKEN_ID_2
+  poly-import trades -s 2024-01-01 -e 2024-01-31 -m MARKET_ID_1
+  ```
+
+---

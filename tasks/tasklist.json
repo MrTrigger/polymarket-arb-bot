@@ -93,7 +93,7 @@
       "id": "p2-3",
       "title": "Phase 2: Import CLI",
       "description": "Create poly-import main binary. Parse CLI for 'prices' and 'trades' subcommands with --start/--end args, progress reporting, error handling and resume capability.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p2-1", "p2-2"],
       "files": ["crates/poly-import/src/main.rs"],
       "acceptance": ["poly-import prices --start X --end Y works", "poly-import trades --start X --end Y works"]
