@@ -165,7 +165,7 @@
       "id": "p4-3",
       "title": "Phase 4: Position sizing",
       "description": "Implement position sizing. Basic fixed sizing for MVP, respect max_position_per_market, respect max_total_exposure, account for inventory imbalance.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p3-3", "p4-1"],
       "files": ["crates/poly-bot/src/strategy/sizing.rs"],
       "acceptance": ["Sizes respect limits", "Accounts for imbalance"]

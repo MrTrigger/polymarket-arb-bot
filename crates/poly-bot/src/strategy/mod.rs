@@ -13,9 +13,11 @@
 //! - No allocations in critical path
 
 pub mod arb;
+pub mod sizing;
 pub mod toxic;
 
 pub use arb::{ArbDetector, ArbOpportunity, ArbRejection, ArbThresholds};
+pub use sizing::{PositionSizer, SizingAdjustments, SizingConfig, SizingLimit, SizingResult};
 pub use toxic::{
     ToxicFlowConfig, ToxicFlowDetector, ToxicFlowWarning, ToxicIndicators, ToxicSeverity,
 };

@@ -908,3 +908,57 @@ Notes for next task (p4-3):
 - Consider blocking trades entirely at High/Critical severity
 
 ---
+
+### [2026-01-12] Task p4-3: Position sizing
+Files created:
+- crates/poly-bot/src/strategy/sizing.rs
+
+Files modified:
+- crates/poly-bot/src/strategy/mod.rs (added sizing module export)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-bot: PASSED (156 tests, 19 new)
+
+PositionSizer features:
+- SizingConfig with configurable limits (base_order_size, max_position_per_market, max_total_exposure, min_order_size, max_liquidity_take)
+- calculate_size() main calculation method with 7-step process:
+  1. Start with base_order_size
+  2. Limit by available liquidity
+  3. Limit by max_liquidity_take (50% of book by default)
+  4. Limit by max_position_per_market (minus existing position)
+  5. Limit by max_total_exposure (minus current total exposure)
+  6. Apply inventory imbalance multiplier (via InventoryState::size_multiplier())
+  7. Apply toxic flow severity multiplier (via ToxicSeverity::size_multiplier())
+- can_trade() fast check for hard limits
+- max_possible_size() for limit-only calculation
+- from_trading_config() constructor from TradingConfig
+
+SizingResult features:
+- size: calculated position size in shares
+- is_valid: whether trade should execute
+- expected_cost: size * combined_cost
+- expected_profit: size * margin
+- limit_reason: which limit was binding
+- adjustments: multipliers applied (inventory, toxic, combined)
+
+SizingLimit enum:
+- BaseSize, PositionLimit, ExposureLimit, LiquidityLimit
+- LiquidityTakeLimit, ImbalanceAdjustment, ToxicFlowAdjustment
+- BelowMinimum, NoOpportunity
+
+Key decisions:
+- All prices/sizes use rust_decimal::Decimal (NEVER f64)
+- max_liquidity_take prevents taking >50% of book (avoids slippage)
+- Multipliers compound: combined = inventory_mult * toxic_mult
+- Critical toxic severity (0x multiplier) effectively blocks trade
+- SizingResult::invalid() constructor for rejected trades
+- Detailed tracking of which limit was binding
+
+Notes for next task (p4-4):
+- Strategy loop now unblocked (all dependencies: p3-4, p4-1, p4-2, p4-3 complete)
+- Need to wire together: DataSource -> arb detection -> toxic check -> sizing -> Executor
+- Use GlobalState.can_trade() for single atomic check on hot path
+- Fire-and-forget to observability channel via try_send()
+
+---
