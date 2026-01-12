@@ -86,4 +86,4 @@ pub use observability::{
     AnomalyDetector, AnomalySeverity, AnomalyStats, AnomalyStatsSnapshot, AnomalyType,
     SharedAnomalyDetector,
 };
-pub use mode::{LiveMode, LiveModeConfig};
+pub use mode::{LiveMode, LiveModeConfig, PaperMode, PaperModeConfig};

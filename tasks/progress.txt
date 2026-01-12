@@ -2125,3 +2125,68 @@ Notes for next tasks:
 - Live mode ready for deployment with proper credentials
 
 ---
+
+### [2026-01-12] Task p8-2: Paper mode
+Files created:
+- crates/poly-bot/src/mode/paper.rs
+
+Files modified:
+- crates/poly-bot/src/mode/mod.rs (added paper module export)
+- crates/poly-bot/src/lib.rs (added PaperMode, PaperModeConfig exports)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-bot: PASSED (411 tests, 7 new)
+
+PaperMode features:
+- Wires LiveDataSource (real WebSocket data) + PaperExecutor (simulated fills)
+- Real-time market data from Binance and Polymarket WebSockets
+- Configurable fill latency simulation for realistic timing
+- Virtual balance and position tracking
+- Full observability pipeline:
+  - ObservabilityCapture for fire-and-forget decision capture
+  - ObservabilityProcessor for async enrichment and ClickHouse storage
+  - CounterfactualAnalyzer for post-settlement what-if analysis
+  - AnomalyDetector for real-time anomaly detection
+- Decision forwarding: TradeDecision -> SnapshotBuilder -> DecisionSnapshot -> capture
+- Graceful shutdown with task cleanup and final metrics logging
+- request_shutdown() method for external shutdown triggers
+
+PaperModeConfig options:
+- data_source: LiveDataSourceConfig for WebSocket connections
+- executor: PaperExecutorConfig for simulated fills
+- strategy: StrategyConfig for arb detection/sizing
+- observability: ObservabilityConfig for capture settings
+- initial_balance: Starting virtual USDC balance (default $10,000)
+- shutdown_timeout_secs: Max wait for cleanup (default 30s)
+- from_bot_config() constructor from BotConfig
+
+PaperExecutorConfig integration:
+- Uses paper_fill_latency_ms from ExecutionConfig
+- Enforces max_position_per_market from TradingConfig
+- Fee rate set to 0 (Polymarket has 0% maker fees)
+- Balance enforcement enabled
+
+Tests added (7):
+- test_paper_mode_config_default
+- test_paper_mode_config_from_bot_config
+- test_paper_mode_requires_paper_trading_mode
+- test_paper_mode_accepts_paper_mode
+- test_paper_mode_shutdown_signal
+- test_paper_mode_state_access
+- test_paper_mode_executor_config
+
+Key decisions:
+- Structure mirrors LiveMode for consistency
+- Does not require wallet credentials (only uses simulated execution)
+- Uses same observability pipeline as live mode for comparable metrics
+- Default $10,000 virtual balance (higher than live for strategy testing)
+- Logs "Paper trading" in messages to distinguish from live mode
+
+Notes for next tasks:
+- p8-3 (shadow mode) now ready - similar structure with NoOpExecutor
+- p8-4 (backtest mode) now ready - uses ReplayDataSource + BacktestExecutor
+- Paper mode validates strategy with real market conditions safely
+- Can benchmark expected P&L against real opportunities
+
+---

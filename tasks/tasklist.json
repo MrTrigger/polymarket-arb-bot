@@ -300,7 +300,7 @@
       "id": "p8-2",
       "title": "Phase 8: Paper mode",
       "description": "Implement paper trading mode. Wire LiveDataSource + PaperExecutor, simulated fills with configurable latency, full observability enabled.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p4-4", "p3-5", "p7-3"],
       "files": ["crates/poly-bot/src/mode/paper.rs"],
       "acceptance": ["Validates strategy with real prices", "Simulates fills realistically"]
