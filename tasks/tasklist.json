@@ -39,7 +39,7 @@
       "id": "p1-4",
       "title": "Phase 1: Binance WebSocket capture",
       "description": "Implement minimal custom WebSocket client using tokio-tungstenite. Connect to wss://stream.binance.com:9443/ws, subscribe to btcusdt@trade, ethusdt@trade, solusdt@trade. Parse trades, buffer writes (100-1000 records), flush to spot_prices table, implement reconnection with backoff.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p1-2"],
       "files": ["crates/poly-collect/src/binance.rs"],
       "acceptance": ["Connects to Binance WS", "Captures BTC/ETH/SOL trades", "Writes to ClickHouse", "Reconnects on disconnect"]

@@ -145,3 +145,40 @@ Notes for next task (p1-4):
 - Buffer trades and batch write to spot_prices table
 
 ---
+
+### [2026-01-12] Task p1-4: Binance WebSocket capture
+Files created:
+- crates/poly-collect/src/binance.rs
+
+Files modified:
+- crates/poly-collect/src/lib.rs (added binance module export)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-collect: PASSED (9 tests, 5 new)
+
+BinanceCapture features:
+- Connects to wss://stream.binance.com:9443/ws
+- Subscribes to btcusdt@trade, ethusdt@trade, solusdt@trade, xrpusdt@trade
+- Parses trade messages to SpotPrice (asset, price, quantity, timestamp)
+- Buffers writes (default 500 records)
+- Flushes to ClickHouse on buffer full or periodic interval (5s)
+- Automatic reconnection with exponential backoff (1s initial, 60s max)
+- Graceful shutdown via broadcast channel
+- Handles ping/pong for connection keepalive
+- Stats logging (trades received/written/errors)
+
+Key decisions:
+- Using combined stream subscription (single WS connection for all symbols)
+- Decimal parsing from Binance string prices for exact math
+- tokio::select! for concurrent message handling, flush timer, and shutdown
+- Buffer cleared on successful flush, kept on error for retry
+- Connection timeout of 10 seconds
+
+Notes for next task (p1-5):
+- Polymarket CLOB WebSocket at wss://clob.polymarket.com/ws
+- Need to subscribe to token IDs from market discovery
+- Handle book snapshots and deltas separately
+- Periodic snapshot capture (100ms) for backtest fidelity
+
+---

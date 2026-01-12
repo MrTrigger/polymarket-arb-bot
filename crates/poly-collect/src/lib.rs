@@ -5,4 +5,5 @@
 //! - Binance WebSocket capture for spot prices
 //! - Polymarket CLOB WebSocket capture for orderbooks
 
+pub mod binance;
 pub mod discovery;
