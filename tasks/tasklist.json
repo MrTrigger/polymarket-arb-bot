@@ -111,7 +111,7 @@
       "id": "p3-2",
       "title": "Phase 3: Shared state (lock-free)",
       "description": "Implement GlobalState with DashMaps and atomics. Define SharedMarketData (prices, books, inventory, shadows), ControlFlags (trading_enabled, circuit_breaker), MetricsCounters. Implement #[inline(always)] can_trade() with two atomic loads.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p3-1"],
       "files": ["crates/poly-bot/src/state.rs"],
       "acceptance": ["Lock-free reads on hot path", "can_trade() is ~10ns", "Unit tests pass for concurrent access"]

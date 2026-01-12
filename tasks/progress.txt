@@ -522,3 +522,66 @@ Notes for next tasks:
 - Types will define OrderBook, MarketState, Inventory with Decimal
 
 ---
+
+### [2026-01-12] Task p3-2: Shared state (lock-free)
+Files created:
+- crates/poly-bot/src/state.rs
+
+Files modified:
+- crates/poly-bot/src/lib.rs (added state module export)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-bot: PASSED (28 tests, 15 new)
+
+GlobalState features:
+- Lock-free concurrent access using DashMap and atomics
+- can_trade() uses two atomic loads with Acquire ordering (~10ns)
+- enable_trading(), disable_trading() for global control
+- trip_circuit_breaker(), reset_circuit_breaker() for fail-safe
+- record_success(), record_failure() for consecutive failure tracking
+- circuit_breaker_cooldown_elapsed() for auto-reset
+
+SharedMarketData:
+- spot_prices: DashMap<String, (Decimal, i64)> for asset prices
+- order_books: DashMap<String, LiveOrderBook> for per-token books
+- inventory: DashMap<String, InventoryPosition> for per-event positions
+- shadow_orders: DashMap<(String, Outcome), ShadowOrderState> for pending shadows
+- active_windows: DashMap<String, ActiveWindow> for tracked windows
+- Helper methods: update_spot_price, get_bbo, total_exposure
+
+ControlFlags:
+- trading_enabled: AtomicBool for global enable/disable
+- circuit_breaker_tripped: AtomicBool for fail-safe
+- consecutive_failures: AtomicU32 for failure counting
+- circuit_breaker_trip_time: AtomicI64 for cooldown tracking
+- shutdown_requested: AtomicBool for graceful shutdown
+
+MetricsCounters:
+- events_processed, opportunities_detected, trades_executed, trades_failed, trades_skipped
+- pnl_cents, volume_cents (using i64/u64 to avoid Decimal atomics)
+- shadow_orders_fired, shadow_orders_filled
+- snapshot() returns MetricsSnapshot with all values
+
+Types defined:
+- LiveOrderBook: best bid/ask with spread_bps() and is_valid()
+- InventoryPosition: yes/no shares, cost basis, imbalance_ratio(), state()
+- InventoryState: Balanced, Skewed, Exposed, Crisis
+- ShadowOrderState: pending shadow with pre_hash for fast signing
+- ActiveWindow: market window with seconds_remaining(), phase()
+- WindowPhase: Early, Mid, Late for threshold selection
+
+Key decisions:
+- Ordering::Acquire for reads, Ordering::Release for writes on hot path
+- Relaxed ordering for metrics (exact counts not critical)
+- P&L stored as cents (i64) to avoid Decimal atomics, converted on read
+- DashMap provides lock-free reads, fine-grained locking on writes
+- Concurrent access test verifies 10 threads x 100 iterations
+
+Notes for next task (p3-3):
+- InventoryPosition and InventoryState already defined in state.rs
+- p3-3 needs OrderBook with bid/ask levels (not just BBO)
+- MarketState with derived fields (combined_cost, arb_margin)
+- Consider whether types.rs needs separate from state.rs types
+
+---

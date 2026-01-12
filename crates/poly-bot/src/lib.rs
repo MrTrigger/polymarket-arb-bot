@@ -17,5 +17,10 @@
 //! - `types`: Order book, market state, and inventory types
 
 pub mod config;
+pub mod state;
 
 pub use config::{BotConfig, ObservabilityConfig};
+pub use state::{
+    ActiveWindow, ControlFlags, GlobalState, InventoryPosition, InventoryState, LiveOrderBook,
+    MetricsCounters, MetricsSnapshot, SharedMarketData, ShadowOrderState, WindowPhase,
+};
