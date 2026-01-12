@@ -18,9 +18,34 @@
 //! - Hot path overhead: <10ns (single try_send with primitives)
 //! - No heap allocations in snapshot creation
 //! - Drops on channel backpressure rather than blocking
+//!
+//! ## Usage
+//!
+//! ```ignore
+//! use poly_bot::observability::{ObservabilityCapture, CaptureConfig, DecisionSnapshot};
+//!
+//! // Create capture from config
+//! let (capture, receiver) = ObservabilityCapture::from_config(CaptureConfig::default());
+//!
+//! // On hot path - ultra-fast, non-blocking
+//! capture.try_capture(snapshot);
+//!
+//! // Background processor receives events
+//! if let Some(mut rx) = receiver {
+//!     while let Some(event) = rx.recv().await {
+//!         // Process event...
+//!     }
+//! }
+//! ```
 
+pub mod capture;
 pub mod types;
 
+pub use capture::{
+    create_capture_channel, create_shared_capture, CaptureConfig, CaptureReceiver, CaptureSender,
+    CaptureStats, CaptureStatsSnapshot, ObservabilityCapture, SharedCapture,
+    DEFAULT_CHANNEL_CAPACITY,
+};
 pub use types::{
     ActionType, Counterfactual, DecisionContext, DecisionSnapshot, ObservabilityEvent,
     OutcomeType, SnapshotBuilder,

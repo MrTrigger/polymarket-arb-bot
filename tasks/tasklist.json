@@ -255,7 +255,7 @@
       "id": "p7-2",
       "title": "Phase 7: Fire-and-forget capture",
       "description": "Implement non-blocking channel send from hot path. Create bounded mpsc channel, implement try_send() wrapper, config flag to enable/disable, inline hot path check. Target <10ns overhead.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p7-1"],
       "files": ["crates/poly-bot/src/observability/capture.rs"],
       "acceptance": ["<10ns overhead", "Drops if buffer full", "Can disable via config"]

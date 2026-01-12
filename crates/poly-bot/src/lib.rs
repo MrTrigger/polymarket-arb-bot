@@ -66,3 +66,8 @@ pub use observability::{
     ActionType, Counterfactual, DecisionContext, DecisionSnapshot, ObservabilityEvent,
     OutcomeType, SnapshotBuilder,
 };
+pub use observability::{
+    create_capture_channel, create_shared_capture, CaptureConfig, CaptureReceiver, CaptureSender,
+    CaptureStats, CaptureStatsSnapshot, ObservabilityCapture, SharedCapture,
+    DEFAULT_CHANNEL_CAPACITY,
+};

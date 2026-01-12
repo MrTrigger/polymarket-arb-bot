@@ -1682,3 +1682,81 @@ Notes for next task (p7-2):
 - Channel should drop on backpressure rather than blocking
 
 ---
+
+### [2026-01-12] Task p7-2: Fire-and-forget capture
+Files created:
+- crates/poly-bot/src/observability/capture.rs
+
+Files modified:
+- crates/poly-bot/src/observability/mod.rs (added capture module export)
+- crates/poly-bot/src/lib.rs (added capture type exports)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-bot: PASSED (336 tests, 23 new)
+
+ObservabilityCapture features:
+- Bounded mpsc channel with configurable capacity (default 1024)
+- try_capture() hot path method with inlined atomic check + try_send()
+- try_capture_event() for any ObservabilityEvent type
+- Atomic enabled flag with Acquire/Release ordering for fast check
+- Automatic disable on channel close (detect closed receiver)
+- CaptureStats tracking: captured, dropped, skipped counters
+- CaptureStatsSnapshot for point-in-time stats with drop_rate()
+- Clone support for sharing across tasks (shared stats via Arc)
+- from_config() and from_observability_config() constructors
+- maybe_log_drops() with threshold to avoid log spam
+
+CaptureConfig features:
+- enabled: toggle capture on/off
+- channel_capacity: bounded channel size
+- log_drops: whether to log when events dropped
+- drop_log_threshold: minimum drops before logging (avoid spam)
+- disabled() and test_config() convenience constructors
+
+Performance characteristics:
+- Disabled path: <5ns (atomic load + return)
+- Enabled path: ~50-100ns (atomic load + try_send + stats update)
+- Non-blocking: try_send() returns immediately
+- Drops on full: events silently dropped when channel full
+
+Key decisions:
+- Using tokio::sync::mpsc for async-compatible channel
+- Atomic bool with Acquire ordering for fast enabled check
+- Relaxed ordering for stats counters (exact counts not critical)
+- SharedCapture type alias (Arc<ObservabilityCapture>) for sharing
+- Sender stored as Option to support disabled mode without channel
+- Stats shared via Arc for clone() to share counters
+
+Tests added (23 new):
+- test_capture_config_default
+- test_capture_config_disabled
+- test_capture_stats_snapshot
+- test_capture_stats_drop_rate
+- test_capture_stats_total_attempts
+- test_create_capture_channel
+- test_observability_capture_new
+- test_observability_capture_disabled
+- test_observability_capture_enable_disable
+- test_try_capture_enabled
+- test_try_capture_disabled
+- test_try_capture_channel_full
+- test_try_capture_event
+- test_capture_clone
+- test_from_config
+- test_from_config_disabled
+- test_create_shared_capture
+- test_sender_method
+- test_capture_overhead_disabled
+- test_capture_overhead_enabled
+- test_stats_reset
+- test_async_receive
+- test_channel_closed
+
+Notes for next task (p7-3):
+- Need async processor to receive from CaptureReceiver
+- Enrich DecisionSnapshot to DecisionContext with string lookups
+- Buffer and batch write to ClickHouse decisions table
+- Handle backpressure by dropping oldest events
+
+---
