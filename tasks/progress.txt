@@ -1760,3 +1760,84 @@ Notes for next task (p7-3):
 - Handle backpressure by dropping oldest events
 
 ---
+
+### [2026-01-12] Task p7-3: Async enrichment and storage
+Files created:
+- crates/poly-bot/src/observability/processor.rs
+
+Files modified:
+- crates/poly-bot/src/observability/mod.rs (added processor module export)
+- crates/poly-bot/src/lib.rs (added processor type exports)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-bot: PASSED (352 tests, 16 new)
+
+ObservabilityProcessor features:
+- Receives events from CaptureReceiver via bounded mpsc channel
+- Enriches DecisionSnapshot to DecisionRecord with string ID lookups
+- InMemoryIdLookup for mapping hash -> string (event_id, yes_token, no_token)
+- Configurable batch size and flush interval
+- VecDeque buffer with backpressure handling (drops oldest when full)
+- Batch writes to ClickHouse decisions table
+- Processes Decision, Counterfactual, and Anomaly events
+- Graceful shutdown with final flush
+- Statistics tracking (received, processed, written, dropped, errors)
+
+DecisionRecord struct (ClickHouse Row):
+- Matches decisions table schema exactly
+- All Decimal fields use rust_decimal::serde::str
+- from_snapshot() constructor with enrichment
+
+IdLookup trait:
+- lookup_event_id(), lookup_yes_token(), lookup_no_token(), lookup_spot_price()
+- InMemoryIdLookup implementation with async-friendly methods
+- register_market() for bulk registration with FNV-1a hashing
+
+ProcessorConfig:
+- batch_size (default 1000)
+- flush_interval (default 5s)
+- max_buffer_size (default 10000)
+- process_counterfactuals, process_anomalies flags
+- from_observability_config() constructor
+
+ProcessorStats with atomic counters:
+- received, processed, written, dropped
+- flushes, write_errors, enrichment_failures
+- snapshot() for point-in-time stats
+- drop_rate(), write_success_rate() helpers
+
+Key decisions:
+- FNV-1a hash function matches types.rs hash_string() exactly
+- Fallback to "unknown_{hash:016x}" for missing ID lookups
+- Counterfactuals stored as special DecisionRecord type
+- Anomalies stored with type in decision_type field
+- tokio::select! for concurrent recv, flush timer, shutdown
+- spawn_processor() helper for background task creation
+
+Tests added (16 new):
+- test_hash_string
+- test_decision_record_from_snapshot
+- test_decision_record_skip_action
+- test_in_memory_id_lookup
+- test_in_memory_id_lookup_event_count
+- test_processor_config_default
+- test_processor_stats_snapshot
+- test_processor_stats_drop_rate
+- test_processor_stats_write_success_rate
+- test_processor_stats_reset
+- test_processor_creation
+- test_processor_enrich_decision
+- test_processor_enrich_decision_unknown_event
+- test_processor_add_to_buffer_backpressure
+- test_processor_process_counterfactual
+- test_processor_process_anomaly
+
+Notes for next tasks:
+- p7-4 (counterfactual analysis) now unblocked
+- p7-5 (anomaly detection) now unblocked
+- p8-1 (live mode), p8-2 (paper mode), p8-3 (shadow mode) now unblocked
+- Processor integrates with capture system for full observability pipeline
+- InMemoryIdLookup should be populated from MarketDiscovery in live mode
+
+---

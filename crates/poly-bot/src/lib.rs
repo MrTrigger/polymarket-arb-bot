@@ -71,3 +71,8 @@ pub use observability::{
     CaptureStats, CaptureStatsSnapshot, ObservabilityCapture, SharedCapture,
     DEFAULT_CHANNEL_CAPACITY,
 };
+pub use observability::{
+    create_shared_processor, hash_string, spawn_processor, DecisionRecord, IdLookup,
+    InMemoryIdLookup, ObservabilityProcessor, ProcessorConfig, ProcessorStats,
+    ProcessorStatsSnapshot, SharedProcessor,
+};

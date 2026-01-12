@@ -22,7 +22,11 @@
 //! ## Usage
 //!
 //! ```ignore
-//! use poly_bot::observability::{ObservabilityCapture, CaptureConfig, DecisionSnapshot};
+//! use poly_bot::observability::{
+//!     ObservabilityCapture, CaptureConfig, DecisionSnapshot,
+//!     ObservabilityProcessor, ProcessorConfig, InMemoryIdLookup,
+//! };
+//! use std::sync::Arc;
 //!
 //! // Create capture from config
 //! let (capture, receiver) = ObservabilityCapture::from_config(CaptureConfig::default());
@@ -30,21 +34,27 @@
 //! // On hot path - ultra-fast, non-blocking
 //! capture.try_capture(snapshot);
 //!
-//! // Background processor receives events
-//! if let Some(mut rx) = receiver {
-//!     while let Some(event) = rx.recv().await {
-//!         // Process event...
-//!     }
+//! // Background processor handles enrichment and storage
+//! if let Some(rx) = receiver {
+//!     let id_lookup = Arc::new(InMemoryIdLookup::new());
+//!     let processor = ObservabilityProcessor::with_defaults(id_lookup);
+//!     processor.run(rx, clickhouse_client, shutdown_rx).await;
 //! }
 //! ```
 
 pub mod capture;
+pub mod processor;
 pub mod types;
 
 pub use capture::{
     create_capture_channel, create_shared_capture, CaptureConfig, CaptureReceiver, CaptureSender,
     CaptureStats, CaptureStatsSnapshot, ObservabilityCapture, SharedCapture,
     DEFAULT_CHANNEL_CAPACITY,
+};
+pub use processor::{
+    create_shared_processor, hash_string, spawn_processor, DecisionRecord, IdLookup,
+    InMemoryIdLookup, ObservabilityProcessor, ProcessorConfig, ProcessorStats,
+    ProcessorStatsSnapshot, SharedProcessor,
 };
 pub use types::{
     ActionType, Counterfactual, DecisionContext, DecisionSnapshot, ObservabilityEvent,

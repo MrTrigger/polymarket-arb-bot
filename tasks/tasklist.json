@@ -264,7 +264,7 @@
       "id": "p7-3",
       "title": "Phase 7: Async enrichment and storage",
       "description": "Implement background observability processor. Receive from channel, enrich snapshot with full context (strings), buffer records, batch write to ClickHouse, handle backpressure (drop oldest).",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p7-2", "p1-2"],
       "files": ["crates/poly-bot/src/observability/processor.rs"],
       "acceptance": ["Batches writes to ClickHouse", "Handles backpressure"]
