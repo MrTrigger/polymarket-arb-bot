@@ -30,7 +30,7 @@
       "id": "p1-3",
       "title": "Phase 1: Market discovery for collector",
       "description": "Implement market discovery using polymarket-client-sdk Gamma API. Query active crypto events, filter to 15-minute up/down markets, extract YES/NO token IDs, track window timing, store to market_windows table, re-discover every 5 minutes.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p1-2"],
       "files": ["crates/poly-collect/Cargo.toml", "crates/poly-collect/src/lib.rs", "crates/poly-collect/src/discovery.rs"],
       "acceptance": ["Discovers BTC/ETH/SOL 15-min markets", "Extracts token IDs correctly", "Stores metadata to ClickHouse"]

@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/poly-common",
+    "crates/poly-collect",
 ]
 
 [workspace.package]

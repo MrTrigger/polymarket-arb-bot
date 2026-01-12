@@ -106,3 +106,42 @@ Key decisions:
 - 90-day TTL on operational data, 180-day on decisions
 
 ---
+
+### [2026-01-12] Task p1-3: Market discovery for collector
+Files created:
+- crates/poly-collect/Cargo.toml
+- crates/poly-collect/src/lib.rs
+- crates/poly-collect/src/discovery.rs
+- crates/poly-collect/src/main.rs
+
+Files modified:
+- Cargo.toml (added poly-collect to workspace members)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-collect: PASSED (4 tests)
+
+MarketDiscovery features:
+- Fetches active events from Gamma API (https://gamma-api.polymarket.com)
+- Filters for 15-minute up/down markets by title keywords
+- Detects crypto asset (BTC, ETH, SOL, XRP) from title
+- Parses YES/NO token IDs from clobTokenIds JSON string
+- Parses strike price from title (e.g., "$100,000")
+- Stores discovered markets to ClickHouse market_windows table
+- Runs discovery loop with configurable interval (default 5 min)
+- Tracks known markets to avoid re-processing
+- Graceful shutdown via broadcast channel
+
+Key decisions:
+- Using reqwest for HTTP instead of polymarket-client-sdk (simpler for read-only Gamma API)
+- Gamma API returns clobTokenIds as JSON string, requires parsing
+- 15-minute markets detected by title keywords (may need adjustment)
+- Strike price parsing uses regex, defaults to Decimal::ZERO if not found
+- Discovery interval set to 300s (5 minutes) in main.rs
+
+Notes for next task (p1-4):
+- Need tokio-tungstenite for Binance WebSocket
+- Binance trade stream: wss://stream.binance.com:9443/ws/{symbol}@trade
+- Buffer trades and batch write to spot_prices table
+
+---
