@@ -4,6 +4,7 @@ members = [
     "crates/poly-common",
     "crates/poly-collect",
     "crates/poly-import",
+    "crates/poly-bot",
 ]
 
 [workspace.package]

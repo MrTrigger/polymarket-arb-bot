@@ -102,7 +102,7 @@
       "id": "p3-1",
       "title": "Phase 3: Bot configuration system",
       "description": "Define BotConfig struct with all trading parameters from spec section 15. Define ObservabilityConfig with enable/disable flags. Create config/bot.toml with defaults, implement loading with env var overrides, add validation.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p1-1"],
       "files": ["crates/poly-bot/Cargo.toml", "crates/poly-bot/src/lib.rs", "crates/poly-bot/src/config.rs", "config/bot.toml"],
       "acceptance": ["Loads config from TOML", "Env vars override secrets", "Validates required fields"]

@@ -1,0 +1,120 @@
+# Polymarket Arbitrage Bot Configuration
+# ========================================
+#
+# Sensitive values (wallet keys, API credentials) should be set via
+# environment variables, NOT in this file:
+#   POLY_PRIVATE_KEY    - Wallet private key for signing transactions
+#   POLY_API_KEY        - Polymarket API key
+#   POLY_API_SECRET     - Polymarket API secret
+#   POLY_API_PASSPHRASE - Polymarket API passphrase
+#   CLICKHOUSE_URL      - Override ClickHouse URL
+#   CLICKHOUSE_USER     - ClickHouse username
+#   CLICKHOUSE_PASSWORD - ClickHouse password
+#   ALERT_WEBHOOK_URL   - Webhook URL for alerts
+
+[general]
+# Trading mode: live, paper, shadow, backtest
+# - live: Real trading with real money
+# - paper: Real data, simulated execution
+# - shadow: Real data, log-only (no execution)
+# - backtest: Historical data replay
+mode = "shadow"
+
+# Assets to trade (15-minute up/down markets)
+assets = ["BTC", "ETH", "SOL"]
+
+# Log level: trace, debug, info, warn, error
+log_level = "info"
+
+[clickhouse]
+url = "http://localhost:8123"
+database = "default"
+max_rows = 10000
+max_bytes = 10485760  # 10MB
+period_secs = 5
+
+[trading]
+# Time-based minimum arbitrage margins (in percent)
+# Early phase (>5 min remaining): higher threshold for safety
+# Mid phase (2-5 min remaining): moderate threshold
+# Late phase (<2 min remaining): lower threshold, more aggressive
+min_margin_early_pct = 2.5
+min_margin_mid_pct = 1.5
+min_margin_late_pct = 0.5
+
+# Time boundaries (seconds remaining in window)
+early_threshold_secs = 300   # 5 minutes
+mid_threshold_secs = 120     # 2 minutes
+
+# Minimum time remaining to enter new trade (seconds)
+min_time_remaining_secs = 30
+
+# Position limits (in USDC)
+max_position_per_market = 1000.0
+max_total_exposure = 5000.0
+base_order_size = 50.0
+
+[risk]
+# Circuit breaker settings
+max_consecutive_failures = 3
+circuit_breaker_cooldown_secs = 300  # 5 minutes
+
+# Loss limits
+max_daily_loss = 500.0  # USDC
+
+# Inventory management
+max_imbalance_ratio = 0.7  # 0.0-1.0
+
+# Toxic flow protection (severity threshold 0-100)
+toxic_flow_threshold = 80
+
+# Emergency close threshold for leg risk (USDC)
+emergency_close_threshold = 200.0
+
+[shadow]
+# Shadow bid system (fire opposite leg immediately on primary fill)
+enabled = true
+price_offset_bps = 50      # 0.5% offset from primary
+max_wait_ms = 2000         # 2 second timeout
+
+[execution]
+# Price chasing (adjust limit price toward fill)
+chase_enabled = true
+chase_step_size = 0.001    # Price increment per iteration
+chase_check_interval_ms = 100
+max_chase_time_ms = 5000   # 5 second max chase
+
+# Paper trading simulation
+paper_fill_latency_ms = 50
+
+# General order settings
+order_timeout_ms = 10000   # 10 seconds
+
+[observability]
+# Decision capture to ClickHouse
+capture_decisions = true
+
+# Counterfactual analysis (what-if for skipped opportunities)
+capture_counterfactuals = true
+
+# Anomaly detection (extreme margins, flash crashes, latency spikes)
+detect_anomalies = true
+
+# Fire-and-forget channel settings
+channel_buffer_size = 10000
+batch_size = 1000
+flush_interval_secs = 5
+
+# Alert webhooks (URL set via ALERT_WEBHOOK_URL env var)
+alerts_enabled = false
+
+[backtest]
+# Backtest date range (YYYY-MM-DD format)
+# start_date = "2025-01-01"
+# end_date = "2025-01-31"
+
+# Playback speed (0 = max speed, 1.0 = real-time)
+speed = 0.0
+
+# Parameter sweep mode for optimization
+sweep_enabled = false

@@ -476,3 +476,49 @@ Notes for Phase 2 completion:
   ```
 
 ---
+
+### [2026-01-12] Task p3-1: Bot configuration system
+Files created:
+- crates/poly-bot/Cargo.toml
+- crates/poly-bot/src/lib.rs
+- crates/poly-bot/src/config.rs
+- config/bot.toml
+
+Files modified:
+- Cargo.toml (added poly-bot to workspace members)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-bot: PASSED (13 tests)
+
+BotConfig features:
+- TradingMode enum: Live, Paper, Shadow, Backtest
+- TradingConfig: time-based margin thresholds, position limits, order sizing
+- RiskConfig: circuit breaker, daily loss limit, imbalance ratio, toxic flow threshold
+- ShadowConfig: enable/disable, price offset, max wait time
+- ExecutionConfig: price chasing, paper fill latency, order timeout
+- ObservabilityConfig: decision capture, counterfactuals, anomaly detection, alerts
+- WalletConfig: credentials from env vars only (security)
+- BacktestConfig: date range, speed, parameter sweep
+
+Config loading:
+- from_file() loads TOML
+- from_toml_str() parses string
+- apply_env_overrides() reads POLY_*, CLICKHOUSE_*, ALERT_WEBHOOK_URL
+- apply_cli_overrides() for --mode, --assets, --clickhouse-url
+- validate() checks mode-specific requirements and config consistency
+
+Key decisions:
+- TOML uses f64/percentages for readability, converted to Decimal internally
+- Wallet credentials ONLY from env vars (never in config file)
+- Shadow mode is default (safest for testing)
+- Time-based margin thresholds: 2.5% early, 1.5% mid, 0.5% late
+- All financial values use rust_decimal::Decimal
+
+Notes for next tasks:
+- p3-2 (state) and p3-3 (types) now unblocked
+- Both can be implemented in parallel
+- State will use DashMap for lock-free concurrent access
+- Types will define OrderBook, MarketState, Inventory with Decimal
+
+---
