@@ -156,7 +156,7 @@
       "id": "p4-2",
       "title": "Phase 4: Toxic flow detection",
       "description": "Implement basic toxic flow detection. Track rolling average order size, detect orders >50x average, detect sudden appearance (<500ms). Return ToxicFlowWarning with severity.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p3-3"],
       "files": ["crates/poly-bot/src/strategy/toxic.rs"],
       "acceptance": ["Detects large sudden orders", "Returns severity levels"]

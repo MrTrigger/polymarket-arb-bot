@@ -842,3 +842,69 @@ Notes for next tasks:
 - Confidence scoring can be tuned based on backtest results
 
 ---
+
+### [2026-01-12] Task p4-2: Toxic flow detection
+Files created:
+- crates/poly-bot/src/strategy/toxic.rs
+
+Files modified:
+- crates/poly-bot/src/strategy/mod.rs (added toxic module export)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-bot: PASSED (136 tests, 19 new)
+
+ToxicFlowDetector features:
+- Rolling average order size tracking with configurable window (default 100)
+- Detects large orders (>50x average) via size_multiplier_threshold
+- Detects sudden appearance (<500ms since last update)
+- Detects BBO shift (>100bps by default)
+- Detects extreme size (>100x average = 2x threshold)
+- Multi-indicator severity calculation:
+  - Low: 1 indicator triggered
+  - Medium: 2 indicators or >75x order
+  - High: 3+ indicators or large+sudden
+  - Critical: extreme size (>100x)
+- Per-token state management with HashMap
+- Fast pre-filtering via would_be_large() without state update
+
+ToxicFlowConfig options:
+- size_multiplier_threshold (default 50x)
+- sudden_appearance_ms (default 500ms)
+- rolling_window_size (default 100)
+- min_samples (default 10) - minimum before detection active
+- bbo_shift_threshold_bps (default 100 = 1%)
+
+ToxicFlowWarning struct:
+- Full diagnostic info (token_id, side, sizes, multiplier, timing)
+- severity field for risk assessment
+- indicators struct showing which checks triggered
+- should_block() and size_multiplier() helpers for risk response
+
+ToxicIndicators:
+- large_order: size > threshold * average
+- sudden_appearance: time < sudden_appearance_ms
+- bbo_shift: BBO changed > bbo_shift_threshold_bps
+- extreme_size: size > 2 * threshold * average
+
+ToxicSeverity helpers:
+- score() returns 0-100 numeric score
+- should_block_trading() returns true for High/Critical
+- size_multiplier() returns position size adjustment (0.75 to 0.0)
+
+Key decisions:
+- Rolling sum O(1) average calculation instead of O(n) iteration
+- VecDeque for efficient front/back operations on window
+- State per token to handle multiple markets independently
+- All prices use rust_decimal::Decimal (NEVER f64)
+- Severity ordering: Low < Medium < High < Critical
+- First observation never flagged as sudden (time_since = u64::MAX)
+- BBO shift calculated based on order side (buy affects ask, sell affects bid)
+
+Notes for next task (p4-3):
+- Position sizing now unblocked
+- Need to integrate toxic severity with sizing decisions
+- ToxicSeverity::size_multiplier() can reduce position size based on severity
+- Consider blocking trades entirely at High/Critical severity
+
+---

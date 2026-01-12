@@ -13,5 +13,9 @@
 //! - No allocations in critical path
 
 pub mod arb;
+pub mod toxic;
 
 pub use arb::{ArbDetector, ArbOpportunity, ArbRejection, ArbThresholds};
+pub use toxic::{
+    ToxicFlowConfig, ToxicFlowDetector, ToxicFlowWarning, ToxicIndicators, ToxicSeverity,
+};
