@@ -6,6 +6,7 @@
 //! - Toxic flow integration
 //! - Daily loss limits
 //! - Circuit breaker for system protection
+//! - Leg risk handling for incomplete arbitrage trades
 //!
 //! ## Hot Path Requirements
 //!
@@ -17,6 +18,7 @@
 
 pub mod checks;
 pub mod circuit_breaker;
+pub mod leg_risk;
 
 pub use checks::{
     PreTradeCheck, PreTradeRejection, RiskCheckConfig, RiskCheckResult, RiskChecker,
@@ -24,4 +26,8 @@ pub use checks::{
 pub use circuit_breaker::{
     CircuitBreaker, CircuitBreakerConfig, CircuitBreakerState, CircuitBreakerStats,
     SharedCircuitBreaker, TripReason,
+};
+pub use leg_risk::{
+    ChaseReason, CloseReason, LegRiskAction, LegRiskAssessment, LegRiskConfig, LegRiskManager,
+    LegState, LegStatus,
 };

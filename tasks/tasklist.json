@@ -237,7 +237,7 @@
       "id": "p6-3",
       "title": "Phase 6: Leg risk handling",
       "description": "Implement leg risk response. Detect leg risk condition (one leg filled, other not), calculate exposure, emergency IOC close if exposure > limit, aggressive chase if time pressure.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p5-4", "p6-1"],
       "files": ["crates/poly-bot/src/risk/leg_risk.rs"],
       "acceptance": ["Detects leg risk", "Emergency closes when needed", "Aggressive chase works"]

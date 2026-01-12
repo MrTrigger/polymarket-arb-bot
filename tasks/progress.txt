@@ -1521,3 +1521,90 @@ Notes for next tasks:
 - GlobalState already has basic circuit breaker support - this provides richer features
 
 ---
+
+### [2026-01-12] Task p6-3: Leg risk handling
+Files created:
+- crates/poly-bot/src/risk/leg_risk.rs
+
+Files modified:
+- crates/poly-bot/src/risk/mod.rs (added leg_risk module export)
+- crates/poly-bot/src/lib.rs (added leg_risk type exports)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-bot: PASSED (293 tests, 24 new)
+
+Leg risk handling features:
+- LegState tracks two-legged trade execution (YES and NO legs)
+- LegStatus enum: Pending, Submitted, PartialFill, Filled, Failed, Cancelled
+- LegRiskManager assesses leg risk and recommends actions
+- calculate_exposure() computes unhedged position value
+- potential_loss() calculates worst-case loss at current prices
+
+LegRiskAction responses:
+- Wait: Within acceptable parameters, continue monitoring
+- AggressiveChase: Pursue second leg with price improvement
+- EmergencyClose: Exposure exceeded threshold, close position at market
+- Complete: Trade successful, no action needed
+
+Emergency close triggers:
+- Exposure exceeds emergency_close_threshold (default $200)
+- Timeout waiting for second leg (default 5 seconds)
+- Market window closing (seconds_remaining <= 0)
+- Second leg completely failed
+
+Chase system features:
+- ChaseReason: Normal, TimePressure, ExposureLimit
+- Calculate max price maintaining minimum profit margin
+- Aggressive price improvement under time pressure
+- create_chase_order() generates IOC buy order
+- create_emergency_close_order() generates IOC sell order
+
+Inventory leg risk detection:
+- inventory_has_leg_risk() checks imbalance ratio > 0.5
+- inventory_exposure() calculates cost of unmatched position
+- should_emergency_close_inventory() checks against threshold
+
+Tests added (24 new):
+- test_leg_state_new
+- test_leg_state_update
+- test_leg_state_complete
+- test_leg_state_exposure
+- test_leg_state_no_leg_risk_when_neither_filled
+- test_leg_state_unfilled_leg
+- test_leg_status_terminal
+- test_leg_risk_manager_assess_complete
+- test_leg_risk_manager_assess_wait
+- test_leg_risk_manager_assess_chase
+- test_leg_risk_manager_assess_emergency_close_exposure
+- test_leg_risk_manager_assess_emergency_close_failed
+- test_leg_risk_manager_assess_window_closing
+- test_chase_reason_time_pressure
+- test_create_emergency_close_order
+- test_create_chase_order
+- test_inventory_leg_risk
+- test_inventory_exposure
+- test_should_emergency_close_inventory
+- test_leg_risk_config_from_risk_config
+- test_leg_state_potential_loss
+- test_leg_state_total_filled_size
+- test_leg_status_filled_size
+- test_leg_risk_assessment_serialization
+
+Key decisions:
+- All prices use rust_decimal::Decimal (NEVER f64)
+- LegState is fully serializable for observability
+- Emergency close uses IOC sell orders at minimum acceptable price
+- Aggressive chase uses IOC buy orders with price ceiling
+- Max chase price = 1.0 - filled_leg_price - min_profit (maintains arb margin)
+- Time pressure triggers at < 60 seconds remaining
+- Exposure limit triggers at half the emergency threshold
+
+Notes for next tasks:
+- Phase 6 (risk) now COMPLETE! All risk management features implemented
+- p8-1 (live mode) now depends only on p7-3 (observability)
+- p8-2 (paper mode) now depends only on p7-3 (observability)
+- p7-1 (decision snapshot types) is READY (depends: p3-3 done)
+- LegRiskManager can integrate with strategy loop for complete trade management
+
+---

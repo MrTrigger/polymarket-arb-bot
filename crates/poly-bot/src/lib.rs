@@ -56,4 +56,8 @@ pub use state::{
 };
 pub use strategy::{ArbDetector, ArbOpportunity, ArbRejection, ArbThresholds};
 pub use risk::{PreTradeCheck, PreTradeRejection, RiskCheckConfig, RiskCheckResult, RiskChecker};
+pub use risk::{
+    ChaseReason, CloseReason, LegRiskAction, LegRiskAssessment, LegRiskConfig, LegRiskManager,
+    LegState, LegStatus,
+};
 pub use types::{Inventory, MarketState, OrderBook, PriceLevel};
