@@ -1443,3 +1443,81 @@ Notes for next tasks:
 - can_trade() designed for hot path usage
 
 ---
+
+### [2026-01-12] Task p6-2: Circuit breakers
+Files created:
+- crates/poly-bot/src/risk/circuit_breaker.rs
+
+Files modified:
+- crates/poly-bot/src/risk/mod.rs (added circuit_breaker module export)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-bot: PASSED (269 tests, 21 new)
+
+CircuitBreaker features:
+- Lock-free atomic state management (tripped, half_open, consecutive_failures)
+- can_trade() single atomic load (~10ns hot path)
+- trip() sets tripped flag and records trip timestamp
+- reset() manually resets to closed state
+- record_success() resets failure counter, closes from half-open
+- record_failure() increments counter, trips after max_consecutive_failures
+- cooldown_elapsed() checks if cooldown period has passed
+- try_auto_reset() transitions to half-open state after cooldown
+- Half-open state allows probe trades to test recovery
+
+CircuitBreakerConfig:
+- max_consecutive_failures (default 3)
+- cooldown Duration (default 5 minutes)
+- auto_reset_enabled flag
+- from_risk_config() constructor from RiskConfig
+
+CircuitBreakerState enum:
+- Closed: Normal operation, trading allowed
+- Open: Tripped, trading blocked
+- HalfOpen: Testing recovery, limited trading
+
+CircuitBreakerStats:
+- state, total_trips, total_successes, total_failures
+- consecutive_failures, cooldown_remaining
+- last_trip_reason (TripReason struct)
+- Serializable with serde for observability
+
+Key decisions:
+- Single atomic load for can_trade() ensures ~10ns performance
+- Ordering::Acquire/Release for hot path atomics
+- Relaxed ordering for stats counters (exact counts not critical)
+- Half-open state allows gradual recovery testing
+- swap() used in trip() to ensure single increment on multiple calls
+- SharedCircuitBreaker type alias for Arc<CircuitBreaker>
+
+Tests added (21 new):
+- test_circuit_breaker_default
+- test_circuit_breaker_config
+- test_record_success
+- test_trip_after_failures
+- test_manual_trip
+- test_manual_reset
+- test_cooldown_elapsed
+- test_cooldown_remaining
+- test_auto_reset_to_half_open
+- test_half_open_success_closes
+- test_half_open_failure_trips
+- test_auto_reset_disabled
+- test_stats
+- test_trip_count_increments
+- test_multiple_trip_calls_single_increment
+- test_concurrent_access
+- test_can_trade_is_fast
+- test_state_display
+- test_from_risk_config
+- test_stats_serialization
+- test_closed_state_no_cooldown_remaining
+
+Notes for next tasks:
+- p9-1 (unit tests) now unblocked (depends: p4-1, p4-2, p6-2 done, p3-1)
+- Circuit breaker ready for integration with strategy loop
+- SharedCircuitBreaker can be used across tasks
+- GlobalState already has basic circuit breaker support - this provides richer features
+
+---

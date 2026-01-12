@@ -228,7 +228,7 @@
       "id": "p6-2",
       "title": "Phase 6: Circuit breakers",
       "description": "Implement circuit breakers. Atomic failure counter, trip() sets atomic flag, can_trade() is single atomic load (~10ns), cooldown timer for auto-reset.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p3-2"],
       "files": ["crates/poly-bot/src/risk/circuit_breaker.rs"],
       "acceptance": ["Trips after 3 failures", "Auto-resets after cooldown", "can_trade() is fast"]
