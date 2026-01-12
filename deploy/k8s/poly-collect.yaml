@@ -1,0 +1,96 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: polymarket
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: poly-collect-config
+  namespace: polymarket
+data:
+  collect.toml: |
+    [general]
+    assets = ["BTC", "ETH", "SOL"]
+    discovery_interval_secs = 300
+    log_level = "info"
+
+    [clickhouse]
+    url = "http://clickhouse.polymarket.svc.cluster.local:8123"
+    database = "default"
+    max_rows = 10000
+    max_bytes = 10485760
+    period_secs = 5
+
+    [binance]
+    buffer_size = 500
+    flush_interval_ms = 5000
+    connect_timeout_secs = 10
+    initial_reconnect_delay_secs = 1
+    max_reconnect_delay_secs = 60
+
+    [clob]
+    snapshot_buffer_size = 500
+    delta_buffer_size = 1000
+    flush_interval_ms = 5000
+    snapshot_interval_ms = 100
+    connect_timeout_secs = 10
+    initial_reconnect_delay_secs = 1
+    max_reconnect_delay_secs = 60
+
+    [health]
+    log_interval_secs = 30
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: poly-collect
+  namespace: polymarket
+  labels:
+    app: poly-collect
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: poly-collect
+  template:
+    metadata:
+      labels:
+        app: poly-collect
+    spec:
+      terminationGracePeriodSeconds: 15
+      containers:
+        - name: poly-collect
+          image: poly-collect:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - --config
+            - /config/collect.toml
+          env:
+            - name: RUST_LOG
+              value: "info"
+            - name: RUST_BACKTRACE
+              value: "1"
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+      volumes:
+        - name: config
+          configMap:
+            name: poly-collect-config

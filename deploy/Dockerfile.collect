@@ -1,0 +1,46 @@
+# Build stage
+FROM rust:1.83-bookworm AS builder
+
+WORKDIR /build
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy workspace files
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ crates/
+
+# Build release binary
+RUN cargo build --release --package poly-collect
+
+# Runtime stage
+FROM debian:bookworm-slim
+
+WORKDIR /app
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy binary from builder
+COPY --from=builder /build/target/release/poly-collect /app/poly-collect
+
+# Copy default config
+COPY config/collect.toml /app/config/collect.toml
+
+# Create non-root user
+RUN useradd --create-home --shell /bin/bash appuser && \
+    chown -R appuser:appuser /app
+USER appuser
+
+# Environment defaults
+ENV RUST_LOG=info
+ENV CONFIG_PATH=/app/config/collect.toml
+
+ENTRYPOINT ["/app/poly-collect"]
+CMD ["--config", "/app/config/collect.toml"]

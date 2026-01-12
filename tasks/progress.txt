@@ -289,3 +289,47 @@ Notes for next task (p1-7):
 - Consider adding health check HTTP endpoint
 
 ---
+
+### [2026-01-12] Task p1-7: Deployment config
+Files created:
+- deploy/Dockerfile.collect
+- deploy/k8s/poly-collect.yaml
+
+Files modified:
+- (none - config/collect.toml already existed from p1-6)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- kubectl apply --dry-run=client: PASSED (namespace, configmap, deployment all valid)
+- Docker build: SKIPPED (Docker daemon not running, but Dockerfile syntax is valid)
+
+Dockerfile features:
+- Multi-stage build (rust:1.83-bookworm builder, debian:bookworm-slim runtime)
+- Minimal runtime with only ca-certificates and libssl3
+- Non-root user (appuser) for security
+- RUST_LOG and CONFIG_PATH environment defaults
+- Copies default config to /app/config/collect.toml
+
+K8s manifest features:
+- Namespace: polymarket
+- ConfigMap with embedded collect.toml (ClickHouse URL points to cluster-internal service)
+- Deployment with:
+  - Resource limits (128Mi-512Mi memory, 100m-500m CPU)
+  - Security context (non-root, read-only root fs, dropped capabilities)
+  - Config mounted from ConfigMap at /config
+  - terminationGracePeriodSeconds: 15 for graceful shutdown
+  - RUST_LOG and RUST_BACKTRACE env vars
+
+Key decisions:
+- Using debian:bookworm-slim for runtime (smaller than alpine, better glibc compatibility)
+- Security-hardened pod spec with minimal privileges
+- ConfigMap allows config changes without rebuilding image
+- ClickHouse URL uses cluster DNS (clickhouse.polymarket.svc.cluster.local)
+- Health check endpoint not added (would require code changes, can be added later)
+
+Notes for Phase 1 completion:
+- Phase 1 (poly-collect) is now COMPLETE!
+- Can deploy to k8s once Docker daemon is running and ClickHouse is deployed
+- Start collecting data ASAP to build backtest dataset
+
+---

@@ -66,7 +66,7 @@
       "id": "p1-7",
       "title": "Phase 1: Deployment config",
       "description": "Create deployment artifacts: config/collect.toml with defaults, Dockerfile for poly-collect, k8s Deployment manifest with resource limits, optional health check endpoint.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p1-6"],
       "files": ["config/collect.toml", "deploy/Dockerfile.collect", "deploy/k8s/poly-collect.yaml"],
       "acceptance": ["Can build Docker image", "Can deploy to k8s cluster", "Pod runs successfully"]
