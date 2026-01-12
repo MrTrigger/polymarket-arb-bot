@@ -174,7 +174,7 @@
       "id": "p4-4",
       "title": "Phase 4: Strategy loop",
       "description": "Implement main strategy task. Event loop receiving from DataSource, check can_trade() (single atomic), run arb detection, run toxic flow check, calculate size, send decisions to executor, fire-and-forget to observability channel.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p3-4", "p4-1", "p4-2", "p4-3"],
       "files": ["crates/poly-bot/src/strategy/mod.rs"],
       "acceptance": ["Processes events", "Generates trade decisions", "Hot path is fast"]

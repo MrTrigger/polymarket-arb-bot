@@ -962,3 +962,91 @@ Notes for next task (p4-4):
 - Fire-and-forget to observability channel via try_send()
 
 ---
+
+### [2026-01-12] Task p4-4: Strategy loop
+Files modified:
+- crates/poly-bot/src/strategy/mod.rs (major expansion with StrategyLoop)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-bot: PASSED (165 tests, 9 new)
+
+StrategyLoop features:
+- Generic over DataSource and Executor traits for polymorphic use
+- Main run() loop: receives events, processes, checks opportunities
+- Event processing for all MarketEvent variants:
+  - SpotPrice: updates local cache and GlobalState
+  - BookSnapshot: applies to tracked market, records toxic flow
+  - BookDelta: applies delta, records toxic flow
+  - Fill: updates inventory, records success
+  - WindowOpen: creates TrackedMarket, sets up token mapping
+  - WindowClose: removes market from tracking
+  - Heartbeat: updates time remaining, removes expired markets
+- check_opportunities() hot path:
+  - Single atomic can_trade() check first
+  - Fast filter via has_potential_arb()
+  - Full arb detection
+  - Toxic flow warning from cached state
+  - Blocks trade if toxic severity is High/Critical
+  - Position sizing with inventory and exposure limits
+  - Executes trade via executor (YES and NO orders)
+- Fire-and-forget observability via try_send() (non-blocking)
+- with_observability() builder method for decision capture
+- Circuit breaker integration: trips after max_consecutive_failures
+- Metrics tracking: events, opportunities, skipped, volume
+
+StrategyConfig features:
+- arb_thresholds, toxic_config, sizing_config
+- max_consecutive_failures (default 3)
+- block_on_toxic_high (default true)
+- from_trading_config() constructor
+
+TrackedMarket internal state:
+- Per-market tracking: event_id, asset, token IDs, strike, window_end
+- MarketState with YES/NO OrderBooks
+- Inventory per market
+- yes_toxic_warning, no_toxic_warning for cached toxic flow
+
+TradeDecision struct:
+- Full decision record for observability
+- decision_id, event_id, asset
+- opportunity, sizing, toxic_warning
+- action (Execute, SkipSizing, SkipToxic, etc.)
+- timestamp, latency_us
+
+TradeAction enum:
+- Execute: orders placed
+- SkipSizing: size constraints prevented trade
+- SkipToxic: toxic flow blocked trade
+- SkipDisabled: trading disabled
+- SkipCircuitBreaker: circuit breaker tripped
+
+Key decisions:
+- Toxic flow warnings cached per market during book updates
+- Uses check_order() for toxic detection (not separate check method)
+- Hot path stays fast: can_trade() is single atomic load
+- Borrow checker satisfied by cloning event_id before mutable borrows
+- execute_arb() places both YES and NO orders sequentially
+- Order failures increment consecutive failure counter
+- Observability uses bounded channel with try_send() to avoid blocking
+
+Tests added:
+- test_strategy_loop_creation
+- test_window_open_tracking
+- test_spot_price_update
+- test_arb_detection_and_execution
+- test_trading_disabled_skips_opportunities
+- test_circuit_breaker_trips_on_failures
+- test_trade_action_variants
+- test_strategy_config_default
+- test_trade_decision_serialization
+
+Notes for next tasks:
+- Phase 4 now COMPLETE! Full trading strategy implemented
+- p5-1 (shadow bid manager) is next for execution enhancements
+- p5-2 (price chasing) for aggressive fill pursuit
+- p5-3 (live executor) for real order submission
+- p6-1 (pre-trade risk checks) for additional safety
+- p6-2 (circuit breakers) can extend current basic implementation
+
+---
