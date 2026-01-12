@@ -1608,3 +1608,77 @@ Notes for next tasks:
 - LegRiskManager can integrate with strategy loop for complete trade management
 
 ---
+
+### [2026-01-12] Task p7-1: Decision snapshot types
+Files created:
+- crates/poly-bot/src/observability/mod.rs
+- crates/poly-bot/src/observability/types.rs
+
+Files modified:
+- crates/poly-bot/src/lib.rs (added observability module and exports)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-bot: PASSED (313 tests, 22 new)
+
+DecisionSnapshot features (hot path, primitives only):
+- 64 bytes total size (#[repr(C)] for predictable layout)
+- Pre-hashed event_id, yes_token_id, no_token_id to u64 (FNV-1a)
+- Prices/sizes scaled to u16/u32 (basis points and cents)
+- Timing: timestamp_ms (i64), latency_us (u32), seconds_remaining (u16)
+- Inventory: yes/no shares, exposure, imbalance as scaled integers
+- Signals: confidence (u8), toxic_severity (u8), phase (u8), asset (u8)
+- Action type as u8 enum (Execute, SkipSizing, SkipToxic, etc.)
+- No heap allocations - all primitive types
+
+SnapshotBuilder features:
+- Converts String/Decimal types to pre-hashed primitives
+- Inline methods for zero-overhead conversion
+- hash_string() uses FNV-1a for fast hashing
+- decimal_to_bps(), decimal_to_cents() helper functions
+
+DecisionContext features (async enrichment):
+- Full string identifiers (event_id, token IDs)
+- Decimal prices and sizes
+- Optional enrichment: spot_price, strike_price, orders, fills
+- Serializable with serde for ClickHouse storage
+- from_snapshot() for reconstruction with string lookup
+
+Counterfactual features (post-analysis):
+- Original decision info (action, size, outcome)
+- Hypothetical trade analysis (size, cost, P&L)
+- Actual P&L and missed profit calculation
+- calculate_arb_pnl() for arb trade settlement
+- assess() determines if decision was correct in hindsight
+- is_significant_miss() for >$1 missed profit
+- needs_review() flags bad decisions on significant trades
+
+ActionType enum (8 variants):
+- Execute, SkipSizing, SkipToxic, SkipDisabled
+- SkipCircuitBreaker, SkipRisk, SkipTime, SkipConfidence
+
+OutcomeType enum:
+- Unknown, Yes, No
+- From<Outcome> and From<Option<Outcome>> conversions
+
+ObservabilityEvent enum:
+- Decision(DecisionSnapshot) for hot path
+- Counterfactual(Counterfactual) for post-settlement
+- Anomaly for detected issues (anomaly_type, severity, event_id_hash)
+
+Key decisions:
+- DecisionSnapshot uses #[repr(C)] for predictable memory layout
+- All prices in basis points (10000 = 1.0) for u16 storage
+- All sizes/costs in cents (100 = $1.00) for u32/i32 storage
+- Pre-hashing uses FNV-1a (fast, non-cryptographic)
+- Negative margin supported via i16 margin_bps
+- Reserved bytes for future extension without breaking layout
+- SnapshotBuilder uses consuming self for chaining
+
+Notes for next task (p7-2):
+- Need bounded mpsc channel with try_send() wrapper
+- Capture function must inline for <10ns overhead
+- Config flag to enable/disable observability
+- Channel should drop on backpressure rather than blocking
+
+---

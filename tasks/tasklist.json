@@ -246,7 +246,7 @@
       "id": "p7-1",
       "title": "Phase 7: Decision snapshot types",
       "description": "Define minimal DecisionSnapshot with only primitives (u64, u8) for hot path. Pre-hash event_id to u64. Define full DecisionContext (built async). Define Counterfactual struct for post-analysis.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p3-3"],
       "files": ["crates/poly-bot/src/observability/mod.rs", "crates/poly-bot/src/observability/types.rs"],
       "acceptance": ["DecisionSnapshot has no allocations", "All primitive types"]

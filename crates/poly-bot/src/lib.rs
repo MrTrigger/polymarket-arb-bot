@@ -21,6 +21,7 @@
 pub mod config;
 pub mod data_source;
 pub mod executor;
+pub mod observability;
 pub mod risk;
 pub mod state;
 pub mod strategy;
@@ -61,3 +62,7 @@ pub use risk::{
     LegState, LegStatus,
 };
 pub use types::{Inventory, MarketState, OrderBook, PriceLevel};
+pub use observability::{
+    ActionType, Counterfactual, DecisionContext, DecisionSnapshot, ObservabilityEvent,
+    OutcomeType, SnapshotBuilder,
+};
