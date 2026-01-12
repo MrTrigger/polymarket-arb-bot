@@ -129,7 +129,7 @@
       "id": "p3-4",
       "title": "Phase 3: Data source trait",
       "description": "Define DataSource trait with async fn next_event(). Define MarketEvent enum (PriceUpdate, BookUpdate, Fill, etc.). Implement LiveDataSource (WebSocket connections) and ReplayDataSource (reads from ClickHouse).",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p3-2", "p3-3"],
       "files": ["crates/poly-bot/src/data_source.rs", "crates/poly-bot/src/data_source/live.rs", "crates/poly-bot/src/data_source/replay.rs"],
       "acceptance": ["Same strategy code works with live or replay data", "ReplayDataSource loads from ClickHouse"]

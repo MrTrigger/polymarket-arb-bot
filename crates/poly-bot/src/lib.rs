@@ -15,12 +15,20 @@
 //! - `config`: Configuration loading and validation
 //! - `state`: Global shared state with lock-free access
 //! - `types`: Order book, market state, and inventory types
+//! - `data_source`: Data source abstraction (live WebSocket, replay from ClickHouse)
 
 pub mod config;
+pub mod data_source;
 pub mod state;
 pub mod types;
 
 pub use config::{BotConfig, ObservabilityConfig};
+pub use data_source::{
+    BookDeltaEvent, BookSnapshotEvent, DataSource, DataSourceError, FillEvent, MarketEvent,
+    SpotPriceEvent, WindowCloseEvent, WindowOpenEvent,
+};
+pub use data_source::live::{ActiveMarket, LiveDataSource, LiveDataSourceConfig};
+pub use data_source::replay::{ReplayConfig, ReplayDataSource};
 pub use state::{
     ActiveWindow, ControlFlags, GlobalState, InventoryPosition, InventoryState, LiveOrderBook,
     MetricsCounters, MetricsSnapshot, SharedMarketData, ShadowOrderState, WindowPhase,

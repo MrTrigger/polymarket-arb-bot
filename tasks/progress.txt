@@ -643,3 +643,64 @@ Notes for next tasks:
 - MarketState.arb_margin() ready for threshold comparison in p4-1
 
 ---
+
+### [2026-01-12] Task p3-4: Data source trait
+Files created:
+- crates/poly-bot/src/data_source.rs (trait definition, MarketEvent enum)
+- crates/poly-bot/src/data_source/live.rs (LiveDataSource)
+- crates/poly-bot/src/data_source/replay.rs (ReplayDataSource)
+
+Files modified:
+- crates/poly-bot/src/lib.rs (added data_source module export)
+- crates/poly-bot/Cargo.toml (added async-trait, futures-util, tokio-tungstenite)
+- Cargo.toml (added workspace dependencies)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-bot: PASSED (62 tests, 19 new)
+
+DataSource trait:
+- async fn next_event() -> Result<Option<MarketEvent>, DataSourceError>
+- has_more() -> bool for stream status
+- current_time() -> Option<DateTime<Utc>> for replay mode
+- shutdown() for graceful termination
+
+MarketEvent enum:
+- SpotPrice: Binance trade updates (asset, price, quantity, timestamp)
+- BookSnapshot: Full orderbook from CLOB (bids, asks as PriceLevels)
+- BookDelta: Incremental orderbook update (side, price, size)
+- Fill: Order fill notification (outcome, size, price, fee)
+- WindowOpen: New market window discovered
+- WindowClose: Market window expired
+- Heartbeat: Connection liveness check
+
+LiveDataSource features:
+- Connects to Binance WebSocket for spot prices
+- Connects to Polymarket CLOB WebSocket for orderbooks
+- Automatic reconnection with exponential backoff
+- Dynamic subscription to new markets every 30s
+- Ping/pong keepalive handling
+- Shutdown via broadcast channel
+- ActiveMarketsState (Arc<RwLock<HashMap>>) for market tracking
+
+ReplayDataSource features:
+- Loads historical data from ClickHouse (spot_prices, orderbook_snapshots, orderbook_deltas, market_windows)
+- BinaryHeap priority queue for chronological event ordering
+- Speed control (0.0 = max speed, 1.0 = real-time, >1.0 = faster)
+- Configurable date range, event_ids, and assets filters
+- Batch loading with configurable batch_size
+
+Key decisions:
+- Using async-trait crate for async trait methods
+- LiveDataSource spawns background tasks for WebSocket connections
+- Events merged through mpsc channel from multiple sources
+- ReplayDataSource loads all data upfront into memory (suitable for backtest periods)
+- Same DataSource trait works for both live trading and backtesting
+
+Notes for next tasks:
+- p3-5 (Executor) still unblocked
+- Strategy code can use DataSource trait polymorphically
+- ReplayDataSource ready for backtest mode (p8-4)
+- LiveDataSource ready for live/paper/shadow modes
+
+---
