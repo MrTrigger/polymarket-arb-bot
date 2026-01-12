@@ -41,6 +41,7 @@ pub use executor::{
 };
 pub use executor::backtest::{BacktestExecutor, BacktestExecutorConfig, BacktestPosition, BacktestStats};
 pub use executor::live::{LiveExecutor, LiveExecutorConfig};
+pub use executor::noop::{NoOpExecutor, NoOpExecutorConfig};
 pub use executor::paper::{PaperExecutor, PaperExecutorConfig, PaperPosition};
 pub use executor::shadow::{
     PrehashedOrder, ShadowError, ShadowFireResult, ShadowManager, ShadowOrder, ShadowStatus,
@@ -86,4 +87,4 @@ pub use observability::{
     AnomalyDetector, AnomalySeverity, AnomalyStats, AnomalyStatsSnapshot, AnomalyType,
     SharedAnomalyDetector,
 };
-pub use mode::{LiveMode, LiveModeConfig, PaperMode, PaperModeConfig};
+pub use mode::{LiveMode, LiveModeConfig, PaperMode, PaperModeConfig, ShadowMode, ShadowModeConfig};

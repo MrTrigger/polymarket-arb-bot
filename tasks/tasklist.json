@@ -309,9 +309,9 @@
       "id": "p8-3",
       "title": "Phase 8: Shadow mode",
       "description": "Implement shadow mode. Wire LiveDataSource + NoOpExecutor, log all detected opportunities, validate feed connectivity.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p4-4", "p3-4"],
-      "files": ["crates/poly-bot/src/mode/shadow.rs"],
+      "files": ["crates/poly-bot/src/mode/shadow.rs", "crates/poly-bot/src/executor/noop.rs"],
       "acceptance": ["Logs opportunities", "Validates feeds work", "No execution"]
     },
     {

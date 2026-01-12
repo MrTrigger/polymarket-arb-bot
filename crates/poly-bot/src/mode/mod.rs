@@ -4,7 +4,7 @@
 //!
 //! - **Live**: Real trading with real money
 //! - **Paper**: Real data, simulated execution
-//! - **Shadow**: Real data, log-only (coming soon)
+//! - **Shadow**: Real data, log-only (validates feeds without execution)
 //! - **Backtest**: Historical data replay (coming soon)
 //!
 //! Each mode wires together the appropriate `DataSource` and `Executor`
@@ -12,6 +12,8 @@
 
 pub mod live;
 pub mod paper;
+pub mod shadow;
 
 pub use live::{LiveMode, LiveModeConfig};
 pub use paper::{PaperMode, PaperModeConfig};
+pub use shadow::{ShadowMode, ShadowModeConfig};
