@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/poly-common",
     "crates/poly-collect",
+    "crates/poly-import",
 ]
 
 [workspace.package]

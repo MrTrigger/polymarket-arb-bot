@@ -333,3 +333,52 @@ Notes for Phase 1 completion:
 - Start collecting data ASAP to build backtest dataset
 
 ---
+
+### [2026-01-12] Task p2-1: Price history importer
+Files created:
+- crates/poly-import/Cargo.toml
+- crates/poly-import/src/lib.rs
+- crates/poly-import/src/prices.rs
+- crates/poly-import/src/main.rs (stub)
+
+Files modified:
+- Cargo.toml (added poly-import to workspace members)
+- crates/poly-common/src/types.rs (added PriceHistory, TradeHistory types)
+- crates/poly-common/src/clickhouse.rs (added price_history/trade_history inserters)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test: PASSED (35 tests total, 4 new)
+
+PriceImporter features:
+- Fetches from https://clob.polymarket.com/prices-history endpoint
+- Supports startTs/endTs for date range filtering
+- Supports fidelity parameter for resolution control
+- Rate limiting with configurable requests_per_second (default 5.0)
+- Automatic retry with exponential backoff (3 retries, 1s initial)
+- Handles 429 Too Many Requests with Retry-After header
+- Batch inserts to ClickHouse (configurable batch_size, default 1000)
+- Import stats tracking (tokens processed/failed, records imported)
+- Multi-token import with progress logging
+
+API response format:
+- GET /prices-history?market={token_id}&startTs={unix}&endTs={unix}&fidelity={minutes}
+- Returns: { history: [{ t: unix_timestamp, p: price_float }] }
+
+Types added to poly-common:
+- PriceHistory (token_id, timestamp, price) for price_history table
+- TradeHistory (token_id, timestamp, side, price, size, trade_id) for trade_history table
+
+Key decisions:
+- Using reqwest for HTTP client (consistent with poly-collect)
+- Conservative rate limit of 5 req/s to avoid 429s
+- API returns f64 prices, converted to Decimal on import
+- CLI not implemented yet (deferred to p2-3)
+- TradeHistory type added preemptively for p2-2
+
+Notes for next task (p2-2):
+- Need to find trade history API endpoint
+- TradeHistory type already defined
+- insert_trade_history already implemented in ClickHouse client
+
+---

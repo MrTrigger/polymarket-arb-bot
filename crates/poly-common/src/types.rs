@@ -219,6 +219,37 @@ pub struct OrderBookDelta {
     pub size: Decimal,
 }
 
+/// Historical price data from Polymarket API.
+#[derive(Debug, Clone, Serialize, Deserialize, Row)]
+pub struct PriceHistory {
+    /// Token ID (YES or NO token).
+    pub token_id: String,
+    /// Timestamp of the price point.
+    pub timestamp: DateTime<Utc>,
+    /// Price at this point (0.00 to 1.00).
+    #[serde(with = "rust_decimal::serde::str")]
+    pub price: Decimal,
+}
+
+/// Historical trade data from Polymarket API.
+#[derive(Debug, Clone, Serialize, Deserialize, Row)]
+pub struct TradeHistory {
+    /// Token ID.
+    pub token_id: String,
+    /// Trade timestamp.
+    pub timestamp: DateTime<Utc>,
+    /// Trade side (BUY/SELL).
+    pub side: String,
+    /// Trade price.
+    #[serde(with = "rust_decimal::serde::str")]
+    pub price: Decimal,
+    /// Trade size.
+    #[serde(with = "rust_decimal::serde::str")]
+    pub size: Decimal,
+    /// Unique trade identifier.
+    pub trade_id: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

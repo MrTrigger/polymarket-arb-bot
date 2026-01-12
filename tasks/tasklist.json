@@ -75,7 +75,7 @@
       "id": "p2-1",
       "title": "Phase 2: Price history importer",
       "description": "Implement Polymarket price history API client. Parse date range from CLI, download price history for specified tokens, store to ClickHouse price_history table, handle pagination/rate limits, show progress.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p1-2"],
       "files": ["crates/poly-import/Cargo.toml", "crates/poly-import/src/lib.rs", "crates/poly-import/src/prices.rs"],
       "acceptance": ["Can download price history", "Stores to ClickHouse", "Handles pagination"]

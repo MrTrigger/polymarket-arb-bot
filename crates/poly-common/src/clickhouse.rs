@@ -8,7 +8,7 @@ use clickhouse::inserter::Inserter;
 use clickhouse::Client;
 use thiserror::Error;
 
-use crate::{MarketWindow, OrderBookDelta, OrderBookSnapshot, SpotPrice};
+use crate::{MarketWindow, OrderBookDelta, OrderBookSnapshot, PriceHistory, SpotPrice, TradeHistory};
 
 /// Errors that can occur during ClickHouse operations.
 #[derive(Debug, Error)]
@@ -151,6 +151,16 @@ impl ClickHouseClient {
         self.create_inserter("market_windows")
     }
 
+    /// Creates an inserter for price history with auto-commit configuration.
+    pub fn price_history_inserter(&self) -> Result<Inserter<PriceHistory>, ClickHouseError> {
+        self.create_inserter("price_history")
+    }
+
+    /// Creates an inserter for trade history with auto-commit configuration.
+    pub fn trade_history_inserter(&self) -> Result<Inserter<TradeHistory>, ClickHouseError> {
+        self.create_inserter("trade_history")
+    }
+
     /// Creates a generic inserter with the configured auto-commit settings.
     fn create_inserter<T>(&self, table: &str) -> Result<Inserter<T>, ClickHouseError>
     where
@@ -223,6 +233,40 @@ impl ClickHouseClient {
         let mut insert = self.client.insert("market_windows")?;
         for window in windows {
             insert.write(window).await?;
+        }
+        insert.end().await?;
+        Ok(())
+    }
+
+    /// Performs a single batch insert of price history.
+    pub async fn insert_price_history(
+        &self,
+        prices: &[PriceHistory],
+    ) -> Result<(), ClickHouseError> {
+        if prices.is_empty() {
+            return Ok(());
+        }
+
+        let mut insert = self.client.insert("price_history")?;
+        for price in prices {
+            insert.write(price).await?;
+        }
+        insert.end().await?;
+        Ok(())
+    }
+
+    /// Performs a single batch insert of trade history.
+    pub async fn insert_trade_history(
+        &self,
+        trades: &[TradeHistory],
+    ) -> Result<(), ClickHouseError> {
+        if trades.is_empty() {
+            return Ok(());
+        }
+
+        let mut insert = self.client.insert("trade_history")?;
+        for trade in trades {
+            insert.write(trade).await?;
         }
         insert.end().await?;
         Ok(())
