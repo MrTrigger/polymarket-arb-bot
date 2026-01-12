@@ -49,3 +49,11 @@ toml = "0.8"
 async-trait = "0.1"
 futures-util = "0.3"
 tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json"] }
+
+# Crypto for signing
+ethers-core = "2.0"
+sha3 = "0.10"
+hex = "0.4"

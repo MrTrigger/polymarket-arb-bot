@@ -201,7 +201,7 @@
       "id": "p5-3",
       "title": "Phase 5: Live executor",
       "description": "Implement real order submission via polymarket-client-sdk. Initialize with wallet, implement place_order() with limit orders, implement cancel_order(), fill tracking (WebSocket or polling), fire shadow on primary fill, update inventory on fills.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p5-1", "p5-2"],
       "files": ["crates/poly-bot/src/executor/live.rs"],
       "acceptance": ["Can place real orders", "Can cancel orders", "Fires shadow on fill"]

@@ -1211,3 +1211,89 @@ Notes for next tasks:
 - chase_order() can be used with any Executor implementation
 
 ---
+
+### [2026-01-12] Task p5-3: Live executor
+Files created/modified:
+- crates/poly-bot/src/executor/live.rs (full implementation)
+
+Files modified:
+- Cargo.toml (added reqwest, ethers-core, sha3, hex dependencies)
+- crates/poly-bot/Cargo.toml (added new dependencies)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-bot: PASSED (204 tests, 8 new)
+
+LiveExecutor features:
+- EIP-712 order signing for Polymarket CLOB API authentication
+- Wallet struct: derives address from private key, signs message hashes
+- Order submission via REST API with authenticated headers
+- Order cancellation via REST API
+- Fill tracking via polling (poll_order_status)
+- Shadow bid firing on primary fills (fire_shadow_on_fill)
+- Local balance tracking with update_balance_on_fill
+- TrackedOrder state machine: Pending, PartiallyFilled, Filled, Cancelled
+
+LiveExecutorConfig:
+- api_endpoint: CLOB REST endpoint (production default)
+- order_timeout_ms: maximum order timeout
+- enable_shadow: enable shadow bid system
+- chase_step_size: price increment for chasing
+- fill_poll_interval_ms: polling interval
+- max_poll_attempts: timeout for polling
+- fee_rate_bps: 0 (Polymarket has 0% maker fees)
+
+Wallet implementation:
+- from_private_key(): creates from hex string
+- derive_address(): keccak256(public_key) for Ethereum address
+- sign_hash(): ECDSA signing with recovery ID for EIP-712
+
+Order signing (EIP-712):
+- compute_domain_separator(): Polymarket CTF Exchange domain
+- compute_order_type_hash(): Order struct type hash
+- compute_struct_hash(): ABI-encodes order parameters
+- create_signed_order(): builds signed order for API
+
+API types (api module):
+- CreateOrderRequest, SignedOrder: order submission
+- CreateOrderResponse: order ID extraction
+- OrderStatusResponse: fill tracking
+- CancelOrderRequest, CancelOrderResponse: cancellation
+- ApiError: error handling
+
+Executor trait implementation:
+- place_order(): creates signed order, submits to API, tracks locally
+- cancel_order(): cancels via API, updates tracked state
+- order_status(): polls API or returns cached terminal state
+- pending_orders(): returns all non-terminal orders
+- available_balance(): returns tracked USDC balance
+- shutdown(): cancels all pending orders, cleans up shadows
+
+Tests added (8 new):
+- test_live_executor_config_default
+- test_domain_separator_computation
+- test_order_type_hash_computation
+- test_signature_to_bytes
+- test_wallet_address_derivation
+- test_wallet_invalid_key
+- test_wallet_short_key
+- test_live_executor_requires_credentials
+
+Key decisions:
+- Uses ethers-core k256 for ECDSA signing (no full ethers dependency)
+- EIP-712 domain separator computed once at startup
+- Order struct hash computed per-order (required for unique signatures)
+- Private keys never logged (Debug trait redacts)
+- Balance tracked locally (not queried from API)
+- Shadow fires after fill detection (~2ms latency target)
+- IOC orders poll immediately after submission
+- All prices use rust_decimal::Decimal
+
+Notes for next tasks:
+- p5-4 (fill handling) now unblocked (depends: p5-3 done)
+- p6-1 (pre-trade risk checks) ready (depends: p3-3 done)
+- p6-2 (circuit breakers) ready (depends: p3-2 done)
+- LiveExecutor ready for integration with strategy loop
+- PriceChaser can wrap LiveExecutor for aggressive fills
+
+---

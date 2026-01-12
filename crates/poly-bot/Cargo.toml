@@ -43,5 +43,13 @@ async-trait = { workspace = true }
 futures-util = { workspace = true }
 tokio-tungstenite = { workspace = true }
 
+# HTTP client for API calls
+reqwest = { workspace = true }
+
+# Crypto for EIP-712 signing
+ethers-core = { workspace = true }
+sha3 = { workspace = true }
+hex = { workspace = true }
+
 [dev-dependencies]
 rust_decimal_macros = "1.36"
