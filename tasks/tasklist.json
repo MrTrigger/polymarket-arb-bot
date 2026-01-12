@@ -219,7 +219,7 @@
       "id": "p6-1",
       "title": "Phase 6: Pre-trade risk checks",
       "description": "Implement pre-trade validation. Time remaining check (>30s), position size check, total exposure check, imbalance check, daily loss check, toxic severity check.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p3-3"],
       "files": ["crates/poly-bot/src/risk/mod.rs", "crates/poly-bot/src/risk/checks.rs"],
       "acceptance": ["Rejects trades exceeding limits", "All checks implemented"]

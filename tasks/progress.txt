@@ -1393,3 +1393,53 @@ Notes for next tasks:
 - Shadow bid integration uses SharedShadowManager from shadow.rs
 
 ---
+
+### [2026-01-12] Task p6-1: Pre-trade risk checks
+Files created:
+- crates/poly-bot/src/risk/mod.rs
+- crates/poly-bot/src/risk/checks.rs
+
+Files modified:
+- crates/poly-bot/src/lib.rs (added risk module export)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-bot: PASSED (248 tests, 27 new)
+
+Risk checks implemented:
+1. **Order validity**: Invalid size (<=0) or price (<=0 or >1.0) rejected
+2. **Time remaining**: min_time_remaining_secs (default 30s) enforced
+3. **Position limit**: max_position_per_market (cost basis) enforced
+4. **Exposure limit**: max_total_exposure across all markets enforced
+5. **Imbalance**: max_imbalance_ratio enforced, Crisis state always blocked
+6. **Daily loss**: max_daily_loss limit (negative P&L threshold)
+7. **Toxic flow**: toxic_flow_threshold (score >= threshold blocks)
+
+RiskChecker features:
+- RiskCheckConfig with all configurable limits
+- PreTradeCheck builder pattern for constructing check context
+- check() runs all 7 checks, returns RiskCheckResult
+- can_trade() fast path for quick filtering (~ns)
+- max_order_size() calculates largest order passing limits
+- Size adjustment based on inventory state (Skewed=0.75, Exposed=0.50, Crisis=0.25)
+
+PreTradeRejection types:
+- InsufficientTime, PositionLimitExceeded, ExposureLimitExceeded
+- ImbalanceTooHigh, DailyLossLimitReached, ToxicFlowBlocked
+- InventoryCrisis, InvalidOrderSize, InvalidOrderPrice
+- is_recoverable() distinguishes transient vs permanent rejections
+
+Key decisions:
+- All prices use rust_decimal::Decimal (NEVER f64)
+- Fast path can_trade() checks only most common rejections
+- Full check() runs all validations with detailed rejection reasons
+- RiskCheckResult tracks passed_checks for debugging
+- Serializable rejections for observability/logging
+
+Notes for next tasks:
+- p6-2 (circuit breakers) now ready (depends: p3-2 done)
+- p6-3 (leg risk handling) depends on p6-1 (done) + p5-4 (done), NOW READY
+- Risk module ready for strategy loop integration
+- can_trade() designed for hot path usage
+
+---

@@ -21,6 +21,7 @@
 pub mod config;
 pub mod data_source;
 pub mod executor;
+pub mod risk;
 pub mod state;
 pub mod strategy;
 pub mod types;
@@ -54,4 +55,5 @@ pub use state::{
     MetricsCounters, MetricsSnapshot, SharedMarketData, ShadowOrderState, WindowPhase,
 };
 pub use strategy::{ArbDetector, ArbOpportunity, ArbRejection, ArbThresholds};
+pub use risk::{PreTradeCheck, PreTradeRejection, RiskCheckConfig, RiskCheckResult, RiskChecker};
 pub use types::{Inventory, MarketState, OrderBook, PriceLevel};
