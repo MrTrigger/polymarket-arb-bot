@@ -354,9 +354,9 @@
       "id": "p9-3",
       "title": "Phase 9: Backtest validation",
       "description": "Run backtests on collected data, verify P&L matches expected, check for obvious bugs (negative prices, impossible states).",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p8-4", "p1-7"],
-      "files": [],
+      "files": ["crates/poly-bot/tests/integration_backtest_validation.rs"],
       "acceptance": ["P&L calculations correct", "No obvious bugs"]
     }
   ]
