@@ -1127,3 +1127,87 @@ Notes for next tasks:
 - EIP-712 hashing uses placeholders - production needs real keccak256
 
 ---
+
+### [2026-01-12] Task p5-2: Price chasing
+Files created:
+- crates/poly-bot/src/executor/chase.rs
+
+Files modified:
+- crates/poly-bot/src/executor.rs (added chase module)
+- crates/poly-bot/src/lib.rs (added chase type exports)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-bot: PASSED (201 tests, 17 new)
+
+PriceChaser features:
+- ChaseConfig with configurable parameters:
+  - enabled: toggle chasing on/off
+  - step_size: price increment per iteration (default 0.001)
+  - check_interval_ms: time between fill checks (default 100ms)
+  - max_chase_time_ms: maximum chase duration (default 5000ms)
+  - min_chase_size: minimum size to continue chasing
+  - min_margin: minimum margin to maintain
+- calculate_ceiling(): computes max price for buy orders
+  - Formula: ceiling = 1.0 - other_leg_price - min_margin
+  - For sells: floor = other_leg_price + min_margin
+- chase_order() async method:
+  - Places initial limit order at starting price
+  - Loops: wait check_interval, check fill status, bump price
+  - Stops when: filled, ceiling reached, timeout, rejected, or size too small
+  - Cancels old order before placing new one at bumped price
+  - Accumulates partial fills across iterations
+
+ChaseResult features:
+- success: whether fully filled
+- filled_size, avg_price, total_cost, total_fee
+- iterations: number of chase attempts
+- final_price: last price reached
+- stop_reason: enum explaining why stopped
+- fills: vector of individual ChaseFill records
+- arb_profit(): calculates profit given other leg price
+- is_complete(): checks if fully filled without errors
+
+ChaseStopReason enum:
+- Disabled, Timeout, CeilingReached, OrderRejected
+- SizeTooSmall, ExecutorError, MarketClosed, Cancelled
+
+ChaseFill struct:
+- Individual fill record during chase
+- size, price, fee, iteration number
+
+Key decisions:
+- All prices use rust_decimal::Decimal (NEVER f64)
+- Chase loop uses cancel-then-resubmit pattern
+- Partial fills recorded immediately on detection
+- Ceiling enforces minimum margin on arb trades
+- Configurable via from_execution_config() from BotConfig
+- Fully serializable with serde for observability
+
+Tests added (17 new):
+- test_chase_config_default
+- test_calculate_ceiling_buy
+- test_calculate_ceiling_sell
+- test_chase_result_empty
+- test_chase_result_immediate_fill
+- test_chase_result_arb_profit
+- test_chase_fill_accumulation
+- test_build_result_success
+- test_build_result_partial
+- test_stop_reason_variants
+- test_chase_order_immediate_fill
+- test_chase_disabled
+- test_chase_order_insufficient_funds
+- test_from_execution_config
+- test_chase_result_serialization
+- test_chase_fill_serialization
+- test_price_chaser_with_defaults
+
+Notes for next tasks:
+- p5-3 (live executor) now unblocked (depends: p5-1 done, p5-2 done)
+- p6-1 (pre-trade risk checks) ready (depends: p3-3 done)
+- p6-2 (circuit breakers) ready (depends: p3-2 done)
+- PriceChaser ready for integration with LiveExecutor
+- chase_order() can be used with any Executor implementation
+
+---

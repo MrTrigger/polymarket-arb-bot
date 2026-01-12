@@ -43,6 +43,9 @@ pub use executor::shadow::{
     PrehashedOrder, ShadowError, ShadowFireResult, ShadowManager, ShadowOrder, ShadowStatus,
     SharedShadowManager,
 };
+pub use executor::chase::{
+    ChaseConfig, ChaseFill, ChaseResult, ChaseStopReason, PriceChaser,
+};
 pub use state::{
     ActiveWindow, ControlFlags, GlobalState, InventoryPosition, InventoryState, LiveOrderBook,
     MetricsCounters, MetricsSnapshot, SharedMarketData, ShadowOrderState, WindowPhase,

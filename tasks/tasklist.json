@@ -192,7 +192,7 @@
       "id": "p5-2",
       "title": "Phase 5: Price chasing",
       "description": "Implement dynamic limit price adjustment. Ceiling calculation (1.0 - other_leg - min_margin), chase loop (check fill, bump price, repeat), handle partial fills. Configurable step_size, check_interval, max_chase_time.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p3-5"],
       "files": ["crates/poly-bot/src/executor/chase.rs"],
       "acceptance": ["Chases up to ceiling", "Handles timeout", "Handles partial fills"]

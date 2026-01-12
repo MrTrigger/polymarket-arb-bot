@@ -25,6 +25,7 @@
 //! order submission (<2ms) when a primary order fills.
 
 pub mod backtest;
+pub mod chase;
 pub mod live;
 pub mod paper;
 pub mod shadow;
