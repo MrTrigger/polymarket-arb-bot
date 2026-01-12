@@ -585,3 +585,61 @@ Notes for next task (p3-3):
 - Consider whether types.rs needs separate from state.rs types
 
 ---
+
+### [2026-01-12] Task p3-3: Market state types
+Files created:
+- crates/poly-bot/src/types.rs
+
+Files modified:
+- crates/poly-bot/src/lib.rs (added types module export)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-bot: PASSED (43 tests, 15 new)
+
+Types implemented:
+- PriceLevel: single price/size level with cost() method
+- OrderBook: full order book with multiple bid/ask levels
+  - best_bid(), best_ask(), best_bid_size(), best_ask_size()
+  - spread_bps(), mid_price(), is_valid()
+  - bid_depth(), ask_depth()
+  - cost_to_buy(), proceeds_to_sell() for fill simulation
+  - apply_snapshot(), apply_delta() for updates
+- MarketState: combined YES/NO market state for arb detection
+  - yes_book, no_book (OrderBook instances)
+  - spot_price, strike_price, seconds_remaining
+  - combined_cost() = yes_ask + no_ask
+  - arb_margin() = 1.0 - combined_cost
+  - arb_margin_bps() for threshold comparison
+  - max_arb_size(), cost_to_arb()
+  - implied_yes_prob(), implied_no_prob()
+- Inventory: position tracking per market
+  - yes_shares, no_shares, cost basis for each
+  - total_shares(), total_exposure(), net_position()
+  - imbalance_ratio(), state() for risk classification
+  - matched_pairs(), unmatched_yes(), unmatched_no()
+  - record_fill() for fill processing
+  - unrealized_pnl(), pnl_if_yes_wins(), pnl_if_no_wins()
+  - guaranteed_pnl() for matched pair profit
+- InventoryState: Balanced, Skewed, Exposed, Crisis
+  - size_multiplier() for position sizing adjustment
+  - should_rebalance() for risk management
+
+Key decisions:
+- All types use rust_decimal::Decimal (NEVER f64)
+- OrderBook is separate from LiveOrderBook (state.rs)
+  - LiveOrderBook: BBO-only for fast state updates (DashMap)
+  - OrderBook: full depth for strategy calculations
+- Inventory is separate from InventoryPosition (state.rs)
+  - InventoryPosition: lock-free state storage
+  - Inventory: rich P&L calculations for strategy
+- MarketState combines YES/NO books + spot price for arb detection
+- PriceLevel uses Copy trait for zero-cost copies
+
+Notes for next tasks:
+- p3-4 (DataSource) and p3-5 (Executor) now unblocked
+- p4-1 (arb detection) and p4-2 (toxic flow) also unblocked
+- p6-1 (risk checks) and p7-1 (decision types) unblocked
+- MarketState.arb_margin() ready for threshold comparison in p4-1
+
+---

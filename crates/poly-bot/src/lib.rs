@@ -18,9 +18,11 @@
 
 pub mod config;
 pub mod state;
+pub mod types;
 
 pub use config::{BotConfig, ObservabilityConfig};
 pub use state::{
     ActiveWindow, ControlFlags, GlobalState, InventoryPosition, InventoryState, LiveOrderBook,
     MetricsCounters, MetricsSnapshot, SharedMarketData, ShadowOrderState, WindowPhase,
 };
+pub use types::{Inventory, MarketState, OrderBook, PriceLevel};

@@ -120,7 +120,7 @@
       "id": "p3-3",
       "title": "Phase 3: Market state types",
       "description": "Define OrderBook with bid/ask levels, MarketState with derived fields (combined_cost, arb_margin), Inventory struct (yes/no shares, cost basis), InventoryState enum (Balanced, Skewed, Exposed, Crisis). Use Decimal not f64.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p3-1"],
       "files": ["crates/poly-bot/src/types.rs"],
       "acceptance": ["Types use rust_decimal", "Inventory state transitions work correctly"]
