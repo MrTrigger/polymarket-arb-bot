@@ -1,0 +1,70 @@
+# Poly-collect configuration
+# All values can be overridden via CLI arguments or environment variables
+
+[general]
+# Crypto assets to track (BTC, ETH, SOL, XRP)
+assets = ["BTC", "ETH", "SOL"]
+
+# Discovery interval in seconds (how often to check for new markets)
+discovery_interval_secs = 300
+
+# Log level (trace, debug, info, warn, error)
+log_level = "info"
+
+[clickhouse]
+# ClickHouse HTTP URL
+url = "http://localhost:8123"
+
+# Database name
+database = "default"
+
+# Maximum rows per batch insert
+max_rows = 10000
+
+# Maximum bytes per batch insert
+max_bytes = 10485760  # 10 MB
+
+# Batch commit period in seconds
+period_secs = 5
+
+[binance]
+# Buffer size before flushing to ClickHouse
+buffer_size = 500
+
+# Maximum time between flushes in milliseconds
+flush_interval_ms = 5000
+
+# Connection timeout in seconds
+connect_timeout_secs = 10
+
+# Initial reconnect delay in seconds
+initial_reconnect_delay_secs = 1
+
+# Maximum reconnect delay in seconds
+max_reconnect_delay_secs = 60
+
+[clob]
+# Snapshot buffer size before flushing to ClickHouse
+snapshot_buffer_size = 500
+
+# Delta buffer size before flushing to ClickHouse
+delta_buffer_size = 1000
+
+# Maximum time between flushes in milliseconds
+flush_interval_ms = 5000
+
+# Snapshot capture interval in milliseconds (100ms for high-fidelity backtest)
+snapshot_interval_ms = 100
+
+# Connection timeout in seconds
+connect_timeout_secs = 10
+
+# Initial reconnect delay in seconds
+initial_reconnect_delay_secs = 1
+
+# Maximum reconnect delay in seconds
+max_reconnect_delay_secs = 60
+
+[health]
+# Health check and stats logging interval in seconds
+log_interval_secs = 30

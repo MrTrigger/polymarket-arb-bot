@@ -57,7 +57,7 @@
       "id": "p1-6",
       "title": "Phase 1: Collector main binary",
       "description": "Wire everything together in poly-collect main.rs. Parse CLI args (--assets, --clickhouse-url), load TOML config, spawn discovery/Binance/CLOB/flush tasks, implement graceful shutdown (SIGTERM), add health logging (records/sec, connection status).",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p1-4", "p1-5"],
       "files": ["crates/poly-collect/src/main.rs", "config/collect.toml"],
       "acceptance": ["Runs continuously", "Captures all data", "Handles disconnects gracefully", "Shuts down cleanly on SIGTERM"]

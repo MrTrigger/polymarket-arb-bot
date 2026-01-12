@@ -233,3 +233,59 @@ Notes for next task (p1-6):
 - Graceful shutdown should stop all tasks
 
 ---
+
+### [2026-01-12] Task p1-6: Collector main binary
+Files created:
+- crates/poly-collect/src/config.rs
+- config/collect.toml
+
+Files modified:
+- Cargo.toml (added clap, toml workspace dependencies)
+- crates/poly-collect/Cargo.toml (added clap, toml dependencies)
+- crates/poly-collect/src/lib.rs (added config module export)
+- crates/poly-collect/src/main.rs (complete rewrite)
+- crates/poly-collect/src/discovery.rs (added discovered_windows tracking, get_discovered_windows method)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-collect: PASSED (23 tests, 4 new)
+
+CollectConfig features:
+- Top-level config struct with assets, discovery_interval, log_level, clickhouse, binance, clob, health_log_interval
+- from_file() loads from TOML path
+- from_toml_str() parses from string (for testing)
+- apply_overrides() merges CLI args on top of config
+- TOML structure with [general], [clickhouse], [binance], [clob], [health] sections
+
+Main binary features:
+- CLI argument parsing with clap (--config, --clickhouse-url, --assets)
+- Config file loading with fallback to defaults
+- ClickHouse connection test and table creation
+- Shared ActiveMarkets (Arc<RwLock<HashMap>>) for discovery-CLOB coordination
+- Broadcast shutdown channel for all tasks
+- Spawns 4 async tasks:
+  1. Discovery task with ActiveMarkets update on new markets
+  2. Binance capture task
+  3. CLOB capture task
+  4. Health logging task
+- Graceful shutdown:
+  - Unix: SIGTERM and SIGINT handling
+  - Windows: Ctrl+C handling
+  - 10 second timeout for task completion
+- Health stats: discovery_runs, markets_discovered, errors
+
+Key decisions:
+- Using clap derive for CLI argument parsing
+- Config file is optional - defaults work out of the box
+- Discovery now tracks discovered MarketWindows for CLOB subscription
+- Separate spawn_* functions for cleaner task management
+- Health stats use AtomicU64 for lock-free updates
+- Broadcast channel capacity of 16 for shutdown signaling
+
+Notes for next task (p1-7):
+- config/collect.toml already created
+- Need Dockerfile for poly-collect
+- Need k8s Deployment manifest
+- Consider adding health check HTTP endpoint
+
+---

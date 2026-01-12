@@ -97,6 +97,8 @@ pub struct MarketDiscovery {
     assets: Vec<CryptoAsset>,
     /// Known market event IDs to avoid re-processing.
     known_markets: HashSet<String>,
+    /// Recently discovered market windows (for CLOB subscription).
+    discovered_windows: Vec<MarketWindow>,
 }
 
 impl MarketDiscovery {
@@ -112,6 +114,7 @@ impl MarketDiscovery {
             db,
             assets,
             known_markets: HashSet::new(),
+            discovered_windows: Vec::new(),
         }
     }
 
@@ -147,12 +150,20 @@ impl MarketDiscovery {
             }
         }
 
-        // Store new markets to ClickHouse
+        // Store new markets to ClickHouse and update discovered windows
         if !new_markets.is_empty() {
             self.store_markets(&new_markets).await?;
+            // Extend discovered windows for CLOB subscription
+            self.discovered_windows.extend(new_markets.clone());
         }
 
         Ok(new_markets.len())
+    }
+
+    /// Get all discovered market windows (for CLOB subscription).
+    /// This is a non-async method that returns a clone of discovered windows.
+    pub async fn get_discovered_windows(&self) -> Result<Vec<MarketWindow>, DiscoveryError> {
+        Ok(self.discovered_windows.clone())
     }
 
     /// Fetch active events from Gamma API.
@@ -467,6 +478,7 @@ mod tests {
                 CryptoAsset::Xrp,
             ],
             known_markets: HashSet::new(),
+            discovered_windows: Vec::new(),
         };
 
         assert_eq!(
@@ -506,6 +518,7 @@ mod tests {
             db: Arc::new(ClickHouseClient::with_defaults()),
             assets: vec![],
             known_markets: HashSet::new(),
+            discovered_windows: Vec::new(),
         };
 
         assert_eq!(
@@ -529,6 +542,7 @@ mod tests {
             db: Arc::new(ClickHouseClient::with_defaults()),
             assets: vec![],
             known_markets: HashSet::new(),
+            discovered_windows: Vec::new(),
         };
 
         let market = GammaMarket {

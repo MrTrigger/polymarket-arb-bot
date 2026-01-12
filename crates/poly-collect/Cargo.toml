@@ -47,6 +47,12 @@ dashmap = { workspace = true }
 # Regex for parsing strike prices
 regex = "1.11"
 
+# CLI
+clap = { workspace = true }
+
+# Config
+toml = { workspace = true }
+
 [dev-dependencies]
 tokio-test = "0.4"
 rust_decimal_macros = "1.36"

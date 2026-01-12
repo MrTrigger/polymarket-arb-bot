@@ -7,4 +7,5 @@
 
 pub mod binance;
 pub mod clob;
+pub mod config;
 pub mod discovery;
