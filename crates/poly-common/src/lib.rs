@@ -2,9 +2,11 @@
 //!
 //! This crate contains:
 //! - Common types (CryptoAsset, Side, OrderBookLevel, MarketWindow)
-//! - ClickHouse client wrapper (TODO: p1-2)
-//! - Schema definitions (TODO: p1-2)
+//! - ClickHouse client wrapper
+//! - Schema definitions
 
+pub mod clickhouse;
 pub mod types;
 
+pub use clickhouse::{ClickHouseClient, ClickHouseConfig, ClickHouseError};
 pub use types::*;

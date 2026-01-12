@@ -69,3 +69,40 @@ Key decisions:
 - All ClickHouse types derive Row for inserter compatibility
 
 ---
+
+### [2026-01-12] Task p1-2: ClickHouse schema and client
+Files created:
+- crates/poly-common/src/schema.sql
+- crates/poly-common/src/clickhouse.rs
+
+Files modified:
+- crates/poly-common/src/lib.rs (added clickhouse module export)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test: PASSED (8 tests)
+
+Schema tables defined:
+- market_windows: ReplacingMergeTree for discovered markets
+- spot_prices: MergeTree with 90-day TTL for Binance trades
+- orderbook_snapshots: MergeTree with 90-day TTL for periodic captures
+- orderbook_deltas: MergeTree with 90-day TTL for incremental updates
+- price_history: MergeTree for historical import
+- trade_history: ReplacingMergeTree for historical import
+- decisions: MergeTree with 180-day TTL for observability
+
+ClickHouseClient features:
+- ClickHouseConfig with sensible defaults (max_rows: 10k, max_bytes: 10MB, period: 5s)
+- ping() for connection testing
+- create_tables() parses and executes schema.sql
+- Type-safe inserters for each table type with auto-commit configuration
+- Batch insert methods for one-off writes
+
+Key decisions:
+- Using Inserter from clickhouse::inserter module (not re-exported at crate root)
+- Decimal(18, 8) for all price/quantity columns
+- DateTime64(3, 'UTC') for millisecond precision timestamps
+- LowCardinality(String) for repeated values (asset, side, action)
+- 90-day TTL on operational data, 180-day on decisions
+
+---

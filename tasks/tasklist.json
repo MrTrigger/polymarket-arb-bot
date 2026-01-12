@@ -21,7 +21,7 @@
       "id": "p1-2",
       "title": "Phase 1: ClickHouse schema and client",
       "description": "Define ClickHouse tables (orderbook_snapshots, orderbook_deltas, spot_prices, market_windows) and implement ClickHouseClient wrapper with batch insert, connection config, and table creation helper.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p1-1"],
       "files": ["crates/poly-common/src/clickhouse.rs", "crates/poly-common/src/schema.sql"],
       "acceptance": ["Can connect to ClickHouse", "Can create tables", "Batch insert works"]
