@@ -21,6 +21,7 @@
 pub mod config;
 pub mod data_source;
 pub mod executor;
+pub mod mode;
 pub mod observability;
 pub mod risk;
 pub mod state;
@@ -85,3 +86,4 @@ pub use observability::{
     AnomalyDetector, AnomalySeverity, AnomalyStats, AnomalyStatsSnapshot, AnomalyType,
     SharedAnomalyDetector,
 };
+pub use mode::{LiveMode, LiveModeConfig};

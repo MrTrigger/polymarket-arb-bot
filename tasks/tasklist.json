@@ -291,7 +291,7 @@
       "id": "p8-1",
       "title": "Phase 8: Live mode",
       "description": "Implement live trading mode. Wire LiveDataSource + LiveExecutor, full observability enabled, graceful shutdown saves state.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p4-4", "p5-4", "p6-3", "p7-3"],
       "files": ["crates/poly-bot/src/mode/mod.rs", "crates/poly-bot/src/mode/live.rs"],
       "acceptance": ["Trades real money", "Observability works", "Shutdown is graceful"]

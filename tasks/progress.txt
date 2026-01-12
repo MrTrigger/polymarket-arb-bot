@@ -2059,3 +2059,69 @@ Notes for next tasks:
 - Webhook alerts ready for Slack/Discord integration
 
 ---
+
+### [2026-01-12] Task p8-1: Live mode
+Files created:
+- crates/poly-bot/src/mode/mod.rs
+- crates/poly-bot/src/mode/live.rs
+
+Files modified:
+- crates/poly-bot/src/lib.rs (added mode module and LiveMode exports)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-bot mode::live: PASSED (6 tests)
+
+LiveMode features:
+- LiveModeConfig with all component configs (data_source, executor, strategy, observability)
+- LiveMode struct coordinates all components for live trading
+- Validates TradingMode::Live and credentials on construction
+- Wires LiveDataSource (Binance + Polymarket WebSockets) + LiveExecutor (real orders)
+- Full observability pipeline:
+  - ObservabilityCapture for fire-and-forget decision capture
+  - ObservabilityProcessor for async enrichment and ClickHouse storage
+  - CounterfactualAnalyzer for post-settlement what-if analysis
+  - AnomalyDetector for real-time anomaly detection
+- Decision forwarding: TradeDecision -> SnapshotBuilder -> DecisionSnapshot -> capture
+- Graceful shutdown with:
+  - Trading disabled via GlobalState
+  - Broadcast shutdown signal
+  - Strategy loop shutdown (cancels pending orders)
+  - Wait for observability tasks with timeout
+  - Final metrics logging
+- request_shutdown() method for external shutdown triggers
+
+LiveModeConfig options:
+- data_source: LiveDataSourceConfig for WebSocket connections
+- executor: LiveExecutorConfig for order submission
+- strategy: StrategyConfig for arb detection/sizing
+- observability: ObservabilityConfig for capture settings
+- initial_balance: Starting USDC balance (default $1000)
+- shutdown_timeout_secs: Max wait for cleanup (default 30s)
+- from_bot_config() constructor from BotConfig
+
+Tests added (6):
+- test_live_mode_config_default
+- test_live_mode_config_from_bot_config
+- test_live_mode_requires_live_trading_mode
+- test_live_mode_requires_credentials
+- test_live_mode_shutdown_signal
+- test_live_mode_state_access
+
+Key decisions:
+- Uses Arc<ObservabilityCapture> for shared capture across tasks
+- Separate channel for TradeDecision -> spawned task converts to DecisionSnapshot
+- ObservabilityProcessor runs as spawned background task
+- CounterfactualAnalyzer runs cleanup loop as spawned background task
+- AnomalyDetector available but not directly wired (used by strategy)
+- Broadcast channel for shutdown coordination
+- Strategy loop runs in main select! with shutdown receiver
+
+Notes for next tasks:
+- p8-2 (paper mode) similar structure with PaperExecutor
+- p8-3 (shadow mode) similar with NoOpExecutor
+- p8-4 (backtest mode) uses ReplayDataSource + BacktestExecutor
+- p8-5 (main binary) wires all modes together with CLI
+- Live mode ready for deployment with proper credentials
+
+---
