@@ -49,3 +49,4 @@ regex = "1.11"
 
 [dev-dependencies]
 tokio-test = "0.4"
+rust_decimal_macros = "1.36"

@@ -48,7 +48,7 @@
       "id": "p1-5",
       "title": "Phase 1: Polymarket CLOB WebSocket capture",
       "description": "Implement CLOB WebSocket capture. Connect to Polymarket CLOB WS, subscribe to discovered market token IDs, handle book snapshots and deltas, periodic full snapshot capture (100ms), buffer and batch writes, reconnection with backoff, re-subscribe on new markets.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p1-3"],
       "files": ["crates/poly-collect/src/clob.rs"],
       "acceptance": ["Captures order book snapshots to ClickHouse", "Captures deltas to ClickHouse", "Reconnects on disconnect"]

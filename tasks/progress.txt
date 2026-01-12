@@ -182,3 +182,54 @@ Notes for next task (p1-5):
 - Periodic snapshot capture (100ms) for backtest fidelity
 
 ---
+
+### [2026-01-12] Task p1-5: Polymarket CLOB WebSocket capture
+Files created:
+- crates/poly-collect/src/clob.rs
+
+Files modified:
+- crates/poly-collect/src/lib.rs (added clob module export)
+- crates/poly-collect/Cargo.toml (added rust_decimal_macros dev dependency)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-collect: PASSED (19 tests, 10 new)
+
+ClobCapture features:
+- Connects to wss://ws-subscriptions-clob.polymarket.com/ws/market
+- Subscribes to token IDs from shared ActiveMarkets state
+- Handles "book" messages (full orderbook snapshots)
+- Handles "price_change" messages (incremental deltas)
+- Maintains in-memory OrderBookState per token with bid/ask HashMaps
+- Periodic snapshot capture every 100ms for high-fidelity backtest data
+- Buffers snapshots (500) and deltas (1000) for batch writes
+- Automatic reconnection with exponential backoff (1s initial, 60s max)
+- Sends PING every 9 seconds (Polymarket requires every 10s)
+- Dynamically subscribes to new markets every 30 seconds
+- Graceful shutdown via broadcast channel
+- Stats logging (books received, snapshots/deltas captured/written)
+
+OrderBookState features:
+- apply_book() for full snapshot application
+- apply_price_change() for delta updates (size=0 removes level)
+- best_bid()/best_ask() for BBO extraction
+- spread_bps() for spread calculation in basis points
+- bid_depth()/ask_depth() for total liquidity
+- to_snapshot() generates OrderBookSnapshot for ClickHouse
+
+Key decisions:
+- Using wss://ws-subscriptions-clob.polymarket.com/ws/market (official CLOB market endpoint)
+- ActiveMarkets shared via Arc<RwLock<HashMap>> to coordinate with discovery
+- Book messages parsed from JSON with bids/asks as OrderSummary arrays
+- Price changes update both in-memory state AND record deltas for storage
+- Snapshot interval of 100ms balances fidelity vs storage volume
+- All prices use Decimal for exact financial math
+
+Notes for next task (p1-6):
+- Main binary needs to wire discovery, binance, and clob together
+- ActiveMarkets shared between discovery (writer) and clob (reader)
+- Need CLI args for --assets, --clickhouse-url
+- Need TOML config file loading
+- Graceful shutdown should stop all tasks
+
+---

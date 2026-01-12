@@ -6,4 +6,5 @@
 //! - Polymarket CLOB WebSocket capture for orderbooks
 
 pub mod binance;
+pub mod clob;
 pub mod discovery;
