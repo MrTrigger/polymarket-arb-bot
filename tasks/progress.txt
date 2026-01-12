@@ -40,3 +40,32 @@ Polymarket 15-Minute Arbitrage Bot - HFT-optimized trading bot for crypto binary
 ## Completed Work
 
 ---
+
+### [2026-01-12] Task p1-1: Workspace and shared crate setup
+Files created:
+- Cargo.toml (workspace root with all dependencies)
+- crates/poly-common/Cargo.toml
+- crates/poly-common/src/lib.rs
+- crates/poly-common/src/types.rs
+
+Verification:
+- cargo check: PASSED
+- cargo clippy -- -D warnings: PASSED
+- cargo test: PASSED (5 tests)
+
+Types implemented:
+- CryptoAsset (BTC, ETH, SOL, XRP) with binance_symbol() helper
+- Side (Buy, Sell) with opposite()
+- Outcome (Yes, No) with opposite()
+- OrderBookLevel (price, size) - all Decimal
+- MarketWindow with window timing helpers
+- SpotPrice for Binance trade data
+- OrderBookSnapshot and OrderBookDelta for ClickHouse storage
+
+Key decisions:
+- Using rust_decimal v1.36 for all financial math
+- clickhouse crate v0.13 with Row derive for type-safe inserts
+- chrono with serde feature for timestamp handling
+- All ClickHouse types derive Row for inserter compatibility
+
+---

@@ -12,7 +12,7 @@
       "id": "p1-1",
       "title": "Phase 1: Workspace and shared crate setup",
       "description": "Create Cargo workspace with poly-common crate containing shared types (CryptoAsset, Side, OrderBookLevel, MarketWindow). Add dependencies: rust_decimal, chrono, serde, clickhouse, tokio.",
-      "status": "pending",
+      "status": "completed",
       "depends": [],
       "files": ["Cargo.toml", "crates/poly-common/Cargo.toml", "crates/poly-common/src/lib.rs", "crates/poly-common/src/types.rs"],
       "acceptance": ["cargo check passes for workspace", "poly-common crate compiles"]
