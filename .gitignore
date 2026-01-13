@@ -1,2 +1,49 @@
+# Build artifacts
+/target/
+**/*.rs.bk
+# Note: Cargo.lock is committed for reproducible builds (this is a binary project)
+
+# Environment and secrets
+.env
+.env.*
+*.pem
+*.key
+
+# IDE and editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Logs and data
+*.log
+*.csv
+*.json.bak
+
+# Temporary files
 tmpclaude*
-target/
+*.tmp
+*.temp
+
+# Coverage and profiling
+*.profraw
+*.profdata
+lcov.info
+tarpaulin-report.html
+coverage/
+
+# Documentation build
+/doc/
+
+# Backup files
+*.bak
+*.orig

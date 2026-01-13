@@ -1,0 +1,48 @@
+
+---
+
+### [2026-01-12] Task p8-4: Backtest mode
+Files created:
+- crates/poly-bot/src/mode/backtest.rs
+
+Files modified:
+- crates/poly-bot/src/mode/mod.rs (added backtest module export)
+- crates/poly-bot/Cargo.toml (added rust_decimal_macros dependency)
+- Cargo.toml (added rust_decimal_macros to workspace)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-bot: PASSED (439 tests)
+
+BacktestMode features:
+- BacktestModeConfig with date range, speed, sweep configuration
+- BacktestMode runner using ReplayDataSource + BacktestExecutor
+- Single run mode: Processes historical events, generates P&L report
+- Parameter sweep mode: Runs multiple configurations, tracks best result
+- PnLReport with detailed human-readable output
+- BacktestResult struct with all metrics (trades, volume, fees, P&L)
+- SweepParameter struct for configurable sweeps (start, end, step)
+- Observability integration (optional decision capture)
+- Graceful shutdown with task cleanup
+
+Implementation details:
+- Events loaded from ClickHouse via ReplayDataSource
+- Order books updated from historical snapshots/deltas
+- Spot prices tracked in GlobalState
+- Fills simulated by BacktestExecutor walking order book depth
+- Speed control: 0.0 = max speed, 1.0 = real-time, >1.0 = faster
+- Sweep generates cartesian product of parameter values
+
+Key decisions:
+- Uses placeholder MockDataSource/MockExecutor for StrategyLoop (events driven manually)
+- Order books shared via Arc<RwLock<HashMap>> between executor and event processing
+- Metrics tracked via GlobalState atomics (inc_events)
+- apply_parameter() modifies nested fields (arb_thresholds.early, sizing_config.*)
+- P&L report includes period, performance, trading activity, positions, parameters
+
+Notes for next task (p8-5):
+- Main binary needs to wire up all four modes
+- CLI args: --mode, --config, --start, --end, --speed, --sweep
+- Backtest mode requires ClickHouse for data loading
+- All modes now complete and ready to integrate
+
