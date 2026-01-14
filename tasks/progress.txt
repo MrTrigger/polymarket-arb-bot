@@ -2809,3 +2809,55 @@ Notes for next tasks:
 - p3-1 (TradingConfig) has no dependencies - ready to start
 - MarketSession ready for integration with StrategyLoop
 - Fee calculation via calculate_fee() for cost basis tracking
+
+---
+
+### [2026-01-14] Task p3-1: Add TradingConfig with balance scaling
+Files modified:
+- crates/poly-bot/src/config.rs (added SizingConfig struct and TOML support)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-bot sizing: PASSED (30 tests)
+- cargo test -p poly-bot config: PASSED (72 tests)
+
+SizingConfig features:
+- available_balance: Decimal (total trading capital)
+- max_market_allocation: Decimal (default 0.20 = 20%)
+- expected_trades_per_market: u32 (default 200)
+- min_order_size: Decimal (default $1.00)
+- max_confidence_multiplier: Decimal (default 3.0)
+- min_hedge_ratio: Decimal (default 0.20 = 20%)
+
+SizingConfig methods:
+- new(balance): Constructor with sensible defaults
+- market_budget(): available_balance * max_market_allocation
+- base_order_size(): max(market_budget / expected_trades, min_order_size)
+- daily_loss_limit(): available_balance * 0.10
+
+Balance scaling examples (verified by tests):
+- $500 account: $100 budget, $1.00 base (min floor), $50 daily limit
+- $1,000 account: $200 budget, $1.00 base, $100 daily limit
+- $5,000 account: $1,000 budget, $5.00 base, $500 daily limit
+- $25,000 account: $5,000 budget, $25.00 base, $2,500 daily limit
+
+TOML support:
+- Added SizingToml struct for deserialization
+- Nested under [trading.sizing] in config file
+- All fields optional with sensible defaults
+
+Integration:
+- SizingConfig embedded in TradingConfig as `sizing` field
+- Uses Decimal for all financial math (never f64)
+- Inline #[inline] hints for hot-path methods
+
+Key decisions:
+- Created SizingConfig as separate struct (not flat in TradingConfig)
+- Allows easy reuse by ConfidenceSizer in p3-2
+- Default $5,000 balance matches spec examples
+- min_order_size floors at $1.00 per Polymarket minimum
+
+Notes for next task (p3-2):
+- SizingConfig ready for ConfidenceSizer integration
+- ConfidenceSizer will use market_budget() and base_order_size()
+- Add confidence calculators and OrderSizeResult enum

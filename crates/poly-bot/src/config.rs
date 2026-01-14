@@ -105,7 +105,7 @@ pub struct TradingConfig {
     /// Maximum total exposure across all markets (USDC).
     pub max_total_exposure: Decimal,
 
-    /// Base order size (USDC).
+    /// Base order size (USDC). Used by limit-based sizing.
     pub base_order_size: Decimal,
 
     /// Window time boundary for "early" phase (seconds).
@@ -113,6 +113,92 @@ pub struct TradingConfig {
 
     /// Window time boundary for "mid" phase (seconds).
     pub mid_threshold_secs: u64,
+
+    /// Confidence-based sizing configuration.
+    pub sizing: SizingConfig,
+}
+
+/// Configuration for confidence-based order sizing.
+///
+/// Scales order sizes with available balance using the formula:
+/// - `market_budget = available_balance * max_market_allocation`
+/// - `base_order_size = market_budget / expected_trades_per_market`
+/// - Actual size = base_order_size × confidence_multiplier (0.5x to 3.0x)
+#[derive(Debug, Clone)]
+pub struct SizingConfig {
+    /// Total available balance for trading (USDC).
+    pub available_balance: Decimal,
+
+    /// Maximum % of balance to risk per market (default: 0.20 = 20%).
+    pub max_market_allocation: Decimal,
+
+    /// Expected number of trades per market window (default: 200).
+    /// Used to calculate base order size: budget / expected_trades.
+    pub expected_trades_per_market: u32,
+
+    /// Minimum order size in USDC (Polymarket minimum, default: $1.00).
+    pub min_order_size: Decimal,
+
+    /// Maximum confidence multiplier (caps aggressive sizing, default: 3.0).
+    pub max_confidence_multiplier: Decimal,
+
+    /// Minimum hedge ratio - always keep some on both sides (default: 0.20 = 20%).
+    pub min_hedge_ratio: Decimal,
+}
+
+impl SizingConfig {
+    /// Create a new SizingConfig with the given available balance.
+    /// Uses sensible defaults for all other parameters.
+    pub fn new(available_balance: Decimal) -> Self {
+        Self {
+            available_balance,
+            max_market_allocation: Decimal::new(20, 2),    // 0.20 = 20%
+            expected_trades_per_market: 200,
+            min_order_size: Decimal::ONE,                  // $1.00
+            max_confidence_multiplier: Decimal::new(3, 0), // 3.0x
+            min_hedge_ratio: Decimal::new(20, 2),          // 0.20 = 20%
+        }
+    }
+
+    /// Calculate the budget for a single market.
+    ///
+    /// Returns: `available_balance * max_market_allocation`
+    ///
+    /// # Examples
+    /// - $1,000 balance × 20% = $200 market budget
+    /// - $5,000 balance × 20% = $1,000 market budget
+    /// - $25,000 balance × 20% = $5,000 market budget
+    #[inline]
+    pub fn market_budget(&self) -> Decimal {
+        self.available_balance * self.max_market_allocation
+    }
+
+    /// Calculate base order size (minimum size before confidence scaling).
+    ///
+    /// Returns: `max(market_budget / expected_trades_per_market, min_order_size)`
+    ///
+    /// # Examples
+    /// - $1,000 balance: $200 budget / 200 trades = $1.00 (hits min)
+    /// - $5,000 balance: $1,000 budget / 200 trades = $5.00
+    /// - $25,000 balance: $5,000 budget / 200 trades = $25.00
+    #[inline]
+    pub fn base_order_size(&self) -> Decimal {
+        let budget = self.market_budget();
+        let size = budget / Decimal::from(self.expected_trades_per_market);
+        size.max(self.min_order_size)
+    }
+
+    /// Calculate the daily loss limit (10% of capital).
+    #[inline]
+    pub fn daily_loss_limit(&self) -> Decimal {
+        self.available_balance * Decimal::new(10, 2) // 0.10 = 10%
+    }
+}
+
+impl Default for SizingConfig {
+    fn default() -> Self {
+        Self::new(Decimal::new(5000, 0)) // Default $5,000 balance
+    }
 }
 
 impl Default for TradingConfig {
@@ -128,6 +214,7 @@ impl Default for TradingConfig {
             base_order_size: Decimal::new(50, 0),           // $50
             early_threshold_secs: 300, // 5 minutes
             mid_threshold_secs: 120,   // 2 minutes
+            sizing: SizingConfig::default(),
         }
     }
 }
@@ -528,6 +615,8 @@ struct TradingToml {
     base_order_size: f64,
     early_threshold_secs: u64,
     mid_threshold_secs: u64,
+    #[serde(default)]
+    sizing: SizingToml,
 }
 
 impl Default for TradingToml {
@@ -542,6 +631,31 @@ impl Default for TradingToml {
             base_order_size: 50.0,
             early_threshold_secs: 300,
             mid_threshold_secs: 120,
+            sizing: SizingToml::default(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+struct SizingToml {
+    available_balance: f64,
+    max_market_allocation: f64,
+    expected_trades_per_market: u32,
+    min_order_size: f64,
+    max_confidence_multiplier: f64,
+    min_hedge_ratio: f64,
+}
+
+impl Default for SizingToml {
+    fn default() -> Self {
+        Self {
+            available_balance: 5000.0,
+            max_market_allocation: 0.20,
+            expected_trades_per_market: 200,
+            min_order_size: 1.0,
+            max_confidence_multiplier: 3.0,
+            min_hedge_ratio: 0.20,
         }
     }
 }
@@ -693,6 +807,16 @@ impl From<TomlConfig> for BotConfig {
                 base_order_size: f64_to_decimal(toml.trading.base_order_size),
                 early_threshold_secs: toml.trading.early_threshold_secs,
                 mid_threshold_secs: toml.trading.mid_threshold_secs,
+                sizing: SizingConfig {
+                    available_balance: f64_to_decimal(toml.trading.sizing.available_balance),
+                    max_market_allocation: f64_to_decimal(toml.trading.sizing.max_market_allocation),
+                    expected_trades_per_market: toml.trading.sizing.expected_trades_per_market,
+                    min_order_size: f64_to_decimal(toml.trading.sizing.min_order_size),
+                    max_confidence_multiplier: f64_to_decimal(
+                        toml.trading.sizing.max_confidence_multiplier,
+                    ),
+                    min_hedge_ratio: f64_to_decimal(toml.trading.sizing.min_hedge_ratio),
+                },
             },
             risk: RiskConfig {
                 max_consecutive_failures: toml.risk.max_consecutive_failures,
@@ -875,5 +999,159 @@ mod tests {
         assert_eq!(pct_to_decimal(2.5), dec!(0.025));
         assert_eq!(pct_to_decimal(100.0), dec!(1.0));
         assert_eq!(pct_to_decimal(0.0), dec!(0));
+    }
+
+    // =========================================================================
+    // SizingConfig tests
+    // =========================================================================
+
+    #[test]
+    fn test_sizing_config_default() {
+        let config = SizingConfig::default();
+        assert_eq!(config.available_balance, dec!(5000));
+        assert_eq!(config.max_market_allocation, dec!(0.20));
+        assert_eq!(config.expected_trades_per_market, 200);
+        assert_eq!(config.min_order_size, dec!(1));
+        assert_eq!(config.max_confidence_multiplier, dec!(3));
+        assert_eq!(config.min_hedge_ratio, dec!(0.20));
+    }
+
+    #[test]
+    fn test_sizing_config_new() {
+        let config = SizingConfig::new(dec!(10000));
+        assert_eq!(config.available_balance, dec!(10000));
+        // Other fields should have defaults
+        assert_eq!(config.max_market_allocation, dec!(0.20));
+    }
+
+    #[test]
+    fn test_sizing_small_account_500() {
+        // $500 account (very small)
+        let config = SizingConfig::new(dec!(500));
+
+        // Market budget = $500 * 0.20 = $100
+        assert_eq!(config.market_budget(), dec!(100));
+
+        // Base order size = $100 / 200 = $0.50, but min is $1.00
+        assert_eq!(config.base_order_size(), dec!(1));
+
+        // Daily loss limit = $500 * 0.10 = $50
+        assert_eq!(config.daily_loss_limit(), dec!(50));
+    }
+
+    #[test]
+    fn test_sizing_small_account_1000() {
+        // $1,000 account
+        let config = SizingConfig::new(dec!(1000));
+
+        // Market budget = $1,000 * 0.20 = $200
+        assert_eq!(config.market_budget(), dec!(200));
+
+        // Base order size = $200 / 200 = $1.00 (exactly at min)
+        assert_eq!(config.base_order_size(), dec!(1));
+
+        // Daily loss limit = $1,000 * 0.10 = $100
+        assert_eq!(config.daily_loss_limit(), dec!(100));
+    }
+
+    #[test]
+    fn test_sizing_medium_account_5000() {
+        // $5,000 account (default)
+        let config = SizingConfig::new(dec!(5000));
+
+        // Market budget = $5,000 * 0.20 = $1,000
+        assert_eq!(config.market_budget(), dec!(1000));
+
+        // Base order size = $1,000 / 200 = $5.00
+        assert_eq!(config.base_order_size(), dec!(5));
+
+        // Daily loss limit = $5,000 * 0.10 = $500
+        assert_eq!(config.daily_loss_limit(), dec!(500));
+    }
+
+    #[test]
+    fn test_sizing_large_account_25000() {
+        // $25,000 account
+        let config = SizingConfig::new(dec!(25000));
+
+        // Market budget = $25,000 * 0.20 = $5,000
+        assert_eq!(config.market_budget(), dec!(5000));
+
+        // Base order size = $5,000 / 200 = $25.00
+        assert_eq!(config.base_order_size(), dec!(25));
+
+        // Daily loss limit = $25,000 * 0.10 = $2,500
+        assert_eq!(config.daily_loss_limit(), dec!(2500));
+    }
+
+    #[test]
+    fn test_sizing_custom_allocation() {
+        // Custom allocation: 30% per market instead of 20%
+        let mut config = SizingConfig::new(dec!(10000));
+        config.max_market_allocation = dec!(0.30);
+
+        // Market budget = $10,000 * 0.30 = $3,000
+        assert_eq!(config.market_budget(), dec!(3000));
+
+        // Base order size = $3,000 / 200 = $15.00
+        assert_eq!(config.base_order_size(), dec!(15));
+    }
+
+    #[test]
+    fn test_sizing_custom_trades_per_market() {
+        // Custom trades: 100 instead of 200
+        let mut config = SizingConfig::new(dec!(10000));
+        config.expected_trades_per_market = 100;
+
+        // Market budget = $10,000 * 0.20 = $2,000
+        assert_eq!(config.market_budget(), dec!(2000));
+
+        // Base order size = $2,000 / 100 = $20.00
+        assert_eq!(config.base_order_size(), dec!(20));
+    }
+
+    #[test]
+    fn test_sizing_min_order_floor() {
+        // Very small account where calculated size < min
+        let config = SizingConfig::new(dec!(100));
+
+        // Market budget = $100 * 0.20 = $20
+        assert_eq!(config.market_budget(), dec!(20));
+
+        // Base order size = $20 / 200 = $0.10, floored to $1.00
+        assert_eq!(config.base_order_size(), dec!(1));
+    }
+
+    #[test]
+    fn test_sizing_toml_parsing() {
+        let toml = r#"
+            [general]
+            mode = "paper"
+
+            [trading]
+            [trading.sizing]
+            available_balance = 15000.0
+            max_market_allocation = 0.25
+            expected_trades_per_market = 150
+            min_order_size = 2.0
+            max_confidence_multiplier = 2.5
+            min_hedge_ratio = 0.25
+        "#;
+
+        let config = BotConfig::from_toml_str(toml).unwrap();
+
+        assert_eq!(config.trading.sizing.available_balance, dec!(15000));
+        assert_eq!(config.trading.sizing.max_market_allocation, dec!(0.25));
+        assert_eq!(config.trading.sizing.expected_trades_per_market, 150);
+        assert_eq!(config.trading.sizing.min_order_size, dec!(2));
+        assert_eq!(config.trading.sizing.max_confidence_multiplier, dec!(2.5));
+        assert_eq!(config.trading.sizing.min_hedge_ratio, dec!(0.25));
+
+        // Verify calculated values
+        // Market budget = $15,000 * 0.25 = $3,750
+        assert_eq!(config.trading.sizing.market_budget(), dec!(3750));
+
+        // Base order size = $3,750 / 150 = $25.00
+        assert_eq!(config.trading.sizing.base_order_size(), dec!(25));
     }
 }

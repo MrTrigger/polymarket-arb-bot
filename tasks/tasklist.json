@@ -105,7 +105,7 @@
       "id": "p3-1",
       "title": "Phase 3: Add TradingConfig with balance scaling",
       "description": "Create TradingConfig with available_balance, max_market_allocation (0.20), expected_trades_per_market (200), min_order_size ($1), max_confidence_multiplier (3.0), min_hedge_ratio (0.20). Implement market_budget() and base_order_size() methods.",
-      "status": "pending",
+      "status": "completed",
       "depends": [],
       "files": [
         "crates/poly-bot/src/config.rs"
