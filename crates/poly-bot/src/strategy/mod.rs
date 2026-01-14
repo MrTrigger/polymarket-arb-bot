@@ -27,6 +27,7 @@
 //! 7. Send order to executor
 //! 8. Fire-and-forget decision to observability channel
 
+pub mod aggregator;
 pub mod arb;
 pub mod confidence;
 pub mod confidence_sizing;
@@ -182,6 +183,9 @@ pub use directional::{
 };
 pub use maker::{
     MakerConfig, MakerDetector, MakerOpportunity, MakerSkipReason,
+};
+pub use aggregator::{
+    AggregatedDecision, DecisionAggregator, DecisionSummary, EngineDecision,
 };
 
 // ============================================================================

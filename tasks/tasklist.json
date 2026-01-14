@@ -264,7 +264,7 @@
       "id": "p7-2",
       "title": "Phase 7: Implement DecisionAggregator",
       "description": "Create EngineDecision wrapper (engine_type, opportunity, sizing). Create DecisionAggregator. Implement aggregate() that picks best decision based on priority config. Handle conflicts (arb overrides directional).",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p7-1"],
       "files": [
         "crates/poly-bot/src/strategy/aggregator.rs"

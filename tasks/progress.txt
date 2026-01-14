@@ -3387,3 +3387,70 @@ Notes for next task (p7-2):
 - DecisionAggregator will use priority from EnginesConfig
 - Engine detectors already implemented (ArbDetector, DirectionalDetector, MakerDetector)
 - Need to wrap their outputs in EngineDecision for aggregation
+
+---
+
+### [2026-01-14] Task p7-2: Implement DecisionAggregator
+Files created:
+- crates/poly-bot/src/strategy/aggregator.rs
+
+Files modified:
+- crates/poly-bot/src/strategy/mod.rs (added aggregator module and exports)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-bot strategy::aggregator: PASSED (24 tests)
+
+Implementation:
+- EngineDecision enum: Wraps Arbitrage(ArbOpportunity), Directional(DirectionalOpportunity), Maker(Vec<MakerOpportunity>)
+- AggregatedDecision struct: primary decision, concurrent_maker for parallel execution, summary for observability
+- DecisionSummary struct: has_arb, has_directional, has_maker flags with details, winning_engine
+- DecisionAggregator struct: priority-based aggregation with configurable order
+
+Key methods:
+- EngineDecision::engine_type() - returns which engine produced the decision
+- EngineDecision::event_id() - gets market event ID
+- EngineDecision::expected_value() - calculates expected profit/rebate
+- EngineDecision::can_run_concurrently_with() - maker can run with anything
+- EngineDecision::as_arbitrage/directional/maker() - type accessors
+- DecisionAggregator::aggregate(arb, directional, maker) - main aggregation logic
+- DecisionAggregator::has_higher_priority(a, b) - priority comparison
+
+Key decisions:
+- Maker orders can run concurrently with arb/directional (passive limit orders)
+- Priority is configurable via EnginesConfig.priority
+- Default priority: Arbitrage > Directional > MakerRebates
+- Higher-priority engine always wins when multiple detect opportunities
+- DecisionSummary provides observability into what each engine detected
+
+Tests implemented (24 tests):
+- test_engine_decision_type
+- test_engine_decision_event_id
+- test_engine_decision_expected_value
+- test_engine_decision_concurrency
+- test_engine_decision_accessors
+- test_aggregated_decision_should_act
+- test_aggregated_decision_primary_engine
+- test_aggregator_default
+- test_aggregator_with_priority
+- test_aggregator_get_priority
+- test_aggregator_has_higher_priority
+- test_aggregate_no_opportunities
+- test_aggregate_arb_only
+- test_aggregate_directional_only
+- test_aggregate_maker_only
+- test_aggregate_arb_wins_over_directional
+- test_aggregate_arb_wins_over_maker
+- test_aggregate_directional_wins_over_maker
+- test_aggregate_all_opportunities
+- test_aggregate_custom_priority
+- test_aggregate_no_concurrent_maker_when_disabled
+- test_engine_decision_serialization
+- test_aggregated_decision_serialization
+- test_decision_summary_default
+
+Notes for next task (p7-3):
+- DecisionAggregator ready for integration
+- Need to add it to StrategyLoop and wire up check_opportunities()
+- Will tag decisions with engine source for observability
+- Must maintain backward compatibility with arb-only mode
