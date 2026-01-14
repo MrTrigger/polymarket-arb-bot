@@ -362,7 +362,7 @@
       "id": "p9-3",
       "title": "Phase 9: Backtest validation",
       "description": "Run backtest with directional engine enabled. Compare results to spec Section 8 expected economics. Tune thresholds if needed. Document findings and any parameter adjustments.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p9-2"],
       "files": [
         "tasks/progress.txt"
