@@ -31,6 +31,7 @@ pub mod arb;
 pub mod confidence;
 pub mod confidence_sizing;
 pub mod directional;
+pub mod maker;
 pub mod signal;
 pub mod sizing;
 pub mod toxic;
@@ -73,6 +74,9 @@ pub use toxic::{
 };
 pub use directional::{
     DirectionalConfig, DirectionalDetector, DirectionalOpportunity, DirectionalSkipReason,
+};
+pub use maker::{
+    MakerConfig, MakerDetector, MakerOpportunity, MakerSkipReason,
 };
 
 // ============================================================================

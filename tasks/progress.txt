@@ -3179,3 +3179,92 @@ Notes for next tasks:
 - p6-1 (MakerDetector) now unblocked
 - p7-3 (multi-engine integration) depends on p5-2 (done) and p6-2
 - Directional execution ready for production use
+
+---
+
+### [2026-01-14] Task p6-1: Implement MakerDetector
+Files created:
+- crates/poly-bot/src/strategy/maker.rs
+
+Files modified:
+- crates/poly-bot/src/strategy/mod.rs (added maker module, exports)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-bot strategy::maker: PASSED (36 tests)
+
+MakerDetector features:
+- MakerOpportunity struct with token_id, side, price, size, expected_rebate
+- MakerSkipReason enum for tracking why opportunities were skipped
+- MakerConfig for configurable detection parameters
+- detect() method analyzes both YES and NO books for opportunities
+- detect_for_book() for individual order book analysis
+- has_potential() fast filter to skip unnecessary detection
+- min_order_size() returns min_size from rewards config or default
+
+MakerOpportunity fields:
+- event_id, token_id: Market and token identification
+- side: Side (Buy or Sell based on book imbalance)
+- price: Optimal maker price inside spread
+- size: Order size (respects rewards min_size)
+- expected_rebate: Estimated USDC rebate
+- spread_bps: Current spread in basis points
+- qualifies_for_rewards: Whether order meets reward criteria
+- minutes_remaining, best_bid, best_ask, detected_at_ms
+
+MakerConfig defaults:
+- min_seconds_remaining: 120 (2 minutes)
+- min_spread_bps: 50 (0.5% minimum spread)
+- max_spread_bps: 1000 (10% maximum spread)
+- default_order_size: $50
+- max_imbalance_ratio: 0.80
+- estimated_pool_share: 0.001 (0.1%)
+
+Spread analysis for maker price:
+- Wide spread (>3%): Place 40% from bid toward ask
+- Medium spread (1-3%): Place 30% from bid toward ask
+- Tight spread (<1%): Place at bid (buy) or ask (sell)
+- Price rounded to 2 decimal places (Polymarket tick size)
+
+Rewards config integration:
+- Validates rewards are active before qualifying
+- Respects rewards_max_spread_bps
+- Ensures order size >= rewards_min_size
+- Calculates expected_rebate from daily_rate * pool_share
+
+Side selection logic:
+- Positive imbalance (more bids) -> Sell (provide ask liquidity)
+- Negative imbalance (more asks) -> Buy (provide bid liquidity)
+- Extreme imbalance (>max_ratio) -> Skip
+
+Key decisions:
+- Side selection based on book imbalance for better fill probability
+- Rewards config is optional - can still detect without rewards
+- Expected rebate is rough estimate based on pool share assumption
+- Uses same calculate_maker_price logic as directional execution
+
+Tests implemented:
+- Skip reason display tests
+- Opportunity helpers (is_buy, is_sell, spread_ratio)
+- Config default values
+- Detector creation and defaults
+- Book validation (no BBO, spread too narrow/wide)
+- Rewards validation (not active, spread exceeds max)
+- Extreme imbalance detection
+- Success cases with/without rewards
+- Min size enforcement
+- Side selection based on imbalance
+- Multi-book detection
+- Suggested size handling
+- has_potential() filters
+- min_order_size() with various configs
+- Imbalance calculation
+- Maker price calculation (wide/medium/tight spread)
+- Serialization round-trip
+
+Notes for next task (p6-2):
+- MakerDetector provides opportunities, but no execution yet
+- Need execute_maker() in StrategyLoop
+- Track active maker orders per market
+- Implement order refresh (cancel stale, place new)
+- Handle partial fills

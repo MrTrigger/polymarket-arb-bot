@@ -218,7 +218,7 @@
       "id": "p6-1",
       "title": "Phase 6: Implement MakerDetector",
       "description": "Create MakerDetector for passive rebate strategy. Create MakerOpportunity struct (token_id, side, price, size, expected_rebate). Implement spread analysis for optimal maker price. Consider rewards_min_size and rewards_max_spread from API.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p2-2"],
       "files": [
         "crates/poly-bot/src/strategy/maker.rs"
