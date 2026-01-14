@@ -8,6 +8,329 @@ use serde::{Deserialize, Serialize};
 
 use poly_common::types::{CryptoAsset, Outcome, Side};
 
+// ============================================================================
+// Engine and Trade Decision Types
+// ============================================================================
+
+/// Trading engine type identifier.
+///
+/// Each engine has a distinct strategy and priority in the multi-engine system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum EngineType {
+    /// Engine 1: Pure arbitrage (buy YES + NO when sum < $1.00).
+    /// Highest priority - takes precedence when arb opportunity exists.
+    Arbitrage,
+    /// Engine 2: Directional betting based on spot vs strike.
+    /// Medium priority - runs when no arb but directional signal exists.
+    Directional,
+    /// Engine 3: Passive maker orders for rebates.
+    /// Lowest priority - background liquidity provision.
+    MakerRebates,
+}
+
+impl EngineType {
+    /// Get the default priority (lower number = higher priority).
+    pub fn default_priority(&self) -> u8 {
+        match self {
+            EngineType::Arbitrage => 0,    // Highest
+            EngineType::Directional => 1,  // Medium
+            EngineType::MakerRebates => 2, // Lowest
+        }
+    }
+
+    /// Get a short display name.
+    pub fn short_name(&self) -> &'static str {
+        match self {
+            EngineType::Arbitrage => "ARB",
+            EngineType::Directional => "DIR",
+            EngineType::MakerRebates => "MKR",
+        }
+    }
+}
+
+impl std::fmt::Display for EngineType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EngineType::Arbitrage => write!(f, "Arbitrage"),
+            EngineType::Directional => write!(f, "Directional"),
+            EngineType::MakerRebates => write!(f, "MakerRebates"),
+        }
+    }
+}
+
+/// Trade decision from risk manager.
+///
+/// Returned by `PnlRiskManager::check_trade()` to indicate whether
+/// a proposed trade is allowed and any required actions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TradeDecision {
+    /// Trade is approved to proceed.
+    Approve,
+    /// Trade is rejected with a reason.
+    Reject {
+        /// Human-readable reason for rejection.
+        reason: String,
+    },
+    /// Trade can proceed but with a reduced size.
+    ReduceSize {
+        /// Maximum allowed size in USDC.
+        max_allowed: Decimal,
+    },
+    /// Position needs rebalancing before trading.
+    RebalanceRequired {
+        /// Current hedge ratio (min_side / total).
+        current_ratio: Decimal,
+        /// Target hedge ratio to achieve.
+        target_ratio: Decimal,
+    },
+}
+
+impl TradeDecision {
+    /// Create a rejection with a message.
+    pub fn reject(reason: impl Into<String>) -> Self {
+        TradeDecision::Reject {
+            reason: reason.into(),
+        }
+    }
+
+    /// Check if the decision allows trading (Approve or ReduceSize).
+    pub fn allows_trading(&self) -> bool {
+        matches!(self, TradeDecision::Approve | TradeDecision::ReduceSize { .. })
+    }
+
+    /// Check if trading is completely blocked.
+    pub fn is_blocked(&self) -> bool {
+        matches!(self, TradeDecision::Reject { .. })
+    }
+
+    /// Check if rebalancing is required.
+    pub fn requires_rebalance(&self) -> bool {
+        matches!(self, TradeDecision::RebalanceRequired { .. })
+    }
+}
+
+impl std::fmt::Display for TradeDecision {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TradeDecision::Approve => write!(f, "Approve"),
+            TradeDecision::Reject { reason } => write!(f, "Reject: {}", reason),
+            TradeDecision::ReduceSize { max_allowed } => {
+                write!(f, "ReduceSize(max=${})", max_allowed)
+            }
+            TradeDecision::RebalanceRequired {
+                current_ratio,
+                target_ratio,
+            } => {
+                write!(
+                    f,
+                    "RebalanceRequired({}% -> {}%)",
+                    current_ratio * Decimal::ONE_HUNDRED,
+                    target_ratio * Decimal::ONE_HUNDRED
+                )
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Position Tracking
+// ============================================================================
+
+/// Position tracking for a single market.
+///
+/// Tracks UP (YES) and DOWN (NO) shares with their cost basis
+/// for P&L calculation and hedge ratio management.
+///
+/// Unlike `Inventory` which is more general, `Position` is specifically
+/// designed for the three-engine strategy with directional betting.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Position {
+    /// UP (YES) shares held.
+    pub up_shares: Decimal,
+    /// DOWN (NO) shares held.
+    pub down_shares: Decimal,
+    /// Total cost paid for UP shares.
+    pub up_cost: Decimal,
+    /// Total cost paid for DOWN shares.
+    pub down_cost: Decimal,
+}
+
+impl Position {
+    /// Create a new empty position.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Total cost basis of the position.
+    #[inline]
+    pub fn total_cost(&self) -> Decimal {
+        self.up_cost + self.down_cost
+    }
+
+    /// Total shares held (UP + DOWN).
+    #[inline]
+    pub fn total_shares(&self) -> Decimal {
+        self.up_shares + self.down_shares
+    }
+
+    /// UP allocation ratio (0.0 to 1.0).
+    ///
+    /// Returns the fraction of total cost allocated to UP.
+    /// Returns 0.5 if no position exists.
+    #[inline]
+    pub fn up_ratio(&self) -> Decimal {
+        let total = self.total_cost();
+        if total <= Decimal::ZERO {
+            Decimal::new(5, 1) // 0.5 default
+        } else {
+            self.up_cost / total
+        }
+    }
+
+    /// DOWN allocation ratio (0.0 to 1.0).
+    #[inline]
+    pub fn down_ratio(&self) -> Decimal {
+        Decimal::ONE - self.up_ratio()
+    }
+
+    /// Minimum side ratio (hedge ratio).
+    ///
+    /// Returns min(up_ratio, down_ratio). A ratio of 0.5 means
+    /// perfectly balanced, lower values indicate more directional exposure.
+    #[inline]
+    pub fn min_side_ratio(&self) -> Decimal {
+        self.up_ratio().min(self.down_ratio())
+    }
+
+    /// Check if the position has any holdings.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.total_shares() <= Decimal::ZERO
+    }
+
+    /// Average price paid for UP shares.
+    pub fn up_avg_price(&self) -> Option<Decimal> {
+        if self.up_shares > Decimal::ZERO {
+            Some(self.up_cost / self.up_shares)
+        } else {
+            None
+        }
+    }
+
+    /// Average price paid for DOWN shares.
+    pub fn down_avg_price(&self) -> Option<Decimal> {
+        if self.down_shares > Decimal::ZERO {
+            Some(self.down_cost / self.down_shares)
+        } else {
+            None
+        }
+    }
+
+    /// Add UP shares to the position.
+    pub fn add_up(&mut self, shares: Decimal, cost: Decimal) {
+        self.up_shares += shares;
+        self.up_cost += cost;
+    }
+
+    /// Add DOWN shares to the position.
+    pub fn add_down(&mut self, shares: Decimal, cost: Decimal) {
+        self.down_shares += shares;
+        self.down_cost += cost;
+    }
+
+    /// Calculate P&L at settlement.
+    ///
+    /// # Arguments
+    ///
+    /// * `up_wins` - true if UP (YES) wins, false if DOWN (NO) wins
+    ///
+    /// # Returns
+    ///
+    /// The profit (positive) or loss (negative) in USDC.
+    /// Winner pays $1.00 per share, loser pays $0.00.
+    pub fn calculate_pnl(&self, up_wins: bool) -> Decimal {
+        if up_wins {
+            // UP shares pay $1.00 each, DOWN shares pay $0.00
+            let settlement_value = self.up_shares * Decimal::ONE;
+            settlement_value - self.total_cost()
+        } else {
+            // DOWN shares pay $1.00 each, UP shares pay $0.00
+            let settlement_value = self.down_shares * Decimal::ONE;
+            settlement_value - self.total_cost()
+        }
+    }
+
+    /// Calculate guaranteed P&L from matched pairs.
+    ///
+    /// Matched pairs (min of UP and DOWN shares) always pay $1.00
+    /// regardless of outcome.
+    pub fn guaranteed_pnl(&self) -> Decimal {
+        let matched_pairs = self.up_shares.min(self.down_shares);
+        if matched_pairs <= Decimal::ZERO {
+            return Decimal::ZERO;
+        }
+
+        // Calculate proportional cost for matched pairs
+        let total_shares = self.total_shares();
+        if total_shares <= Decimal::ZERO {
+            return Decimal::ZERO;
+        }
+
+        let matched_up_cost = self.up_cost * (matched_pairs / self.up_shares.max(Decimal::ONE));
+        let matched_down_cost =
+            self.down_cost * (matched_pairs / self.down_shares.max(Decimal::ONE));
+        let matched_cost = matched_up_cost + matched_down_cost;
+
+        // Each matched pair pays $1.00 at settlement
+        matched_pairs - matched_cost
+    }
+
+    /// Calculate unrealized P&L at current prices.
+    ///
+    /// # Arguments
+    ///
+    /// * `up_price` - Current UP (YES) price (0.0 to 1.0)
+    /// * `down_price` - Current DOWN (NO) price (0.0 to 1.0)
+    pub fn unrealized_pnl(&self, up_price: Decimal, down_price: Decimal) -> Decimal {
+        let current_value = (self.up_shares * up_price) + (self.down_shares * down_price);
+        current_value - self.total_cost()
+    }
+
+    /// Reset the position to empty.
+    pub fn reset(&mut self) {
+        self.up_shares = Decimal::ZERO;
+        self.down_shares = Decimal::ZERO;
+        self.up_cost = Decimal::ZERO;
+        self.down_cost = Decimal::ZERO;
+    }
+
+    /// Convert to Inventory type for compatibility.
+    pub fn to_inventory(&self, event_id: String) -> Inventory {
+        Inventory {
+            event_id,
+            yes_shares: self.up_shares,
+            no_shares: self.down_shares,
+            yes_cost_basis: self.up_cost,
+            no_cost_basis: self.down_cost,
+            realized_pnl: Decimal::ZERO,
+        }
+    }
+
+    /// Create from an Inventory.
+    pub fn from_inventory(inv: &Inventory) -> Self {
+        Self {
+            up_shares: inv.yes_shares,
+            down_shares: inv.no_shares,
+            up_cost: inv.yes_cost_basis,
+            down_cost: inv.no_cost_basis,
+        }
+    }
+}
+
+// ============================================================================
+// Order Book Types
+// ============================================================================
+
 /// A single price level in an order book.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PriceLevel {
@@ -764,5 +1087,405 @@ mod tests {
         inv.record_fill(Outcome::No, dec!(100), dec!(52));
         assert_eq!(inv.no_shares, dec!(100));
         assert_eq!(inv.no_cost_basis, dec!(52));
+    }
+
+    // =========================================================================
+    // EngineType Tests
+    // =========================================================================
+
+    #[test]
+    fn test_engine_type_priority() {
+        assert_eq!(EngineType::Arbitrage.default_priority(), 0);
+        assert_eq!(EngineType::Directional.default_priority(), 1);
+        assert_eq!(EngineType::MakerRebates.default_priority(), 2);
+
+        // Arbitrage should have highest priority (lowest number)
+        assert!(EngineType::Arbitrage.default_priority() < EngineType::Directional.default_priority());
+        assert!(EngineType::Directional.default_priority() < EngineType::MakerRebates.default_priority());
+    }
+
+    #[test]
+    fn test_engine_type_short_name() {
+        assert_eq!(EngineType::Arbitrage.short_name(), "ARB");
+        assert_eq!(EngineType::Directional.short_name(), "DIR");
+        assert_eq!(EngineType::MakerRebates.short_name(), "MKR");
+    }
+
+    #[test]
+    fn test_engine_type_display() {
+        assert_eq!(format!("{}", EngineType::Arbitrage), "Arbitrage");
+        assert_eq!(format!("{}", EngineType::Directional), "Directional");
+        assert_eq!(format!("{}", EngineType::MakerRebates), "MakerRebates");
+    }
+
+    #[test]
+    fn test_engine_type_serialization() {
+        let arb = EngineType::Arbitrage;
+        let json = serde_json::to_string(&arb).unwrap();
+        assert_eq!(json, "\"Arbitrage\"");
+
+        let parsed: EngineType = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, EngineType::Arbitrage);
+    }
+
+    // =========================================================================
+    // TradeDecision Tests
+    // =========================================================================
+
+    #[test]
+    fn test_trade_decision_approve() {
+        let decision = TradeDecision::Approve;
+        assert!(decision.allows_trading());
+        assert!(!decision.is_blocked());
+        assert!(!decision.requires_rebalance());
+        assert_eq!(format!("{}", decision), "Approve");
+    }
+
+    #[test]
+    fn test_trade_decision_reject() {
+        let decision = TradeDecision::reject("Daily loss limit hit");
+        assert!(!decision.allows_trading());
+        assert!(decision.is_blocked());
+        assert!(!decision.requires_rebalance());
+
+        if let TradeDecision::Reject { reason } = &decision {
+            assert_eq!(reason, "Daily loss limit hit");
+        } else {
+            panic!("Expected Reject variant");
+        }
+
+        assert!(format!("{}", decision).contains("Daily loss limit hit"));
+    }
+
+    #[test]
+    fn test_trade_decision_reduce_size() {
+        let decision = TradeDecision::ReduceSize {
+            max_allowed: dec!(25.50),
+        };
+        assert!(decision.allows_trading());
+        assert!(!decision.is_blocked());
+        assert!(!decision.requires_rebalance());
+
+        if let TradeDecision::ReduceSize { max_allowed } = &decision {
+            assert_eq!(*max_allowed, dec!(25.50));
+        } else {
+            panic!("Expected ReduceSize variant");
+        }
+
+        assert!(format!("{}", decision).contains("25.5"));
+    }
+
+    #[test]
+    fn test_trade_decision_rebalance_required() {
+        let decision = TradeDecision::RebalanceRequired {
+            current_ratio: dec!(0.15),
+            target_ratio: dec!(0.20),
+        };
+        assert!(!decision.allows_trading());
+        assert!(!decision.is_blocked());
+        assert!(decision.requires_rebalance());
+
+        if let TradeDecision::RebalanceRequired {
+            current_ratio,
+            target_ratio,
+        } = &decision
+        {
+            assert_eq!(*current_ratio, dec!(0.15));
+            assert_eq!(*target_ratio, dec!(0.20));
+        } else {
+            panic!("Expected RebalanceRequired variant");
+        }
+    }
+
+    #[test]
+    fn test_trade_decision_serialization() {
+        let decision = TradeDecision::Approve;
+        let json = serde_json::to_string(&decision).unwrap();
+        let parsed: TradeDecision = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, TradeDecision::Approve);
+
+        let decision = TradeDecision::ReduceSize {
+            max_allowed: dec!(100),
+        };
+        let json = serde_json::to_string(&decision).unwrap();
+        let parsed: TradeDecision = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, decision);
+    }
+
+    // =========================================================================
+    // Position Tests
+    // =========================================================================
+
+    #[test]
+    fn test_position_new() {
+        let pos = Position::new();
+        assert_eq!(pos.up_shares, Decimal::ZERO);
+        assert_eq!(pos.down_shares, Decimal::ZERO);
+        assert_eq!(pos.up_cost, Decimal::ZERO);
+        assert_eq!(pos.down_cost, Decimal::ZERO);
+        assert!(pos.is_empty());
+    }
+
+    #[test]
+    fn test_position_total_cost() {
+        let pos = Position {
+            up_shares: dec!(100),
+            down_shares: dec!(100),
+            up_cost: dec!(45),
+            down_cost: dec!(52),
+        };
+        assert_eq!(pos.total_cost(), dec!(97));
+    }
+
+    #[test]
+    fn test_position_total_shares() {
+        let pos = Position {
+            up_shares: dec!(100),
+            down_shares: dec!(75),
+            up_cost: dec!(0),
+            down_cost: dec!(0),
+        };
+        assert_eq!(pos.total_shares(), dec!(175));
+    }
+
+    #[test]
+    fn test_position_up_ratio() {
+        // Empty position defaults to 0.5
+        let empty = Position::new();
+        assert_eq!(empty.up_ratio(), dec!(0.5));
+
+        // 60% UP, 40% DOWN by cost
+        let pos = Position {
+            up_shares: dec!(100),
+            down_shares: dec!(100),
+            up_cost: dec!(60),
+            down_cost: dec!(40),
+        };
+        assert_eq!(pos.up_ratio(), dec!(0.6));
+        assert_eq!(pos.down_ratio(), dec!(0.4));
+    }
+
+    #[test]
+    fn test_position_min_side_ratio() {
+        // Balanced: 50/50
+        let balanced = Position {
+            up_shares: dec!(100),
+            down_shares: dec!(100),
+            up_cost: dec!(50),
+            down_cost: dec!(50),
+        };
+        assert_eq!(balanced.min_side_ratio(), dec!(0.5));
+
+        // Skewed: 70/30
+        let skewed = Position {
+            up_shares: dec!(100),
+            down_shares: dec!(100),
+            up_cost: dec!(70),
+            down_cost: dec!(30),
+        };
+        assert_eq!(skewed.min_side_ratio(), dec!(0.3));
+    }
+
+    #[test]
+    fn test_position_add_up_down() {
+        let mut pos = Position::new();
+
+        pos.add_up(dec!(100), dec!(45));
+        assert_eq!(pos.up_shares, dec!(100));
+        assert_eq!(pos.up_cost, dec!(45));
+
+        pos.add_down(dec!(100), dec!(52));
+        assert_eq!(pos.down_shares, dec!(100));
+        assert_eq!(pos.down_cost, dec!(52));
+
+        // Add more
+        pos.add_up(dec!(50), dec!(25));
+        assert_eq!(pos.up_shares, dec!(150));
+        assert_eq!(pos.up_cost, dec!(70));
+    }
+
+    #[test]
+    fn test_position_avg_price() {
+        let pos = Position {
+            up_shares: dec!(100),
+            down_shares: dec!(200),
+            up_cost: dec!(45),   // avg = 0.45
+            down_cost: dec!(100), // avg = 0.50
+        };
+        assert_eq!(pos.up_avg_price(), Some(dec!(0.45)));
+        assert_eq!(pos.down_avg_price(), Some(dec!(0.50)));
+
+        // Empty side returns None
+        let empty_up = Position {
+            up_shares: Decimal::ZERO,
+            down_shares: dec!(100),
+            up_cost: Decimal::ZERO,
+            down_cost: dec!(50),
+        };
+        assert_eq!(empty_up.up_avg_price(), None);
+        assert_eq!(empty_up.down_avg_price(), Some(dec!(0.50)));
+    }
+
+    #[test]
+    fn test_position_calculate_pnl_up_wins() {
+        // Buy 100 UP @ 0.45, 100 DOWN @ 0.52
+        // Total cost = $97
+        // If UP wins: 100 * $1.00 = $100
+        // P&L = $100 - $97 = $3
+        let pos = Position {
+            up_shares: dec!(100),
+            down_shares: dec!(100),
+            up_cost: dec!(45),
+            down_cost: dec!(52),
+        };
+        assert_eq!(pos.calculate_pnl(true), dec!(3));
+    }
+
+    #[test]
+    fn test_position_calculate_pnl_down_wins() {
+        // Buy 100 UP @ 0.45, 100 DOWN @ 0.52
+        // Total cost = $97
+        // If DOWN wins: 100 * $1.00 = $100
+        // P&L = $100 - $97 = $3
+        let pos = Position {
+            up_shares: dec!(100),
+            down_shares: dec!(100),
+            up_cost: dec!(45),
+            down_cost: dec!(52),
+        };
+        assert_eq!(pos.calculate_pnl(false), dec!(3));
+    }
+
+    #[test]
+    fn test_position_calculate_pnl_unbalanced() {
+        // Buy 150 UP @ 0.60, 50 DOWN @ 0.40
+        // Total cost = $90 + $20 = $110
+        // If UP wins: 150 * $1.00 = $150, P&L = $40
+        // If DOWN wins: 50 * $1.00 = $50, P&L = -$60
+        let pos = Position {
+            up_shares: dec!(150),
+            down_shares: dec!(50),
+            up_cost: dec!(90),
+            down_cost: dec!(20),
+        };
+        assert_eq!(pos.calculate_pnl(true), dec!(40));
+        assert_eq!(pos.calculate_pnl(false), dec!(-60));
+    }
+
+    #[test]
+    fn test_position_guaranteed_pnl() {
+        // Buy 100 UP @ 0.45, 100 DOWN @ 0.52
+        // Matched pairs = 100
+        // Settlement value = $100
+        // Cost for matched = $45 + $52 = $97
+        // Guaranteed P&L = $100 - $97 = $3
+        let pos = Position {
+            up_shares: dec!(100),
+            down_shares: dec!(100),
+            up_cost: dec!(45),
+            down_cost: dec!(52),
+        };
+        assert_eq!(pos.guaranteed_pnl(), dec!(3));
+    }
+
+    #[test]
+    fn test_position_guaranteed_pnl_unbalanced() {
+        // Buy 100 UP @ 0.45, 50 DOWN @ 0.52
+        // Matched pairs = 50
+        // Settlement for matched = $50
+        // Cost for matched UP = 45 * (50/100) = $22.50
+        // Cost for matched DOWN = 52 * (50/50) = $52 -- wait, 50 down shares matched
+        // Actually: matched_down_cost = 52 * (50/50) = $52
+        // Total matched cost = $22.50 + $52 = $74.50
+        // Wait, down_shares is 50, so matched_pairs = 50
+        // matched_down_cost = down_cost * (matched_pairs / down_shares) = 52 * (50/50) = 52
+        // Hmm, that seems wrong. Let me recalculate.
+        // If we have 50 DOWN shares and match all 50:
+        // matched_up_cost = up_cost * (50 / up_shares) = 45 * (50/100) = 22.50
+        // matched_down_cost = down_cost * (50 / down_shares) = down_cost * (50/50) = down_cost = 26 (if 50 shares cost 26)
+        // Let's use a clearer example
+        let pos = Position {
+            up_shares: dec!(100),
+            down_shares: dec!(50),
+            up_cost: dec!(50),  // avg 0.50
+            down_cost: dec!(25), // avg 0.50
+        };
+        // Matched pairs = 50
+        // matched_up_cost = 50 * (50/100) = 25
+        // matched_down_cost = 25 * (50/50) = 25
+        // Total matched cost = 50
+        // Settlement = 50
+        // Guaranteed P&L = 0
+        assert_eq!(pos.guaranteed_pnl(), dec!(0));
+    }
+
+    #[test]
+    fn test_position_unrealized_pnl() {
+        let pos = Position {
+            up_shares: dec!(100),
+            down_shares: dec!(100),
+            up_cost: dec!(45),
+            down_cost: dec!(52),
+        };
+        // Cost = 97
+        // Current value at (0.48, 0.50) = 48 + 50 = 98
+        // Unrealized P&L = 1
+        assert_eq!(pos.unrealized_pnl(dec!(0.48), dec!(0.50)), dec!(1));
+    }
+
+    #[test]
+    fn test_position_reset() {
+        let mut pos = Position {
+            up_shares: dec!(100),
+            down_shares: dec!(100),
+            up_cost: dec!(45),
+            down_cost: dec!(52),
+        };
+        pos.reset();
+        assert!(pos.is_empty());
+        assert_eq!(pos.total_cost(), Decimal::ZERO);
+    }
+
+    #[test]
+    fn test_position_inventory_conversion() {
+        let pos = Position {
+            up_shares: dec!(100),
+            down_shares: dec!(75),
+            up_cost: dec!(45),
+            down_cost: dec!(35),
+        };
+
+        let inv = pos.to_inventory("event123".to_string());
+        assert_eq!(inv.event_id, "event123");
+        assert_eq!(inv.yes_shares, dec!(100));
+        assert_eq!(inv.no_shares, dec!(75));
+        assert_eq!(inv.yes_cost_basis, dec!(45));
+        assert_eq!(inv.no_cost_basis, dec!(35));
+        assert_eq!(inv.realized_pnl, Decimal::ZERO);
+
+        // Convert back
+        let pos2 = Position::from_inventory(&inv);
+        assert_eq!(pos2.up_shares, pos.up_shares);
+        assert_eq!(pos2.down_shares, pos.down_shares);
+        assert_eq!(pos2.up_cost, pos.up_cost);
+        assert_eq!(pos2.down_cost, pos.down_cost);
+    }
+
+    #[test]
+    fn test_position_serialization() {
+        let pos = Position {
+            up_shares: dec!(100),
+            down_shares: dec!(75),
+            up_cost: dec!(45),
+            down_cost: dec!(35),
+        };
+
+        let json = serde_json::to_string(&pos).unwrap();
+        let parsed: Position = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.up_shares, pos.up_shares);
+        assert_eq!(parsed.down_shares, pos.down_shares);
+        assert_eq!(parsed.up_cost, pos.up_cost);
+        assert_eq!(parsed.down_cost, pos.down_cost);
     }
 }

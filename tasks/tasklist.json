@@ -44,7 +44,7 @@
       "id": "p1-3",
       "title": "Phase 1: Add Position and trade decision types",
       "description": "Add EngineType enum (Arbitrage, Directional, MakerRebates), Position struct with cost/share tracking, and calculate_pnl(). Extend TradeDecision with engine variants. Use Decimal for all financial math.",
-      "status": "pending",
+      "status": "completed",
       "depends": [],
       "files": [
         "crates/poly-bot/src/types.rs"

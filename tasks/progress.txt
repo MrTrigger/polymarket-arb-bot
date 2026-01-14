@@ -2617,3 +2617,49 @@ Tests verified:
 Notes for next task:
 - p3-2 (ConfidenceSizer) depends on p1-2 (done)
 - Confidence types ready for dynamic order sizing
+
+---
+
+### [2026-01-14 08:36] Task p1-3: Add Position and trade decision types
+Files modified:
+- crates/poly-bot/src/types.rs (added EngineType, TradeDecision, Position types)
+- crates/poly-bot/src/lib.rs (exported new types)
+
+Files updated:
+- tasks/tasklist.json (marked p1-3 as completed)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo check: PASSED
+- cargo test -p poly-bot types::: PASSED (60 tests including 34 new)
+
+Types implemented:
+- EngineType enum: Arbitrage, Directional, MakerRebates with priority ordering
+- TradeDecision enum: Approve, Reject, ReduceSize, RebalanceRequired
+- Position struct: up_shares, down_shares, up_cost, down_cost tracking
+
+Position methods:
+- total_cost(), total_shares() - basic accessors
+- up_ratio(), down_ratio() - allocation ratios (default 0.5 if empty)
+- min_side_ratio() - hedge ratio for risk checks
+- calculate_pnl(up_wins) - settlement P&L calculation
+- guaranteed_pnl() - matched pair profit
+- unrealized_pnl(up_price, down_price) - mark-to-market
+- to_inventory() / from_inventory() - compatibility conversions
+
+TradeDecision methods:
+- reject(reason) - factory for Reject variant
+- allows_trading() - true for Approve or ReduceSize
+- is_blocked() - true for Reject
+- requires_rebalance() - true for RebalanceRequired
+
+Key decisions:
+- Position uses UP/DOWN naming (directional), Inventory uses YES/NO (outcome)
+- All financial values use Decimal per project convention
+- Position provides conversion to/from Inventory for integration
+- TradeDecision matches spec exactly for PnlRiskManager integration
+
+Notes for next tasks:
+- Position ready for use in PnlRiskManager (p4-1)
+- EngineType ready for DecisionAggregator (p7-2)
+- TradeDecision ready for risk checking integration
