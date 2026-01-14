@@ -12,12 +12,14 @@
 //!
 //! ## Modules
 //!
+//! - `api`: Polymarket API clients (fee rates, rewards)
 //! - `config`: Configuration loading and validation
 //! - `state`: Global shared state with lock-free access
 //! - `types`: Order book, market state, and inventory types
 //! - `data_source`: Data source abstraction (live WebSocket, replay from ClickHouse)
 //! - `executor`: Order execution abstraction (live, paper, backtest)
 
+pub mod api;
 pub mod config;
 pub mod data_source;
 pub mod executor;
@@ -91,3 +93,4 @@ pub use mode::{
     BacktestMode, BacktestModeConfig, BacktestResult, LiveMode, LiveModeConfig, PaperMode,
     PaperModeConfig, PnLReport, ShadowMode, ShadowModeConfig, SweepParameter,
 };
+pub use api::{FeeRateClient, FeeRateError, FeeRateResponse};

@@ -59,7 +59,7 @@
       "id": "p2-1",
       "title": "Phase 2: Add fee rate client",
       "description": "Create api/ module with fee rate fetching from GET /fee-rate?token_id=X. Add FeeRateResponse struct, implement fetch_fee_rate() with in-memory caching per market session. Handle API errors gracefully.",
-      "status": "pending",
+      "status": "completed",
       "depends": [],
       "files": [
         "crates/poly-bot/src/api/mod.rs",

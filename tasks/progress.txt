@@ -2663,3 +2663,43 @@ Notes for next tasks:
 - Position ready for use in PnlRiskManager (p4-1)
 - EngineType ready for DecisionAggregator (p7-2)
 - TradeDecision ready for risk checking integration
+
+---
+
+### [2026-01-14] Task p2-1: Add fee rate client
+Files created:
+- crates/poly-bot/src/api/mod.rs
+- crates/poly-bot/src/api/fees.rs
+
+Files modified:
+- crates/poly-bot/src/lib.rs (added api module and exports)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-bot api::: PASSED (14 tests)
+
+FeeRateClient features:
+- Fetches from GET /fee-rate?token_id=X endpoint
+- In-memory RwLock<HashMap> caching per token
+- FeeRateResponse with base_fee in basis points
+- Supports both "base_fee" and "fee_rate_bps" JSON fields (serde alias)
+- Helper methods: as_decimal(), has_fees()
+- prefetch_fee_rates() for warming cache at session start
+- clear_cache() for new market sessions
+
+FeeRateError variants:
+- Http: reqwest errors
+- ApiError: non-2xx responses with status and body
+- Json: parse failures
+- InvalidTokenId: empty token validation
+
+Key decisions:
+- Using RwLock (not DashMap) since fee rates are read-heavy, write-rare
+- 10s request timeout
+- Default base URL: https://clob.polymarket.com
+- Support custom URLs for testing
+- Fee rate cached indefinitely per client lifetime (matches market session pattern)
+
+Notes for next task:
+- p2-2 (rewards client) depends on p2-1 (done)
+- Similar pattern: HTTP fetch + caching + response types
