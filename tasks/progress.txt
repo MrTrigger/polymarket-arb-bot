@@ -3590,3 +3590,63 @@ Notes for next tasks:
 - p9-1 (unit tests) ready - depends on p7-3 (completed)
 - TradeInterval can integrate with StrategyLoop main loop
 - Consider adding to LiveMode/PaperMode execution paths
+
+---
+
+### [2026-01-14] Task p8-2: Add maker price calculation
+Files created:
+- crates/poly-bot/src/strategy/pricing.rs
+
+Files modified:
+- crates/poly-bot/src/strategy/mod.rs (added pricing module export)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test strategy::pricing: PASSED (32 tests)
+
+Module features:
+- `get_maker_price(book, side)` - calculate optimal maker price inside spread
+- `get_maker_prices_both_sides(book)` - get prices for both buy and sell sides
+- `is_inside_spread(book, price)` - check if price is inside the spread
+- `would_cross_spread(book, side, price)` - check if price would take liquidity
+- `price_improvement_bps(book, side, price)` - calculate improvement over BBO
+
+SpreadCategory enum:
+- Wide (>3%): aggressive placement at 40% from reference
+- Medium (1-3%): moderate placement at 30% from reference
+- Tight (<1%): conservative placement at reference price
+
+MakerPriceResult struct:
+- price: calculated maker price (Decimal, rounded to 2dp)
+- spread_category: SpreadCategory enum
+- placement_ratio: 0.0 to 0.40 based on category
+- spread_bps: current spread in basis points
+
+Pricing strategy:
+- For buy orders: place above bid (bid + spread * placement_ratio)
+- For sell orders: place below ask (ask - spread * placement_ratio)
+- All prices rounded to 2 decimal places ($0.01 ticks)
+
+Tests added (32):
+- SpreadCategory tests (3): placement_ratio, description, display
+- Wide spread tests (3): buy, sell, very_wide
+- Medium spread tests (3): buy, sell, boundary_high
+- Tight spread tests (3): buy, sell, very_tight
+- Edge case tests (4): empty_book, no_bid, no_ask, spread_bps_calculation
+- Rounding test (1): rounding_to_cents
+- Both sides tests (2): both_sides, both_sides_empty_book
+- Inside spread tests (3): true, false_at_edges, empty_book
+- Cross spread tests (3): buy, sell, empty_book
+- Price improvement tests (4): buy, sell, zero, empty_book
+- MakerPriceResult tests (3): debug, equality, clone
+
+Key decisions:
+- Separate module from maker.rs for better separation of concerns
+- Returns MakerPriceResult with metadata, not just price
+- Uses SpreadCategory enum for clear categorization
+- Prices always rounded to $0.01 (Polymarket tick size)
+
+Notes for next tasks:
+- p9-1 (unit tests) is next ready task
+- pricing.rs can be integrated with maker strategy
+- Consider using get_maker_prices_both_sides for two-sided MM

@@ -33,6 +33,7 @@ pub mod confidence;
 pub mod confidence_sizing;
 pub mod directional;
 pub mod maker;
+pub mod pricing;
 pub mod signal;
 pub mod sizing;
 pub mod toxic;
