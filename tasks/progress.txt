@@ -3454,3 +3454,67 @@ Notes for next task (p7-3):
 - Need to add it to StrategyLoop and wire up check_opportunities()
 - Will tag decisions with engine source for observability
 - Must maintain backward compatibility with arb-only mode
+
+---
+
+### [2026-01-14] Task p7-3: Integrate engines into StrategyLoop
+Files modified:
+- crates/poly-bot/src/strategy/mod.rs
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-bot: PASSED (all 857 tests)
+
+Implementation:
+- Added EnginesConfig field to StrategyLoop for engine configuration
+- Added MakerDetector field for maker opportunity detection
+- Added DecisionAggregator field for multi-engine decision aggregation
+- Added MultiEngineDecision struct for extended observability
+- Added multi_obs_sender channel for multi-engine decisions
+
+New constructor:
+- with_engines(data_source, executor, state, config, engines_config) - full constructor
+- new() now calls with_engines() with EnginesConfig::default() for backward compatibility
+
+New methods:
+- with_multi_observability(sender) - attach multi-engine obs channel
+- engines_config() - get current engine configuration
+- is_engine_enabled(engine) - check if specific engine is enabled
+- record_multi_decision() - record decision with engine source
+
+Refactored check_opportunities():
+- Phase 1: Gather market state and update spot prices
+- Phase 2: Run all enabled engines (arb, directional, maker)
+- Phase 3: Aggregate decisions using DecisionAggregator
+- Phase 4: Check toxic flow and possibly skip
+- Phase 5: Execute based on winning engine with appropriate sizing
+- Phase 6: Execute concurrent maker orders if primary succeeded
+
+Key decisions:
+- Engines run in parallel conceptually (all detect before any execute)
+- Aggregator determines winning engine based on priority
+- Maker orders can run concurrently with primary (fire-and-forget)
+- Legacy obs_sender still works for arb-only mode
+- Multi-engine decisions include aggregated info for analysis
+- Backward compatible: new() uses EnginesConfig::default() (arb-only)
+
+MultiEngineDecision struct:
+- decision_id, event_id, asset - standard identifiers
+- engine: EngineType - which engine produced the decision
+- aggregated: AggregatedDecision - full aggregation result
+- sizing: Option<SizingResult> - sizing for arb/directional
+- toxic_warning: Option<ToxicFlowWarning>
+- action: TradeAction
+- timestamp, latency_us - timing info
+
+Execution routing:
+- EngineDecision::Arbitrage → execute_arb() with PositionSizer
+- EngineDecision::Directional → execute_directional() with ConfidenceSizer
+- EngineDecision::Maker → execute_maker() for each opportunity
+- Concurrent makers → fire-and-forget, don't block primary
+
+Notes for next task (p8-1 or p9-1):
+- Multi-engine integration complete
+- Next: TradeInterval (p8-1) or comprehensive unit tests (p9-1)
+- Consider adding more integration tests for multi-engine scenarios
+- Maker price calculation (p8-2) already exists in maker.rs

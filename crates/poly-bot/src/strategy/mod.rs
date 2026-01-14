@@ -154,14 +154,14 @@ impl ActiveMakerOrder {
     }
 }
 
-use crate::config::TradingConfig;
+use crate::config::{EnginesConfig, TradingConfig};
 use crate::data_source::{
     BookDeltaEvent, BookSnapshotEvent, DataSource, DataSourceError, FillEvent, MarketEvent,
     SpotPriceEvent, WindowCloseEvent, WindowOpenEvent,
 };
 use crate::executor::{Executor, ExecutorError, OrderRequest, OrderResult, OrderType};
 use crate::state::GlobalState;
-use crate::types::{Inventory, MarketState, OrderBook};
+use crate::types::{EngineType, Inventory, MarketState, OrderBook};
 
 pub use arb::{ArbDetector, ArbOpportunity, ArbRejection, ArbThresholds};
 pub use confidence::{
@@ -298,6 +298,31 @@ pub enum TradeAction {
     SkipCircuitBreaker,
 }
 
+/// Extended trade decision with engine source for multi-engine strategy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MultiEngineDecision {
+    /// Unique decision ID.
+    pub decision_id: u64,
+    /// Event ID for this market.
+    pub event_id: String,
+    /// Asset being traded.
+    pub asset: CryptoAsset,
+    /// Which engine produced this decision.
+    pub engine: EngineType,
+    /// The aggregated decision (primary + concurrent).
+    pub aggregated: AggregatedDecision,
+    /// Sizing result (if applicable).
+    pub sizing: Option<SizingResult>,
+    /// Toxic flow warning (if any).
+    pub toxic_warning: Option<ToxicFlowWarning>,
+    /// Action taken.
+    pub action: TradeAction,
+    /// Decision timestamp.
+    pub timestamp: DateTime<Utc>,
+    /// Latency from event to decision (microseconds).
+    pub latency_us: u64,
+}
+
 /// Internal market state tracked by the strategy.
 #[derive(Debug)]
 #[allow(dead_code)] // Fields used for debugging and future features
@@ -414,12 +439,12 @@ impl StrategyConfig {
 /// The strategy loop:
 /// 1. Receives events from a `DataSource`
 /// 2. Updates internal state (prices, books, inventory)
-/// 3. Detects arbitrage opportunities
-/// 4. Detects directional opportunities
+/// 3. Runs all enabled engines (arbitrage, directional, maker)
+/// 4. Aggregates decisions based on priority
 /// 5. Checks for toxic flow
-/// 6. Calculates position size (confidence-based for directional)
+/// 6. Calculates position size
 /// 7. Submits orders via `Executor`
-/// 8. Sends decisions to observability channel
+/// 8. Sends decisions to observability channel with engine source
 pub struct StrategyLoop<D: DataSource, E: Executor> {
     /// Data source for market events.
     data_source: D,
@@ -429,10 +454,16 @@ pub struct StrategyLoop<D: DataSource, E: Executor> {
     state: Arc<GlobalState>,
     /// Strategy configuration.
     config: StrategyConfig,
+    /// Engine configuration (which engines are enabled and priority).
+    engines_config: EnginesConfig,
     /// Arbitrage detector.
     arb_detector: ArbDetector,
     /// Directional detector.
     directional_detector: DirectionalDetector,
+    /// Maker rebate detector.
+    maker_detector: MakerDetector,
+    /// Decision aggregator for multi-engine strategy.
+    aggregator: DecisionAggregator,
     /// Toxic flow detector.
     toxic_detector: ToxicFlowDetector,
     /// Position sizer (limit-based).
@@ -449,18 +480,35 @@ pub struct StrategyLoop<D: DataSource, E: Executor> {
     decision_counter: u64,
     /// Observability channel sender (optional).
     obs_sender: Option<mpsc::Sender<TradeDecision>>,
+    /// Multi-engine observability channel sender (optional).
+    multi_obs_sender: Option<mpsc::Sender<MultiEngineDecision>>,
 }
 
 impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
     /// Create a new strategy loop.
+    ///
+    /// Uses default engines config (arbitrage only, for backward compatibility).
     pub fn new(
         data_source: D,
         executor: E,
         state: Arc<GlobalState>,
         config: StrategyConfig,
     ) -> Self {
+        Self::with_engines(data_source, executor, state, config, EnginesConfig::default())
+    }
+
+    /// Create a new strategy loop with custom engine configuration.
+    pub fn with_engines(
+        data_source: D,
+        executor: E,
+        state: Arc<GlobalState>,
+        config: StrategyConfig,
+        engines_config: EnginesConfig,
+    ) -> Self {
         let arb_detector = ArbDetector::new(config.arb_thresholds.clone());
         let directional_detector = DirectionalDetector::new();
+        let maker_detector = MakerDetector::new();
+        let aggregator = DecisionAggregator::new(&engines_config);
         let toxic_detector = ToxicFlowDetector::new(config.toxic_config.clone());
         let sizer = PositionSizer::new(config.sizing_config.clone());
         // Create confidence sizer with the available balance from sizing config
@@ -471,8 +519,11 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             executor,
             state,
             config,
+            engines_config,
             arb_detector,
             directional_detector,
+            maker_detector,
+            aggregator,
             toxic_detector,
             sizer,
             confidence_sizer,
@@ -481,15 +532,38 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             spot_prices: HashMap::new(),
             decision_counter: 0,
             obs_sender: None,
+            multi_obs_sender: None,
         }
     }
 
-    /// Set observability channel for decision capture.
+    /// Set observability channel for decision capture (legacy arb-only).
     ///
     /// Decisions are sent via `try_send()` to avoid blocking the hot path.
     pub fn with_observability(mut self, sender: mpsc::Sender<TradeDecision>) -> Self {
         self.obs_sender = Some(sender);
         self
+    }
+
+    /// Set observability channel for multi-engine decision capture.
+    ///
+    /// Decisions include engine source for multi-engine strategy analysis.
+    pub fn with_multi_observability(mut self, sender: mpsc::Sender<MultiEngineDecision>) -> Self {
+        self.multi_obs_sender = Some(sender);
+        self
+    }
+
+    /// Get the current engines configuration.
+    pub fn engines_config(&self) -> &EnginesConfig {
+        &self.engines_config
+    }
+
+    /// Check if a specific engine is enabled.
+    pub fn is_engine_enabled(&self, engine: EngineType) -> bool {
+        match engine {
+            EngineType::Arbitrage => self.engines_config.arbitrage.enabled,
+            EngineType::Directional => self.engines_config.directional.enabled,
+            EngineType::MakerRebates => self.engines_config.maker.enabled,
+        }
     }
 
     /// Run the strategy loop until shutdown or error.
@@ -780,7 +854,11 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
         }
     }
 
-    /// Check all markets for arbitrage opportunities.
+    /// Check all markets for opportunities using all enabled engines.
+    ///
+    /// This method runs all enabled engines (arbitrage, directional, maker) and
+    /// aggregates their decisions based on the configured priority order.
+    /// Maker orders can run concurrently with other strategies since they are passive.
     async fn check_opportunities(&mut self, event_latency_us: u64) -> Result<(), StrategyError> {
         // Fast path: check if trading is enabled (single atomic load)
         if !self.state.can_trade() {
@@ -795,6 +873,7 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
         let event_ids: Vec<String> = self.markets.keys().cloned().collect();
 
         for event_id in event_ids {
+            // === Phase 1: Gather market state ===
             let market = match self.markets.get_mut(&event_id) {
                 Some(m) => m,
                 None => continue,
@@ -808,55 +887,77 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                 continue;
             }
 
-            // Fast filter: check if there's potential arb
-            let has_arb = ArbDetector::has_potential_arb(&market.state);
-
-            // If no arb, check for directional opportunity
-            if !has_arb {
-                // Update spot price in market state if we have it
-                if let Some(&spot) = self.spot_prices.get(&market.state.asset) {
-                    market.state.spot_price = Some(spot);
-                }
-
-                // Try directional detection (uses state.spot_price)
-                if let Ok(dir_opp) = self.directional_detector.detect(&market.state) {
-                    // Calculate size using confidence-based sizing
-                    let factors = ConfidenceFactors {
-                        distance_to_strike: dir_opp.distance * market.state.strike_price,
-                        minutes_remaining: dir_opp.minutes_remaining,
-                        signal: dir_opp.signal,
-                        book_imbalance: dir_opp.yes_imbalance,
-                        favorable_depth: market.state.yes_book.ask_depth()
-                            .min(market.state.no_book.ask_depth()),
-                    };
-                    let order_result = self.confidence_sizer.get_order_size(&factors);
-                    let total_size = order_result.size;
-
-                    if total_size >= Decimal::ONE {
-                        let _action = self.execute_directional(&dir_opp, total_size).await?;
-                        // Note: Recording directional decisions is left for future enhancement
-                    }
-                }
-                continue;
+            // Update spot price in market state if we have it
+            if let Some(&spot) = self.spot_prices.get(&market.state.asset) {
+                market.state.spot_price = Some(spot);
             }
 
-            // Detect arb opportunity
-            let opportunity = match self.arb_detector.detect(&market.state) {
-                Ok(opp) => opp,
-                Err(reason) => {
-                    trace!("No arb in {}: {}", event_id, reason);
-                    continue;
+            let market_state = &market.state;
+            let asset = market.asset;
+
+            // === Phase 2: Run all enabled engines ===
+
+            // Arbitrage detection
+            let arb_opportunity = if self.engines_config.arbitrage.enabled {
+                match self.arb_detector.detect(market_state) {
+                    Ok(opp) => {
+                        trace!("Arb detected for {}: margin={}bps", event_id, opp.margin_bps);
+                        Some(opp)
+                    }
+                    Err(reason) => {
+                        trace!("No arb in {}: {}", event_id, reason);
+                        None
+                    }
                 }
+            } else {
+                None
             };
+
+            // Directional detection
+            let directional_opportunity = if self.engines_config.directional.enabled {
+                match self.directional_detector.detect(market_state) {
+                    Ok(opp) => {
+                        trace!("Directional detected for {}: signal={:?}", event_id, opp.signal);
+                        Some(opp)
+                    }
+                    Err(reason) => {
+                        trace!("No directional in {}: {}", event_id, reason);
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            // Maker detection
+            let maker_opportunities = if self.engines_config.maker.enabled {
+                let opps = self.maker_detector.detect(market_state, None, None);
+                if !opps.is_empty() {
+                    trace!("Maker detected for {}: {} opportunities", event_id, opps.len());
+                }
+                opps
+            } else {
+                Vec::new()
+            };
+
+            // === Phase 3: Aggregate decisions ===
+            let aggregated = self.aggregator.aggregate(
+                arb_opportunity.clone(),
+                directional_opportunity.clone(),
+                maker_opportunities.clone(),
+            );
+
+            // Skip if no opportunity detected by any engine
+            if !aggregated.should_act() {
+                continue;
+            }
 
             // Track opportunity detected
             self.state.metrics.inc_opportunities();
 
-            // Use cached toxic flow warnings from recent book updates
+            // === Phase 4: Toxic flow check ===
             let yes_toxic = market.yes_toxic_warning.clone();
             let no_toxic = market.no_toxic_warning.clone();
-
-            // Use the more severe warning
             let toxic_warning = match (&yes_toxic, &no_toxic) {
                 (Some(y), Some(n)) => {
                     if y.severity >= n.severity { yes_toxic } else { no_toxic }
@@ -872,52 +973,177 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                 && warning.severity.should_block_trading()
             {
                 debug!("Blocking trade due to toxic flow: {:?}", warning.severity);
-                self.record_decision(
-                    &opportunity,
-                    SizingResult::invalid(SizingLimit::NoOpportunity),
-                    toxic_warning.clone(),
-                    TradeAction::SkipToxic,
-                    event_latency_us,
-                );
+                // Record skipped decision for observability
+                if let Some(primary_engine) = aggregated.primary_engine() {
+                    self.record_multi_decision(
+                        &event_id,
+                        asset,
+                        primary_engine,
+                        aggregated.clone(),
+                        None,
+                        toxic_warning.clone(),
+                        TradeAction::SkipToxic,
+                        event_latency_us,
+                    );
+                }
                 self.state.metrics.inc_skipped();
                 continue;
             }
 
-            // Calculate position size
-            let sizing = self.sizer.calculate_size(
-                &opportunity,
-                Some(&market.inventory),
-                total_exposure,
-                toxic_warning.as_ref(),
-            );
+            // === Phase 5: Execute based on winning engine ===
+            let action = match &aggregated.primary {
+                Some(EngineDecision::Arbitrage(opp)) => {
+                    // Calculate position size for arb
+                    let market = self.markets.get(&event_id).unwrap();
+                    let sizing = self.sizer.calculate_size(
+                        opp,
+                        Some(&market.inventory),
+                        total_exposure,
+                        toxic_warning.as_ref(),
+                    );
 
-            if !sizing.is_valid {
-                debug!("Invalid sizing for {}: {:?}", event_id, sizing.limit_reason);
-                self.record_decision(
-                    &opportunity,
-                    sizing,
-                    toxic_warning.clone(),
-                    TradeAction::SkipSizing,
-                    event_latency_us,
-                );
-                self.state.metrics.inc_skipped();
-                continue;
+                    if !sizing.is_valid {
+                        debug!("Invalid sizing for arb {}: {:?}", event_id, sizing.limit_reason);
+                        self.record_multi_decision(
+                            &event_id,
+                            asset,
+                            EngineType::Arbitrage,
+                            aggregated.clone(),
+                            Some(sizing),
+                            toxic_warning.clone(),
+                            TradeAction::SkipSizing,
+                            event_latency_us,
+                        );
+                        self.state.metrics.inc_skipped();
+                        continue;
+                    }
+
+                    // Execute arbitrage trade
+                    info!("Executing arb: {} size={} margin={}bps engine=Arbitrage",
+                        event_id, sizing.size, opp.margin_bps);
+
+                    let action = self.execute_arb(opp, &sizing).await?;
+
+                    // Record decision with engine source
+                    self.record_multi_decision(
+                        &event_id,
+                        asset,
+                        EngineType::Arbitrage,
+                        aggregated.clone(),
+                        Some(sizing),
+                        toxic_warning.clone(),
+                        action,
+                        event_latency_us,
+                    );
+
+                    // Also record legacy decision for backward compatibility
+                    if let Some(arb_opp) = &arb_opportunity {
+                        let sizing_for_legacy = self.sizer.calculate_size(
+                            arb_opp,
+                            self.markets.get(&event_id).map(|m| &m.inventory),
+                            total_exposure,
+                            toxic_warning.as_ref(),
+                        );
+                        self.record_decision(arb_opp, sizing_for_legacy, toxic_warning.clone(), action, event_latency_us);
+                    }
+
+                    action
+                }
+                Some(EngineDecision::Directional(opp)) => {
+                    // Calculate size using confidence-based sizing
+                    let market = self.markets.get(&event_id).unwrap();
+                    let factors = ConfidenceFactors {
+                        distance_to_strike: opp.distance * market.state.strike_price,
+                        minutes_remaining: opp.minutes_remaining,
+                        signal: opp.signal,
+                        book_imbalance: opp.yes_imbalance,
+                        favorable_depth: market.state.yes_book.ask_depth()
+                            .min(market.state.no_book.ask_depth()),
+                    };
+                    let order_result = self.confidence_sizer.get_order_size(&factors);
+                    let total_size = order_result.size;
+
+                    if total_size < Decimal::ONE {
+                        debug!("Directional size too small for {}: {}", event_id, total_size);
+                        self.record_multi_decision(
+                            &event_id,
+                            asset,
+                            EngineType::Directional,
+                            aggregated.clone(),
+                            None,
+                            toxic_warning.clone(),
+                            TradeAction::SkipSizing,
+                            event_latency_us,
+                        );
+                        self.state.metrics.inc_skipped();
+                        continue;
+                    }
+
+                    // Execute directional trade
+                    info!("Executing directional: {} signal={:?} size={} engine=Directional",
+                        event_id, opp.signal, total_size);
+
+                    let action = self.execute_directional(opp, total_size).await?;
+
+                    // Record decision with engine source
+                    self.record_multi_decision(
+                        &event_id,
+                        asset,
+                        EngineType::Directional,
+                        aggregated.clone(),
+                        None, // Directional uses confidence sizing, not SizingResult
+                        toxic_warning.clone(),
+                        action,
+                        event_latency_us,
+                    );
+
+                    action
+                }
+                Some(EngineDecision::Maker(opps)) => {
+                    // Execute maker orders
+                    let mut action = TradeAction::Execute;
+                    for opp in opps {
+                        info!("Executing maker: {} token={} side={:?} price={} engine=MakerRebates",
+                            event_id, opp.token_id, opp.side, opp.price);
+
+                        match self.execute_maker(opp).await {
+                            Ok(a) => action = a,
+                            Err(e) => {
+                                warn!("Maker execution error: {}", e);
+                                action = TradeAction::SkipSizing;
+                            }
+                        }
+                    }
+
+                    // Record decision with engine source
+                    self.record_multi_decision(
+                        &event_id,
+                        asset,
+                        EngineType::MakerRebates,
+                        aggregated.clone(),
+                        None,
+                        toxic_warning.clone(),
+                        action,
+                        event_latency_us,
+                    );
+
+                    action
+                }
+                None => continue,
+            };
+
+            // === Phase 6: Execute concurrent maker orders ===
+            if let Some(concurrent_makers) = &aggregated.concurrent_maker
+                && action == TradeAction::Execute
+            {
+                for opp in concurrent_makers {
+                    trace!("Executing concurrent maker: {} token={}", event_id, opp.token_id);
+                    // Fire and forget - don't block on concurrent makers
+                    if let Err(e) = self.execute_maker(opp).await {
+                        trace!("Concurrent maker failed (non-blocking): {}", e);
+                    }
+                }
             }
-
-            // Execute the trade
-            info!("Executing arb: {} size={} margin={}bps",
-                event_id, sizing.size, opportunity.margin_bps);
-
-            let action = self.execute_arb(&opportunity, &sizing).await?;
-
-            // Record decision
-            self.record_decision(
-                &opportunity,
-                sizing,
-                toxic_warning,
-                action,
-                event_latency_us,
-            );
         }
 
         Ok(())
@@ -1477,7 +1703,7 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             .unwrap_or(0)
     }
 
-    /// Record a decision for observability.
+    /// Record a decision for observability (legacy arb-only format).
     fn record_decision(
         &mut self,
         opportunity: &ArbOpportunity,
@@ -1505,6 +1731,45 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             // Use try_send to avoid blocking the hot path
             if sender.try_send(decision).is_err() {
                 trace!("Observability channel full, dropping decision");
+            }
+        }
+    }
+
+    /// Record a multi-engine decision for observability.
+    ///
+    /// This includes the engine source for multi-engine strategy analysis.
+    #[allow(clippy::too_many_arguments)]
+    fn record_multi_decision(
+        &mut self,
+        event_id: &str,
+        asset: CryptoAsset,
+        engine: EngineType,
+        aggregated: AggregatedDecision,
+        sizing: Option<SizingResult>,
+        toxic_warning: Option<ToxicFlowWarning>,
+        action: TradeAction,
+        latency_us: u64,
+    ) {
+        let decision = MultiEngineDecision {
+            decision_id: self.decision_counter,
+            event_id: event_id.to_string(),
+            asset,
+            engine,
+            aggregated,
+            sizing,
+            toxic_warning,
+            action,
+            timestamp: Utc::now(),
+            latency_us,
+        };
+
+        self.decision_counter += 1;
+
+        // Fire-and-forget to multi-engine observability channel
+        if let Some(ref sender) = self.multi_obs_sender {
+            // Use try_send to avoid blocking the hot path
+            if sender.try_send(decision).is_err() {
+                trace!("Multi-engine observability channel full, dropping decision");
             }
         }
     }

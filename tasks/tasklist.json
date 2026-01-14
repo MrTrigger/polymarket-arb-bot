@@ -279,7 +279,7 @@
       "id": "p7-3",
       "title": "Phase 7: Integrate engines into StrategyLoop",
       "description": "Add engine instances (arb, directional, maker) and aggregator to StrategyLoop. Refactor check_opportunities() to run all enabled engines. Route execution to correct handler. Tag decisions with engine source for observability.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p5-2", "p6-2", "p7-2"],
       "files": [
         "crates/poly-bot/src/strategy/mod.rs"
