@@ -1,0 +1,2002 @@
+[
+  {
+    "config": {
+      "strong_threshold": 0.03,
+      "lean_threshold": 0.005,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.55,
+      "max_combined": 1.02
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 2157.0352029858072,
+    "return_pct": 5.991764452738353,
+    "win_rate": 61.25000000000001,
+    "by_signal": {
+      "StrongDown": {
+        "n": 366,
+        "pnl": 1168.1202623159693,
+        "cost": 18300.0,
+        "wins": 229
+      },
+      "StrongUp": {
+        "n": 288,
+        "pnl": 1091.804127404608,
+        "cost": 14400.0,
+        "wins": 183
+      },
+      "LeanDown": {
+        "n": 33,
+        "pnl": -65.82562102711739,
+        "cost": 1650.0,
+        "wins": 13
+      },
+      "LeanUp": {
+        "n": 33,
+        "pnl": -37.063565707648294,
+        "cost": 1650.0,
+        "wins": 16
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.03,
+      "lean_threshold": 0.005,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.55,
+      "max_combined": 1.03
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 2157.0352029858072,
+    "return_pct": 5.991764452738353,
+    "win_rate": 61.25000000000001,
+    "by_signal": {
+      "StrongDown": {
+        "n": 366,
+        "pnl": 1168.1202623159693,
+        "cost": 18300.0,
+        "wins": 229
+      },
+      "StrongUp": {
+        "n": 288,
+        "pnl": 1091.804127404608,
+        "cost": 14400.0,
+        "wins": 183
+      },
+      "LeanDown": {
+        "n": 33,
+        "pnl": -65.82562102711739,
+        "cost": 1650.0,
+        "wins": 13
+      },
+      "LeanUp": {
+        "n": 33,
+        "pnl": -37.063565707648294,
+        "cost": 1650.0,
+        "wins": 16
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.03,
+      "lean_threshold": 0.005,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.55,
+      "max_combined": 1.05
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 2157.0352029858072,
+    "return_pct": 5.991764452738353,
+    "win_rate": 61.25000000000001,
+    "by_signal": {
+      "StrongDown": {
+        "n": 366,
+        "pnl": 1168.1202623159693,
+        "cost": 18300.0,
+        "wins": 229
+      },
+      "StrongUp": {
+        "n": 288,
+        "pnl": 1091.804127404608,
+        "cost": 14400.0,
+        "wins": 183
+      },
+      "LeanDown": {
+        "n": 33,
+        "pnl": -65.82562102711739,
+        "cost": 1650.0,
+        "wins": 13
+      },
+      "LeanUp": {
+        "n": 33,
+        "pnl": -37.063565707648294,
+        "cost": 1650.0,
+        "wins": 16
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.03,
+      "lean_threshold": 0.005,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.6,
+      "max_combined": 1.02
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 2115.7107403271325,
+    "return_pct": 5.876974278686479,
+    "win_rate": 61.25000000000001,
+    "by_signal": {
+      "StrongDown": {
+        "n": 366,
+        "pnl": 1168.1202623159693,
+        "cost": 18300.0,
+        "wins": 229
+      },
+      "StrongUp": {
+        "n": 288,
+        "pnl": 1091.804127404608,
+        "cost": 14400.0,
+        "wins": 183
+      },
+      "LeanDown": {
+        "n": 33,
+        "pnl": -101.27442497909252,
+        "cost": 1650.0,
+        "wins": 13
+      },
+      "LeanUp": {
+        "n": 33,
+        "pnl": -42.939224414349106,
+        "cost": 1650.0,
+        "wins": 16
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.03,
+      "lean_threshold": 0.005,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.6,
+      "max_combined": 1.03
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 2115.7107403271325,
+    "return_pct": 5.876974278686479,
+    "win_rate": 61.25000000000001,
+    "by_signal": {
+      "StrongDown": {
+        "n": 366,
+        "pnl": 1168.1202623159693,
+        "cost": 18300.0,
+        "wins": 229
+      },
+      "StrongUp": {
+        "n": 288,
+        "pnl": 1091.804127404608,
+        "cost": 14400.0,
+        "wins": 183
+      },
+      "LeanDown": {
+        "n": 33,
+        "pnl": -101.27442497909252,
+        "cost": 1650.0,
+        "wins": 13
+      },
+      "LeanUp": {
+        "n": 33,
+        "pnl": -42.939224414349106,
+        "cost": 1650.0,
+        "wins": 16
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.03,
+      "lean_threshold": 0.005,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.6,
+      "max_combined": 1.05
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 2115.7107403271325,
+    "return_pct": 5.876974278686479,
+    "win_rate": 61.25000000000001,
+    "by_signal": {
+      "StrongDown": {
+        "n": 366,
+        "pnl": 1168.1202623159693,
+        "cost": 18300.0,
+        "wins": 229
+      },
+      "StrongUp": {
+        "n": 288,
+        "pnl": 1091.804127404608,
+        "cost": 14400.0,
+        "wins": 183
+      },
+      "LeanDown": {
+        "n": 33,
+        "pnl": -101.27442497909252,
+        "cost": 1650.0,
+        "wins": 13
+      },
+      "LeanUp": {
+        "n": 33,
+        "pnl": -42.939224414349106,
+        "cost": 1650.0,
+        "wins": 16
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.03,
+      "lean_threshold": 0.01,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.55,
+      "max_combined": 1.02
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 2107.26627410399,
+    "return_pct": 5.853517428066639,
+    "win_rate": 61.52777777777778,
+    "by_signal": {
+      "StrongDown": {
+        "n": 373,
+        "pnl": 1112.529663193921,
+        "cost": 18650.0,
+        "wins": 233
+      },
+      "StrongUp": {
+        "n": 294,
+        "pnl": 1070.5118129573152,
+        "cost": 14700.0,
+        "wins": 186
+      },
+      "LeanDown": {
+        "n": 30,
+        "pnl": -58.075034479342705,
+        "cost": 1500.0,
+        "wins": 12
+      },
+      "LeanUp": {
+        "n": 23,
+        "pnl": -17.70016756789925,
+        "cost": 1150.0,
+        "wins": 12
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.03,
+      "lean_threshold": 0.01,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.55,
+      "max_combined": 1.03
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 2107.26627410399,
+    "return_pct": 5.853517428066639,
+    "win_rate": 61.52777777777778,
+    "by_signal": {
+      "StrongDown": {
+        "n": 373,
+        "pnl": 1112.529663193921,
+        "cost": 18650.0,
+        "wins": 233
+      },
+      "StrongUp": {
+        "n": 294,
+        "pnl": 1070.5118129573152,
+        "cost": 14700.0,
+        "wins": 186
+      },
+      "LeanDown": {
+        "n": 30,
+        "pnl": -58.075034479342705,
+        "cost": 1500.0,
+        "wins": 12
+      },
+      "LeanUp": {
+        "n": 23,
+        "pnl": -17.70016756789925,
+        "cost": 1150.0,
+        "wins": 12
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.03,
+      "lean_threshold": 0.01,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.55,
+      "max_combined": 1.05
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 2107.26627410399,
+    "return_pct": 5.853517428066639,
+    "win_rate": 61.52777777777778,
+    "by_signal": {
+      "StrongDown": {
+        "n": 373,
+        "pnl": 1112.529663193921,
+        "cost": 18650.0,
+        "wins": 233
+      },
+      "StrongUp": {
+        "n": 294,
+        "pnl": 1070.5118129573152,
+        "cost": 14700.0,
+        "wins": 186
+      },
+      "LeanDown": {
+        "n": 30,
+        "pnl": -58.075034479342705,
+        "cost": 1500.0,
+        "wins": 12
+      },
+      "LeanUp": {
+        "n": 23,
+        "pnl": -17.70016756789925,
+        "cost": 1150.0,
+        "wins": 12
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.03,
+      "lean_threshold": 0.01,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.6,
+      "max_combined": 1.02
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 2080.842752739269,
+    "return_pct": 5.780118757609081,
+    "win_rate": 61.52777777777778,
+    "by_signal": {
+      "StrongDown": {
+        "n": 373,
+        "pnl": 1112.529663193921,
+        "cost": 18650.0,
+        "wins": 233
+      },
+      "StrongUp": {
+        "n": 294,
+        "pnl": 1070.5118129573152,
+        "cost": 14700.0,
+        "wins": 186
+      },
+      "LeanDown": {
+        "n": 30,
+        "pnl": -88.57391291992263,
+        "cost": 1500.0,
+        "wins": 12
+      },
+      "LeanUp": {
+        "n": 23,
+        "pnl": -13.62481049204176,
+        "cost": 1150.0,
+        "wins": 12
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.03,
+      "lean_threshold": 0.01,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.6,
+      "max_combined": 1.03
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 2080.842752739269,
+    "return_pct": 5.780118757609081,
+    "win_rate": 61.52777777777778,
+    "by_signal": {
+      "StrongDown": {
+        "n": 373,
+        "pnl": 1112.529663193921,
+        "cost": 18650.0,
+        "wins": 233
+      },
+      "StrongUp": {
+        "n": 294,
+        "pnl": 1070.5118129573152,
+        "cost": 14700.0,
+        "wins": 186
+      },
+      "LeanDown": {
+        "n": 30,
+        "pnl": -88.57391291992263,
+        "cost": 1500.0,
+        "wins": 12
+      },
+      "LeanUp": {
+        "n": 23,
+        "pnl": -13.62481049204176,
+        "cost": 1150.0,
+        "wins": 12
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.03,
+      "lean_threshold": 0.01,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.6,
+      "max_combined": 1.05
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 2080.842752739269,
+    "return_pct": 5.780118757609081,
+    "win_rate": 61.52777777777778,
+    "by_signal": {
+      "StrongDown": {
+        "n": 373,
+        "pnl": 1112.529663193921,
+        "cost": 18650.0,
+        "wins": 233
+      },
+      "StrongUp": {
+        "n": 294,
+        "pnl": 1070.5118129573152,
+        "cost": 14700.0,
+        "wins": 186
+      },
+      "LeanDown": {
+        "n": 30,
+        "pnl": -88.57391291992263,
+        "cost": 1500.0,
+        "wins": 12
+      },
+      "LeanUp": {
+        "n": 23,
+        "pnl": -13.62481049204176,
+        "cost": 1150.0,
+        "wins": 12
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.03,
+      "lean_threshold": 0.005,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.65,
+      "max_combined": 1.02
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 2074.386277668457,
+    "return_pct": 5.762184104634603,
+    "win_rate": 61.25000000000001,
+    "by_signal": {
+      "StrongDown": {
+        "n": 366,
+        "pnl": 1168.1202623159693,
+        "cost": 18300.0,
+        "wins": 229
+      },
+      "StrongUp": {
+        "n": 288,
+        "pnl": 1091.804127404608,
+        "cost": 14400.0,
+        "wins": 183
+      },
+      "LeanDown": {
+        "n": 33,
+        "pnl": -136.7232289310677,
+        "cost": 1650.0,
+        "wins": 13
+      },
+      "LeanUp": {
+        "n": 33,
+        "pnl": -48.81488312104995,
+        "cost": 1650.0,
+        "wins": 16
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.03,
+      "lean_threshold": 0.005,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.65,
+      "max_combined": 1.03
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 2074.386277668457,
+    "return_pct": 5.762184104634603,
+    "win_rate": 61.25000000000001,
+    "by_signal": {
+      "StrongDown": {
+        "n": 366,
+        "pnl": 1168.1202623159693,
+        "cost": 18300.0,
+        "wins": 229
+      },
+      "StrongUp": {
+        "n": 288,
+        "pnl": 1091.804127404608,
+        "cost": 14400.0,
+        "wins": 183
+      },
+      "LeanDown": {
+        "n": 33,
+        "pnl": -136.7232289310677,
+        "cost": 1650.0,
+        "wins": 13
+      },
+      "LeanUp": {
+        "n": 33,
+        "pnl": -48.81488312104995,
+        "cost": 1650.0,
+        "wins": 16
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.03,
+      "lean_threshold": 0.005,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.65,
+      "max_combined": 1.05
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 2074.386277668457,
+    "return_pct": 5.762184104634603,
+    "win_rate": 61.25000000000001,
+    "by_signal": {
+      "StrongDown": {
+        "n": 366,
+        "pnl": 1168.1202623159693,
+        "cost": 18300.0,
+        "wins": 229
+      },
+      "StrongUp": {
+        "n": 288,
+        "pnl": 1091.804127404608,
+        "cost": 14400.0,
+        "wins": 183
+      },
+      "LeanDown": {
+        "n": 33,
+        "pnl": -136.7232289310677,
+        "cost": 1650.0,
+        "wins": 13
+      },
+      "LeanUp": {
+        "n": 33,
+        "pnl": -48.81488312104995,
+        "cost": 1650.0,
+        "wins": 16
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.03,
+      "lean_threshold": 0.01,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.65,
+      "max_combined": 1.02
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 2054.4192313745457,
+    "return_pct": 5.706720087151516,
+    "win_rate": 61.52777777777778,
+    "by_signal": {
+      "StrongDown": {
+        "n": 373,
+        "pnl": 1112.529663193921,
+        "cost": 18650.0,
+        "wins": 233
+      },
+      "StrongUp": {
+        "n": 294,
+        "pnl": 1070.5118129573152,
+        "cost": 14700.0,
+        "wins": 186
+      },
+      "LeanDown": {
+        "n": 30,
+        "pnl": -119.07279136050263,
+        "cost": 1500.0,
+        "wins": 12
+      },
+      "LeanUp": {
+        "n": 23,
+        "pnl": -9.54945341618425,
+        "cost": 1150.0,
+        "wins": 12
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.03,
+      "lean_threshold": 0.01,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.65,
+      "max_combined": 1.03
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 2054.4192313745457,
+    "return_pct": 5.706720087151516,
+    "win_rate": 61.52777777777778,
+    "by_signal": {
+      "StrongDown": {
+        "n": 373,
+        "pnl": 1112.529663193921,
+        "cost": 18650.0,
+        "wins": 233
+      },
+      "StrongUp": {
+        "n": 294,
+        "pnl": 1070.5118129573152,
+        "cost": 14700.0,
+        "wins": 186
+      },
+      "LeanDown": {
+        "n": 30,
+        "pnl": -119.07279136050263,
+        "cost": 1500.0,
+        "wins": 12
+      },
+      "LeanUp": {
+        "n": 23,
+        "pnl": -9.54945341618425,
+        "cost": 1150.0,
+        "wins": 12
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.03,
+      "lean_threshold": 0.01,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.65,
+      "max_combined": 1.05
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 2054.4192313745457,
+    "return_pct": 5.706720087151516,
+    "win_rate": 61.52777777777778,
+    "by_signal": {
+      "StrongDown": {
+        "n": 373,
+        "pnl": 1112.529663193921,
+        "cost": 18650.0,
+        "wins": 233
+      },
+      "StrongUp": {
+        "n": 294,
+        "pnl": 1070.5118129573152,
+        "cost": 14700.0,
+        "wins": 186
+      },
+      "LeanDown": {
+        "n": 30,
+        "pnl": -119.07279136050263,
+        "cost": 1500.0,
+        "wins": 12
+      },
+      "LeanUp": {
+        "n": 23,
+        "pnl": -9.54945341618425,
+        "cost": 1150.0,
+        "wins": 12
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.01,
+      "lean_threshold": 0.005,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.55,
+      "max_combined": 1.02
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 1972.07055343275,
+    "return_pct": 5.477973759535417,
+    "win_rate": 61.25000000000001,
+    "by_signal": {
+      "StrongDown": {
+        "n": 396,
+        "pnl": 896.5530787525661,
+        "cost": 19800.0,
+        "wins": 241
+      },
+      "StrongUp": {
+        "n": 311,
+        "pnl": 1102.6314593677116,
+        "cost": 15550.0,
+        "wins": 195
+      },
+      "LeanUp": {
+        "n": 10,
+        "pnl": -19.363398139749044,
+        "cost": 500.0,
+        "wins": 4
+      },
+      "LeanDown": {
+        "n": 3,
+        "pnl": -7.750586547774688,
+        "cost": 150.0,
+        "wins": 1
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.01,
+      "lean_threshold": 0.005,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.55,
+      "max_combined": 1.03
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 1972.07055343275,
+    "return_pct": 5.477973759535417,
+    "win_rate": 61.25000000000001,
+    "by_signal": {
+      "StrongDown": {
+        "n": 396,
+        "pnl": 896.5530787525661,
+        "cost": 19800.0,
+        "wins": 241
+      },
+      "StrongUp": {
+        "n": 311,
+        "pnl": 1102.6314593677116,
+        "cost": 15550.0,
+        "wins": 195
+      },
+      "LeanUp": {
+        "n": 10,
+        "pnl": -19.363398139749044,
+        "cost": 500.0,
+        "wins": 4
+      },
+      "LeanDown": {
+        "n": 3,
+        "pnl": -7.750586547774688,
+        "cost": 150.0,
+        "wins": 1
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.01,
+      "lean_threshold": 0.005,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.55,
+      "max_combined": 1.05
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 1972.07055343275,
+    "return_pct": 5.477973759535417,
+    "win_rate": 61.25000000000001,
+    "by_signal": {
+      "StrongDown": {
+        "n": 396,
+        "pnl": 896.5530787525661,
+        "cost": 19800.0,
+        "wins": 241
+      },
+      "StrongUp": {
+        "n": 311,
+        "pnl": 1102.6314593677116,
+        "cost": 15550.0,
+        "wins": 195
+      },
+      "LeanUp": {
+        "n": 10,
+        "pnl": -19.363398139749044,
+        "cost": 500.0,
+        "wins": 4
+      },
+      "LeanDown": {
+        "n": 3,
+        "pnl": -7.750586547774688,
+        "cost": 150.0,
+        "wins": 1
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.01,
+      "lean_threshold": 0.005,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.6,
+      "max_combined": 1.02
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 1957.1696121387972,
+    "return_pct": 5.4365822559411034,
+    "win_rate": 61.25000000000001,
+    "by_signal": {
+      "StrongDown": {
+        "n": 396,
+        "pnl": 896.5530787525661,
+        "cost": 19800.0,
+        "wins": 241
+      },
+      "StrongUp": {
+        "n": 311,
+        "pnl": 1102.6314593677116,
+        "cost": 15550.0,
+        "wins": 195
+      },
+      "LeanUp": {
+        "n": 10,
+        "pnl": -29.314413922307352,
+        "cost": 500.0,
+        "wins": 4
+      },
+      "LeanDown": {
+        "n": 3,
+        "pnl": -12.700512059169867,
+        "cost": 150.0,
+        "wins": 1
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.01,
+      "lean_threshold": 0.005,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.6,
+      "max_combined": 1.03
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 1957.1696121387972,
+    "return_pct": 5.4365822559411034,
+    "win_rate": 61.25000000000001,
+    "by_signal": {
+      "StrongDown": {
+        "n": 396,
+        "pnl": 896.5530787525661,
+        "cost": 19800.0,
+        "wins": 241
+      },
+      "StrongUp": {
+        "n": 311,
+        "pnl": 1102.6314593677116,
+        "cost": 15550.0,
+        "wins": 195
+      },
+      "LeanUp": {
+        "n": 10,
+        "pnl": -29.314413922307352,
+        "cost": 500.0,
+        "wins": 4
+      },
+      "LeanDown": {
+        "n": 3,
+        "pnl": -12.700512059169867,
+        "cost": 150.0,
+        "wins": 1
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.01,
+      "lean_threshold": 0.005,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.6,
+      "max_combined": 1.05
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 1957.1696121387972,
+    "return_pct": 5.4365822559411034,
+    "win_rate": 61.25000000000001,
+    "by_signal": {
+      "StrongDown": {
+        "n": 396,
+        "pnl": 896.5530787525661,
+        "cost": 19800.0,
+        "wins": 241
+      },
+      "StrongUp": {
+        "n": 311,
+        "pnl": 1102.6314593677116,
+        "cost": 15550.0,
+        "wins": 195
+      },
+      "LeanUp": {
+        "n": 10,
+        "pnl": -29.314413922307352,
+        "cost": 500.0,
+        "wins": 4
+      },
+      "LeanDown": {
+        "n": 3,
+        "pnl": -12.700512059169867,
+        "cost": 150.0,
+        "wins": 1
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.07,
+      "lean_threshold": 0.005,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.55,
+      "max_combined": 1.02
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 1949.9230163441966,
+    "return_pct": 5.416452823178324,
+    "win_rate": 61.25000000000001,
+    "by_signal": {
+      "StrongDown": {
+        "n": 321,
+        "pnl": 1516.7946497446992,
+        "cost": 16050.0,
+        "wins": 210
+      },
+      "LeanDown": {
+        "n": 78,
+        "pnl": -139.50242429879677,
+        "cost": 3900.0,
+        "wins": 32
+      },
+      "StrongUp": {
+        "n": 241,
+        "pnl": 599.4387611452617,
+        "cost": 12050.0,
+        "wins": 152
+      },
+      "LeanUp": {
+        "n": 80,
+        "pnl": -26.807970246964636,
+        "cost": 4000.0,
+        "wins": 47
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.07,
+      "lean_threshold": 0.005,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.55,
+      "max_combined": 1.03
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 1949.9230163441966,
+    "return_pct": 5.416452823178324,
+    "win_rate": 61.25000000000001,
+    "by_signal": {
+      "StrongDown": {
+        "n": 321,
+        "pnl": 1516.7946497446992,
+        "cost": 16050.0,
+        "wins": 210
+      },
+      "LeanDown": {
+        "n": 78,
+        "pnl": -139.50242429879677,
+        "cost": 3900.0,
+        "wins": 32
+      },
+      "StrongUp": {
+        "n": 241,
+        "pnl": 599.4387611452617,
+        "cost": 12050.0,
+        "wins": 152
+      },
+      "LeanUp": {
+        "n": 80,
+        "pnl": -26.807970246964636,
+        "cost": 4000.0,
+        "wins": 47
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.07,
+      "lean_threshold": 0.005,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.55,
+      "max_combined": 1.05
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 1949.9230163441966,
+    "return_pct": 5.416452823178324,
+    "win_rate": 61.25000000000001,
+    "by_signal": {
+      "StrongDown": {
+        "n": 321,
+        "pnl": 1516.7946497446992,
+        "cost": 16050.0,
+        "wins": 210
+      },
+      "LeanDown": {
+        "n": 78,
+        "pnl": -139.50242429879677,
+        "cost": 3900.0,
+        "wins": 32
+      },
+      "StrongUp": {
+        "n": 241,
+        "pnl": 599.4387611452617,
+        "cost": 12050.0,
+        "wins": 152
+      },
+      "LeanUp": {
+        "n": 80,
+        "pnl": -26.807970246964636,
+        "cost": 4000.0,
+        "wins": 47
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.03,
+      "lean_threshold": 0.015,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.55,
+      "max_combined": 1.02
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 1946.9247690764582,
+    "return_pct": 5.408124358545717,
+    "win_rate": 61.38888888888889,
+    "by_signal": {
+      "StrongDown": {
+        "n": 381,
+        "pnl": 994.5538759834093,
+        "cost": 19050.0,
+        "wins": 236
+      },
+      "StrongUp": {
+        "n": 303,
+        "pnl": 1015.4769753884598,
+        "cost": 15150.0,
+        "wins": 191
+      },
+      "LeanDown": {
+        "n": 21,
+        "pnl": -44.16339769157349,
+        "cost": 1050.0,
+        "wins": 8
+      },
+      "LeanUp": {
+        "n": 15,
+        "pnl": -18.942684603835914,
+        "cost": 750.0,
+        "wins": 7
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.03,
+      "lean_threshold": 0.015,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.55,
+      "max_combined": 1.03
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 1946.9247690764582,
+    "return_pct": 5.408124358545717,
+    "win_rate": 61.38888888888889,
+    "by_signal": {
+      "StrongDown": {
+        "n": 381,
+        "pnl": 994.5538759834093,
+        "cost": 19050.0,
+        "wins": 236
+      },
+      "StrongUp": {
+        "n": 303,
+        "pnl": 1015.4769753884598,
+        "cost": 15150.0,
+        "wins": 191
+      },
+      "LeanDown": {
+        "n": 21,
+        "pnl": -44.16339769157349,
+        "cost": 1050.0,
+        "wins": 8
+      },
+      "LeanUp": {
+        "n": 15,
+        "pnl": -18.942684603835914,
+        "cost": 750.0,
+        "wins": 7
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.03,
+      "lean_threshold": 0.015,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.55,
+      "max_combined": 1.05
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 1946.9247690764582,
+    "return_pct": 5.408124358545717,
+    "win_rate": 61.38888888888889,
+    "by_signal": {
+      "StrongDown": {
+        "n": 381,
+        "pnl": 994.5538759834093,
+        "cost": 19050.0,
+        "wins": 236
+      },
+      "StrongUp": {
+        "n": 303,
+        "pnl": 1015.4769753884598,
+        "cost": 15150.0,
+        "wins": 191
+      },
+      "LeanDown": {
+        "n": 21,
+        "pnl": -44.16339769157349,
+        "cost": 1050.0,
+        "wins": 8
+      },
+      "LeanUp": {
+        "n": 15,
+        "pnl": -18.942684603835914,
+        "cost": 750.0,
+        "wins": 7
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.01,
+      "lean_threshold": 0.005,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.65,
+      "max_combined": 1.02
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 1942.268670844845,
+    "return_pct": 5.3951907523467915,
+    "win_rate": 61.25000000000001,
+    "by_signal": {
+      "StrongDown": {
+        "n": 396,
+        "pnl": 896.5530787525661,
+        "cost": 19800.0,
+        "wins": 241
+      },
+      "StrongUp": {
+        "n": 311,
+        "pnl": 1102.6314593677116,
+        "cost": 15550.0,
+        "wins": 195
+      },
+      "LeanUp": {
+        "n": 10,
+        "pnl": -39.26542970486571,
+        "cost": 500.0,
+        "wins": 4
+      },
+      "LeanDown": {
+        "n": 3,
+        "pnl": -17.650437570565053,
+        "cost": 150.0,
+        "wins": 1
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.01,
+      "lean_threshold": 0.005,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.65,
+      "max_combined": 1.03
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 1942.268670844845,
+    "return_pct": 5.3951907523467915,
+    "win_rate": 61.25000000000001,
+    "by_signal": {
+      "StrongDown": {
+        "n": 396,
+        "pnl": 896.5530787525661,
+        "cost": 19800.0,
+        "wins": 241
+      },
+      "StrongUp": {
+        "n": 311,
+        "pnl": 1102.6314593677116,
+        "cost": 15550.0,
+        "wins": 195
+      },
+      "LeanUp": {
+        "n": 10,
+        "pnl": -39.26542970486571,
+        "cost": 500.0,
+        "wins": 4
+      },
+      "LeanDown": {
+        "n": 3,
+        "pnl": -17.650437570565053,
+        "cost": 150.0,
+        "wins": 1
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.01,
+      "lean_threshold": 0.005,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.65,
+      "max_combined": 1.05
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 1942.268670844845,
+    "return_pct": 5.3951907523467915,
+    "win_rate": 61.25000000000001,
+    "by_signal": {
+      "StrongDown": {
+        "n": 396,
+        "pnl": 896.5530787525661,
+        "cost": 19800.0,
+        "wins": 241
+      },
+      "StrongUp": {
+        "n": 311,
+        "pnl": 1102.6314593677116,
+        "cost": 15550.0,
+        "wins": 195
+      },
+      "LeanUp": {
+        "n": 10,
+        "pnl": -39.26542970486571,
+        "cost": 500.0,
+        "wins": 4
+      },
+      "LeanDown": {
+        "n": 3,
+        "pnl": -17.650437570565053,
+        "cost": 150.0,
+        "wins": 1
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.07,
+      "lean_threshold": 0.005,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.6,
+      "max_combined": 1.02
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 1938.1860089200386,
+    "return_pct": 5.383850024777885,
+    "win_rate": 61.25000000000001,
+    "by_signal": {
+      "StrongDown": {
+        "n": 321,
+        "pnl": 1516.7946497446992,
+        "cost": 16050.0,
+        "wins": 210
+      },
+      "LeanDown": {
+        "n": 78,
+        "pnl": -214.23659741606463,
+        "cost": 3900.0,
+        "wins": 32
+      },
+      "StrongUp": {
+        "n": 241,
+        "pnl": 599.4387611452617,
+        "cost": 12050.0,
+        "wins": 152
+      },
+      "LeanUp": {
+        "n": 80,
+        "pnl": 36.18919544614339,
+        "cost": 4000.0,
+        "wins": 47
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.07,
+      "lean_threshold": 0.005,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.6,
+      "max_combined": 1.03
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 1938.1860089200386,
+    "return_pct": 5.383850024777885,
+    "win_rate": 61.25000000000001,
+    "by_signal": {
+      "StrongDown": {
+        "n": 321,
+        "pnl": 1516.7946497446992,
+        "cost": 16050.0,
+        "wins": 210
+      },
+      "LeanDown": {
+        "n": 78,
+        "pnl": -214.23659741606463,
+        "cost": 3900.0,
+        "wins": 32
+      },
+      "StrongUp": {
+        "n": 241,
+        "pnl": 599.4387611452617,
+        "cost": 12050.0,
+        "wins": 152
+      },
+      "LeanUp": {
+        "n": 80,
+        "pnl": 36.18919544614339,
+        "cost": 4000.0,
+        "wins": 47
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.07,
+      "lean_threshold": 0.005,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.6,
+      "max_combined": 1.05
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 1938.1860089200386,
+    "return_pct": 5.383850024777885,
+    "win_rate": 61.25000000000001,
+    "by_signal": {
+      "StrongDown": {
+        "n": 321,
+        "pnl": 1516.7946497446992,
+        "cost": 16050.0,
+        "wins": 210
+      },
+      "LeanDown": {
+        "n": 78,
+        "pnl": -214.23659741606463,
+        "cost": 3900.0,
+        "wins": 32
+      },
+      "StrongUp": {
+        "n": 241,
+        "pnl": 599.4387611452617,
+        "cost": 12050.0,
+        "wins": 152
+      },
+      "LeanUp": {
+        "n": 80,
+        "pnl": 36.18919544614339,
+        "cost": 4000.0,
+        "wins": 47
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.07,
+      "lean_threshold": 0.005,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.65,
+      "max_combined": 1.02
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 1926.4490014958808,
+    "return_pct": 5.351247226377446,
+    "win_rate": 61.25000000000001,
+    "by_signal": {
+      "StrongDown": {
+        "n": 321,
+        "pnl": 1516.7946497446992,
+        "cost": 16050.0,
+        "wins": 210
+      },
+      "LeanDown": {
+        "n": 78,
+        "pnl": -288.97077053333277,
+        "cost": 3900.0,
+        "wins": 32
+      },
+      "StrongUp": {
+        "n": 241,
+        "pnl": 599.4387611452617,
+        "cost": 12050.0,
+        "wins": 152
+      },
+      "LeanUp": {
+        "n": 80,
+        "pnl": 99.18636113925146,
+        "cost": 4000.0,
+        "wins": 47
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.07,
+      "lean_threshold": 0.005,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.65,
+      "max_combined": 1.03
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 1926.4490014958808,
+    "return_pct": 5.351247226377446,
+    "win_rate": 61.25000000000001,
+    "by_signal": {
+      "StrongDown": {
+        "n": 321,
+        "pnl": 1516.7946497446992,
+        "cost": 16050.0,
+        "wins": 210
+      },
+      "LeanDown": {
+        "n": 78,
+        "pnl": -288.97077053333277,
+        "cost": 3900.0,
+        "wins": 32
+      },
+      "StrongUp": {
+        "n": 241,
+        "pnl": 599.4387611452617,
+        "cost": 12050.0,
+        "wins": 152
+      },
+      "LeanUp": {
+        "n": 80,
+        "pnl": 99.18636113925146,
+        "cost": 4000.0,
+        "wins": 47
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.07,
+      "lean_threshold": 0.005,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.65,
+      "max_combined": 1.05
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 1926.4490014958808,
+    "return_pct": 5.351247226377446,
+    "win_rate": 61.25000000000001,
+    "by_signal": {
+      "StrongDown": {
+        "n": 321,
+        "pnl": 1516.7946497446992,
+        "cost": 16050.0,
+        "wins": 210
+      },
+      "LeanDown": {
+        "n": 78,
+        "pnl": -288.97077053333277,
+        "cost": 3900.0,
+        "wins": 32
+      },
+      "StrongUp": {
+        "n": 241,
+        "pnl": 599.4387611452617,
+        "cost": 12050.0,
+        "wins": 152
+      },
+      "LeanUp": {
+        "n": 80,
+        "pnl": 99.18636113925146,
+        "cost": 4000.0,
+        "wins": 47
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.03,
+      "lean_threshold": 0.015,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.6,
+      "max_combined": 1.02
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 1915.9986962159517,
+    "return_pct": 5.322218600599866,
+    "win_rate": 61.38888888888889,
+    "by_signal": {
+      "StrongDown": {
+        "n": 381,
+        "pnl": 994.5538759834093,
+        "cost": 19050.0,
+        "wins": 236
+      },
+      "StrongUp": {
+        "n": 303,
+        "pnl": 1015.4769753884598,
+        "cost": 15150.0,
+        "wins": 191
+      },
+      "LeanDown": {
+        "n": 21,
+        "pnl": -69.54755137157026,
+        "cost": 1050.0,
+        "wins": 8
+      },
+      "LeanUp": {
+        "n": 15,
+        "pnl": -24.484603784344124,
+        "cost": 750.0,
+        "wins": 7
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.03,
+      "lean_threshold": 0.015,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.6,
+      "max_combined": 1.03
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 1915.9986962159517,
+    "return_pct": 5.322218600599866,
+    "win_rate": 61.38888888888889,
+    "by_signal": {
+      "StrongDown": {
+        "n": 381,
+        "pnl": 994.5538759834093,
+        "cost": 19050.0,
+        "wins": 236
+      },
+      "StrongUp": {
+        "n": 303,
+        "pnl": 1015.4769753884598,
+        "cost": 15150.0,
+        "wins": 191
+      },
+      "LeanDown": {
+        "n": 21,
+        "pnl": -69.54755137157026,
+        "cost": 1050.0,
+        "wins": 8
+      },
+      "LeanUp": {
+        "n": 15,
+        "pnl": -24.484603784344124,
+        "cost": 750.0,
+        "wins": 7
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.03,
+      "lean_threshold": 0.015,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.6,
+      "max_combined": 1.05
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 1915.9986962159517,
+    "return_pct": 5.322218600599866,
+    "win_rate": 61.38888888888889,
+    "by_signal": {
+      "StrongDown": {
+        "n": 381,
+        "pnl": 994.5538759834093,
+        "cost": 19050.0,
+        "wins": 236
+      },
+      "StrongUp": {
+        "n": 303,
+        "pnl": 1015.4769753884598,
+        "cost": 15150.0,
+        "wins": 191
+      },
+      "LeanDown": {
+        "n": 21,
+        "pnl": -69.54755137157026,
+        "cost": 1050.0,
+        "wins": 8
+      },
+      "LeanUp": {
+        "n": 15,
+        "pnl": -24.484603784344124,
+        "cost": 750.0,
+        "wins": 7
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.02,
+      "lean_threshold": 0.005,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.55,
+      "max_combined": 1.02
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 1909.1013348152767,
+    "return_pct": 5.3030592633757685,
+    "win_rate": 61.25000000000001,
+    "by_signal": {
+      "StrongDown": {
+        "n": 381,
+        "pnl": 1031.8598234955234,
+        "cost": 19050.0,
+        "wins": 235
+      },
+      "StrongUp": {
+        "n": 296,
+        "pnl": 926.139041034884,
+        "cost": 14800.0,
+        "wins": 185
+      },
+      "LeanUp": {
+        "n": 25,
+        "pnl": -11.629743071303487,
+        "cost": 1250.0,
+        "wins": 14
+      },
+      "LeanDown": {
+        "n": 18,
+        "pnl": -37.26778664382515,
+        "cost": 900.0,
+        "wins": 7
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.02,
+      "lean_threshold": 0.005,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.55,
+      "max_combined": 1.03
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 1909.1013348152767,
+    "return_pct": 5.3030592633757685,
+    "win_rate": 61.25000000000001,
+    "by_signal": {
+      "StrongDown": {
+        "n": 381,
+        "pnl": 1031.8598234955234,
+        "cost": 19050.0,
+        "wins": 235
+      },
+      "StrongUp": {
+        "n": 296,
+        "pnl": 926.139041034884,
+        "cost": 14800.0,
+        "wins": 185
+      },
+      "LeanUp": {
+        "n": 25,
+        "pnl": -11.629743071303487,
+        "cost": 1250.0,
+        "wins": 14
+      },
+      "LeanDown": {
+        "n": 18,
+        "pnl": -37.26778664382515,
+        "cost": 900.0,
+        "wins": 7
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.02,
+      "lean_threshold": 0.005,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.55,
+      "max_combined": 1.05
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 1909.1013348152767,
+    "return_pct": 5.3030592633757685,
+    "win_rate": 61.25000000000001,
+    "by_signal": {
+      "StrongDown": {
+        "n": 381,
+        "pnl": 1031.8598234955234,
+        "cost": 19050.0,
+        "wins": 235
+      },
+      "StrongUp": {
+        "n": 296,
+        "pnl": 926.139041034884,
+        "cost": 14800.0,
+        "wins": 185
+      },
+      "LeanUp": {
+        "n": 25,
+        "pnl": -11.629743071303487,
+        "cost": 1250.0,
+        "wins": 14
+      },
+      "LeanDown": {
+        "n": 18,
+        "pnl": -37.26778664382515,
+        "cost": 900.0,
+        "wins": 7
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.05,
+      "lean_threshold": 0.005,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.55,
+      "max_combined": 1.02
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 1907.6922436746775,
+    "return_pct": 5.299145121318548,
+    "win_rate": 61.25000000000001,
+    "by_signal": {
+      "StrongDown": {
+        "n": 347,
+        "pnl": 1391.3602082119924,
+        "cost": 17350.0,
+        "wins": 222
+      },
+      "StrongUp": {
+        "n": 263,
+        "pnl": 634.6242028970372,
+        "cost": 13150.0,
+        "wins": 164
+      },
+      "LeanUp": {
+        "n": 58,
+        "pnl": -11.092893845849204,
+        "cost": 2900.0,
+        "wins": 35
+      },
+      "LeanDown": {
+        "n": 52,
+        "pnl": -107.19927358850194,
+        "cost": 2600.0,
+        "wins": 20
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.05,
+      "lean_threshold": 0.005,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.55,
+      "max_combined": 1.03
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 1907.6922436746775,
+    "return_pct": 5.299145121318548,
+    "win_rate": 61.25000000000001,
+    "by_signal": {
+      "StrongDown": {
+        "n": 347,
+        "pnl": 1391.3602082119924,
+        "cost": 17350.0,
+        "wins": 222
+      },
+      "StrongUp": {
+        "n": 263,
+        "pnl": 634.6242028970372,
+        "cost": 13150.0,
+        "wins": 164
+      },
+      "LeanUp": {
+        "n": 58,
+        "pnl": -11.092893845849204,
+        "cost": 2900.0,
+        "wins": 35
+      },
+      "LeanDown": {
+        "n": 52,
+        "pnl": -107.19927358850194,
+        "cost": 2600.0,
+        "wins": 20
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.05,
+      "lean_threshold": 0.005,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.55,
+      "max_combined": 1.05
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 1907.6922436746775,
+    "return_pct": 5.299145121318548,
+    "win_rate": 61.25000000000001,
+    "by_signal": {
+      "StrongDown": {
+        "n": 347,
+        "pnl": 1391.3602082119924,
+        "cost": 17350.0,
+        "wins": 222
+      },
+      "StrongUp": {
+        "n": 263,
+        "pnl": 634.6242028970372,
+        "cost": 13150.0,
+        "wins": 164
+      },
+      "LeanUp": {
+        "n": 58,
+        "pnl": -11.092893845849204,
+        "cost": 2900.0,
+        "wins": 35
+      },
+      "LeanDown": {
+        "n": 52,
+        "pnl": -107.19927358850194,
+        "cost": 2600.0,
+        "wins": 20
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.02,
+      "lean_threshold": 0.005,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.6,
+      "max_combined": 1.02
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 1903.1959961809628,
+    "return_pct": 5.286655544947118,
+    "win_rate": 61.25000000000001,
+    "by_signal": {
+      "StrongDown": {
+        "n": 381,
+        "pnl": 1031.8598234955234,
+        "cost": 19050.0,
+        "wins": 235
+      },
+      "StrongUp": {
+        "n": 296,
+        "pnl": 926.139041034884,
+        "cost": 14800.0,
+        "wins": 185
+      },
+      "LeanUp": {
+        "n": 25,
+        "pnl": 2.5276358981927345,
+        "cost": 1250.0,
+        "wins": 14
+      },
+      "LeanDown": {
+        "n": 18,
+        "pnl": -57.33050424763558,
+        "cost": 900.0,
+        "wins": 7
+      }
+    }
+  },
+  {
+    "config": {
+      "strong_threshold": 0.02,
+      "lean_threshold": 0.005,
+      "strong_ratio": 0.9,
+      "lean_ratio": 0.6,
+      "max_combined": 1.03
+    },
+    "trades": 720,
+    "capital": 36000.0,
+    "pnl": 1903.1959961809628,
+    "return_pct": 5.286655544947118,
+    "win_rate": 61.25000000000001,
+    "by_signal": {
+      "StrongDown": {
+        "n": 381,
+        "pnl": 1031.8598234955234,
+        "cost": 19050.0,
+        "wins": 235
+      },
+      "StrongUp": {
+        "n": 296,
+        "pnl": 926.139041034884,
+        "cost": 14800.0,
+        "wins": 185
+      },
+      "LeanUp": {
+        "n": 25,
+        "pnl": 2.5276358981927345,
+        "cost": 1250.0,
+        "wins": 14
+      },
+      "LeanDown": {
+        "n": 18,
+        "pnl": -57.33050424763558,
+        "cost": 900.0,
+        "wins": 7
+      }
+    }
+  }
+]

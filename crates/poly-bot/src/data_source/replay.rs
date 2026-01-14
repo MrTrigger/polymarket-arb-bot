@@ -90,7 +90,7 @@ struct SpotPriceRow {
     asset: String,
     #[serde(with = "rust_decimal::serde::str")]
     price: Decimal,
-    timestamp: DateTime<Utc>,
+    timestamp_ms: i64,
     #[serde(with = "rust_decimal::serde::str")]
     quantity: Decimal,
 }
@@ -100,7 +100,7 @@ struct SpotPriceRow {
 struct SnapshotRow {
     token_id: String,
     event_id: String,
-    timestamp: DateTime<Utc>,
+    timestamp_ms: i64,
     #[serde(with = "rust_decimal::serde::str")]
     best_bid: Decimal,
     #[serde(with = "rust_decimal::serde::str")]
@@ -116,7 +116,7 @@ struct SnapshotRow {
 struct DeltaRow {
     token_id: String,
     event_id: String,
-    timestamp: DateTime<Utc>,
+    timestamp_ms: i64,
     side: String,
     #[serde(with = "rust_decimal::serde::str")]
     price: Decimal,
@@ -133,9 +133,14 @@ struct WindowRow {
     no_token_id: String,
     #[serde(with = "rust_decimal::serde::str")]
     strike_price: Decimal,
-    window_start: DateTime<Utc>,
-    window_end: DateTime<Utc>,
-    discovered_at: DateTime<Utc>,
+    window_start_ms: i64,
+    window_end_ms: i64,
+    discovered_at_ms: i64,
+}
+
+/// Helper to convert epoch milliseconds to DateTime<Utc>
+fn ms_to_datetime(ms: i64) -> DateTime<Utc> {
+    DateTime::from_timestamp_millis(ms).unwrap_or_default()
 }
 
 /// Replay data source that loads historical data from ClickHouse.
@@ -199,6 +204,10 @@ impl ReplayDataSource {
             format!("AND asset IN ({})", assets.join(", "))
         };
 
+        // Format dates without 'Z' suffix for ClickHouse DateTime64 compatibility
+        let start_str = self.config.start_time.format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+        let end_str = self.config.end_time.format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+
         let query = format!(
             r#"
             SELECT
@@ -206,25 +215,23 @@ impl ReplayDataSource {
                 asset,
                 yes_token_id,
                 no_token_id,
-                strike_price,
-                window_start,
-                window_end,
-                discovered_at
+                toString(strike_price) AS strike_price,
+                toUnixTimestamp64Milli(window_start) AS window_start_ms,
+                toUnixTimestamp64Milli(window_end) AS window_end_ms,
+                toUnixTimestamp64Milli(discovered_at) AS discovered_at_ms
             FROM market_windows
-            WHERE window_start >= ?
-              AND window_end <= ?
+            WHERE window_start >= '{}'
+              AND window_end <= '{}'
               {}
             ORDER BY window_start ASC
             "#,
-            asset_filter
+            start_str, end_str, asset_filter
         );
 
         let rows: Vec<WindowRow> = self
             .clickhouse
             .inner()
             .query(&query)
-            .bind(self.config.start_time)
-            .bind(self.config.end_time)
             .fetch_all()
             .await
             .map_err(|e| DataSourceError::ClickHouse(e.to_string()))?;
@@ -233,6 +240,9 @@ impl ReplayDataSource {
 
         for row in rows {
             let asset = parse_asset(&row.asset).unwrap_or(CryptoAsset::Btc);
+            let window_start = ms_to_datetime(row.window_start_ms);
+            let window_end = ms_to_datetime(row.window_end_ms);
+            let discovered_at = ms_to_datetime(row.discovered_at_ms);
 
             // Window open event
             let open_event = MarketEvent::WindowOpen(WindowOpenEvent {
@@ -241,13 +251,13 @@ impl ReplayDataSource {
                 yes_token_id: row.yes_token_id.clone(),
                 no_token_id: row.no_token_id.clone(),
                 strike_price: row.strike_price,
-                window_start: row.window_start,
-                window_end: row.window_end,
-                timestamp: row.discovered_at,
+                window_start,
+                window_end,
+                timestamp: discovered_at,
             });
 
             self.event_queue.push(TimestampedEvent {
-                timestamp: row.discovered_at,
+                timestamp: discovered_at,
                 event: open_event,
             });
 
@@ -256,11 +266,11 @@ impl ReplayDataSource {
                 event_id: row.event_id,
                 outcome: None, // Could be enriched from settlement data
                 final_price: None,
-                timestamp: row.window_end,
+                timestamp: window_end,
             });
 
             self.event_queue.push(TimestampedEvent {
-                timestamp: row.window_end,
+                timestamp: window_end,
                 event: close_event,
             });
         }
@@ -277,26 +287,28 @@ impl ReplayDataSource {
             format!("AND asset IN ({})", assets.join(", "))
         };
 
+        // Format dates without 'Z' suffix for ClickHouse DateTime64 compatibility
+        let start_str = self.config.start_time.format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+        let end_str = self.config.end_time.format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+        let limit = self.config.batch_size as u64 * 100;
+
         let query = format!(
             r#"
-            SELECT asset, price, timestamp, quantity
+            SELECT asset, toString(price) AS price, toUnixTimestamp64Milli(timestamp) AS timestamp_ms, toString(quantity) AS quantity
             FROM spot_prices
-            WHERE timestamp >= ?
-              AND timestamp <= ?
+            WHERE timestamp >= '{}'
+              AND timestamp <= '{}'
               {}
             ORDER BY timestamp ASC
-            LIMIT ?
+            LIMIT {}
             "#,
-            asset_filter
+            start_str, end_str, asset_filter, limit
         );
 
         let rows: Vec<SpotPriceRow> = self
             .clickhouse
             .inner()
             .query(&query)
-            .bind(self.config.start_time)
-            .bind(self.config.end_time)
-            .bind(self.config.batch_size as u64 * 100) // Load more spot prices
             .fetch_all()
             .await
             .map_err(|e| DataSourceError::ClickHouse(e.to_string()))?;
@@ -305,15 +317,16 @@ impl ReplayDataSource {
 
         for row in rows {
             if let Some(asset) = parse_asset(&row.asset) {
+                let timestamp = ms_to_datetime(row.timestamp_ms);
                 let event = MarketEvent::SpotPrice(SpotPriceEvent {
                     asset,
                     price: row.price,
                     quantity: row.quantity,
-                    timestamp: row.timestamp,
+                    timestamp,
                 });
 
                 self.event_queue.push(TimestampedEvent {
-                    timestamp: row.timestamp,
+                    timestamp,
                     event,
                 });
             }
@@ -331,33 +344,35 @@ impl ReplayDataSource {
             format!("AND event_id IN ({})", ids.join(", "))
         };
 
+        // Format dates without 'Z' suffix for ClickHouse DateTime64 compatibility
+        let start_str = self.config.start_time.format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+        let end_str = self.config.end_time.format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+        let limit = self.config.batch_size as u64 * 10;
+
         let query = format!(
             r#"
             SELECT
                 token_id,
                 event_id,
-                timestamp,
-                best_bid,
-                best_bid_size,
-                best_ask,
-                best_ask_size
+                toUnixTimestamp64Milli(timestamp) AS timestamp_ms,
+                toString(best_bid) AS best_bid,
+                toString(best_bid_size) AS best_bid_size,
+                toString(best_ask) AS best_ask,
+                toString(best_ask_size) AS best_ask_size
             FROM orderbook_snapshots
-            WHERE timestamp >= ?
-              AND timestamp <= ?
+            WHERE timestamp >= '{}'
+              AND timestamp <= '{}'
               {}
             ORDER BY timestamp ASC
-            LIMIT ?
+            LIMIT {}
             "#,
-            event_filter
+            start_str, end_str, event_filter, limit
         );
 
         let rows: Vec<SnapshotRow> = self
             .clickhouse
             .inner()
             .query(&query)
-            .bind(self.config.start_time)
-            .bind(self.config.end_time)
-            .bind(self.config.batch_size as u64 * 10)
             .fetch_all()
             .await
             .map_err(|e| DataSourceError::ClickHouse(e.to_string()))?;
@@ -365,6 +380,8 @@ impl ReplayDataSource {
         debug!("Loaded {} order book snapshots", rows.len());
 
         for row in rows {
+            let timestamp = ms_to_datetime(row.timestamp_ms);
+
             // Convert BBO to snapshot with single levels
             let bids = if row.best_bid > Decimal::ZERO {
                 vec![PriceLevel::new(row.best_bid, row.best_bid_size)]
@@ -383,11 +400,11 @@ impl ReplayDataSource {
                 event_id: row.event_id,
                 bids,
                 asks,
-                timestamp: row.timestamp,
+                timestamp,
             });
 
             self.event_queue.push(TimestampedEvent {
-                timestamp: row.timestamp,
+                timestamp,
                 event,
             });
         }
@@ -404,32 +421,34 @@ impl ReplayDataSource {
             format!("AND event_id IN ({})", ids.join(", "))
         };
 
+        // Format dates without 'Z' suffix for ClickHouse DateTime64 compatibility
+        let start_str = self.config.start_time.format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+        let end_str = self.config.end_time.format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+        let limit = self.config.batch_size as u64 * 10;
+
         let query = format!(
             r#"
             SELECT
                 token_id,
                 event_id,
-                timestamp,
+                toUnixTimestamp64Milli(timestamp) AS timestamp_ms,
                 side,
-                price,
-                size
+                toString(price) AS price,
+                toString(size) AS size
             FROM orderbook_deltas
-            WHERE timestamp >= ?
-              AND timestamp <= ?
+            WHERE timestamp >= '{}'
+              AND timestamp <= '{}'
               {}
             ORDER BY timestamp ASC
-            LIMIT ?
+            LIMIT {}
             "#,
-            event_filter
+            start_str, end_str, event_filter, limit
         );
 
         let rows: Vec<DeltaRow> = self
             .clickhouse
             .inner()
             .query(&query)
-            .bind(self.config.start_time)
-            .bind(self.config.end_time)
-            .bind(self.config.batch_size as u64 * 10)
             .fetch_all()
             .await
             .map_err(|e| DataSourceError::ClickHouse(e.to_string()))?;
@@ -437,6 +456,8 @@ impl ReplayDataSource {
         debug!("Loaded {} order book deltas", rows.len());
 
         for row in rows {
+            let timestamp = ms_to_datetime(row.timestamp_ms);
+
             let side = match row.side.to_lowercase().as_str() {
                 "buy" | "bid" => Side::Buy,
                 "sell" | "ask" => Side::Sell,
@@ -449,11 +470,11 @@ impl ReplayDataSource {
                 side,
                 price: row.price,
                 size: row.size,
-                timestamp: row.timestamp,
+                timestamp,
             });
 
             self.event_queue.push(TimestampedEvent {
-                timestamp: row.timestamp,
+                timestamp,
                 event,
             });
         }

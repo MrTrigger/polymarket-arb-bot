@@ -101,6 +101,7 @@ impl PaperModeConfig {
 
         let discovery_config = DiscoveryConfig {
             assets: discovery_assets,
+            window_duration: config.window_duration,
             ..Default::default()
         };
 

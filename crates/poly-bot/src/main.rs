@@ -18,7 +18,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use poly_common::ClickHouseClient;
+use poly_common::{ClickHouseClient, WindowDuration};
 use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
@@ -65,6 +65,10 @@ struct Args {
     /// Enable parameter sweep mode for backtest
     #[arg(long)]
     sweep: bool,
+
+    /// Market window duration: 15min or 1h
+    #[arg(long, short = 'w', default_value = "1h")]
+    window: String,
 }
 
 #[tokio::main]
@@ -122,6 +126,11 @@ async fn run() -> Result<()> {
         config.backtest.sweep_enabled = true;
     }
 
+    // Apply window duration
+    if let Ok(window_duration) = args.window.parse::<WindowDuration>() {
+        config.window_duration = window_duration;
+    }
+
     // Initialize logging
     let log_level = match config.log_level.to_lowercase().as_str() {
         "trace" => Level::TRACE,
@@ -138,6 +147,7 @@ async fn run() -> Result<()> {
 
     info!("Starting poly-bot trading bot");
     info!("Mode: {}", config.mode);
+    info!("Window duration: {}", config.window_duration);
     info!("Assets: {:?}", config.assets);
 
     // Validate configuration before proceeding

@@ -7,7 +7,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use poly_common::ClickHouseConfig;
+use poly_common::{ClickHouseConfig, WindowDuration};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
@@ -21,6 +21,9 @@ pub struct BotConfig {
 
     /// Assets to trade.
     pub assets: Vec<String>,
+
+    /// Market window duration (15min or 1h).
+    pub window_duration: WindowDuration,
 
     /// Logging level.
     pub log_level: String,
@@ -735,6 +738,7 @@ impl Default for BotConfig {
         Self {
             mode: TradingMode::Shadow,
             assets: vec!["BTC".to_string(), "ETH".to_string(), "SOL".to_string()],
+            window_duration: WindowDuration::OneHour, // Default to 1h since 15min not available
             log_level: "info".to_string(),
             clickhouse: ClickHouseConfig::default(),
             trading: TradingConfig::default(),
@@ -912,6 +916,8 @@ struct TomlConfig {
 struct GeneralToml {
     mode: String,
     assets: Vec<String>,
+    /// Market window duration: "15min" or "1h"
+    window_duration: String,
     log_level: String,
 }
 
@@ -920,6 +926,7 @@ impl Default for GeneralToml {
         Self {
             mode: "shadow".to_string(),
             assets: vec!["BTC".to_string(), "ETH".to_string(), "SOL".to_string()],
+            window_duration: "1h".to_string(), // Default to 1h since 15min not available
             log_level: "info".to_string(),
         }
     }
@@ -1266,6 +1273,7 @@ impl From<TomlConfig> for BotConfig {
         Self {
             mode: TradingMode::from_str(&toml.general.mode).unwrap_or(TradingMode::Shadow),
             assets: toml.general.assets,
+            window_duration: toml.general.window_duration.parse().unwrap_or(WindowDuration::OneHour),
             log_level: toml.general.log_level,
             clickhouse: ClickHouseConfig {
                 url: toml.clickhouse.url,

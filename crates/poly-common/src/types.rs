@@ -46,6 +46,75 @@ impl std::fmt::Display for CryptoAsset {
     }
 }
 
+/// Market window duration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum WindowDuration {
+    /// 15-minute markets (original target).
+    #[default]
+    FifteenMin,
+    /// 1-hour markets.
+    OneHour,
+}
+
+impl WindowDuration {
+    /// Returns the duration in minutes.
+    pub fn minutes(&self) -> u32 {
+        match self {
+            WindowDuration::FifteenMin => 15,
+            WindowDuration::OneHour => 60,
+        }
+    }
+
+    /// Returns the duration as chrono::Duration.
+    pub fn as_duration(&self) -> chrono::Duration {
+        chrono::Duration::minutes(self.minutes() as i64)
+    }
+
+    /// Keywords to match in market titles.
+    pub fn keywords(&self) -> &'static [&'static str] {
+        match self {
+            WindowDuration::FifteenMin => &["15 min", "15-min", "15min", "15 minute"],
+            WindowDuration::OneHour => &["1 hour", "1h ", "1-hour", "one hour"],
+        }
+    }
+
+    /// Pattern to match in market slugs (more reliable than titles).
+    pub fn slug_patterns(&self) -> &'static [&'static str] {
+        match self {
+            WindowDuration::FifteenMin => &["15min", "15-min"],
+            // 1-hour markets use time patterns like "9am-et", "10am-et", "1pm-et"
+            WindowDuration::OneHour => &["am-et", "pm-et"],
+        }
+    }
+
+    /// Returns the display name.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            WindowDuration::FifteenMin => "15min",
+            WindowDuration::OneHour => "1h",
+        }
+    }
+}
+
+impl std::fmt::Display for WindowDuration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl std::str::FromStr for WindowDuration {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "15min" | "15m" | "15" | "fifteenmin" => Ok(WindowDuration::FifteenMin),
+            "1h" | "1hour" | "60" | "60min" | "onehour" | "hour" => Ok(WindowDuration::OneHour),
+            _ => Err(format!("Unknown window duration: {}", s)),
+        }
+    }
+}
+
 /// Order side for trading.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]

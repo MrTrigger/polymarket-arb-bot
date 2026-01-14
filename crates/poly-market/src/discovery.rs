@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use poly_common::CryptoAsset;
+use poly_common::{CryptoAsset, WindowDuration};
 use reqwest::Client;
 use rust_decimal::Decimal;
 use thiserror::Error;
@@ -17,8 +17,7 @@ use crate::types::{GammaEvent, GammaMarket, TokenIds};
 /// Gamma API base URL.
 const GAMMA_API_URL: &str = "https://gamma-api.polymarket.com";
 
-/// Keywords to identify 15-minute up/down markets in titles.
-const FIFTEEN_MIN_KEYWORDS: &[&str] = &["15 min", "15-min", "15min", "15 minute"];
+/// Keywords to identify up/down markets in titles.
 const UP_DOWN_KEYWORDS: &[&str] = &["up or down", "higher or lower", "above or below"];
 
 /// Errors that can occur during market discovery.
@@ -55,6 +54,8 @@ pub struct DiscoveredMarket {
     pub window_end: DateTime<Utc>,
     /// When this market was discovered.
     pub discovered_at: DateTime<Utc>,
+    /// Window duration (15min or 1h).
+    pub window_duration: WindowDuration,
 }
 
 impl DiscoveredMarket {
@@ -85,6 +86,8 @@ impl DiscoveredMarket {
 pub struct DiscoveryConfig {
     /// Assets to track.
     pub assets: Vec<CryptoAsset>,
+    /// Window duration to look for (15min or 1h).
+    pub window_duration: WindowDuration,
     /// HTTP request timeout.
     pub request_timeout: Duration,
     /// Discovery polling interval.
@@ -95,6 +98,7 @@ impl Default for DiscoveryConfig {
     fn default() -> Self {
         Self {
             assets: vec![CryptoAsset::Btc, CryptoAsset::Eth, CryptoAsset::Sol],
+            window_duration: WindowDuration::OneHour, // Default to 1h since 15min not available
             request_timeout: Duration::from_secs(30),
             poll_interval: Duration::from_secs(30),
         }
@@ -205,7 +209,7 @@ impl MarketDiscovery {
         Ok(events)
     }
 
-    /// Parse a Gamma event into a DiscoveredMarket if it's a valid 15-minute crypto market.
+    /// Parse a Gamma event into a DiscoveredMarket if it matches our configured window duration.
     fn parse_crypto_market(
         &self,
         event: &GammaEvent,
@@ -215,10 +219,18 @@ impl MarketDiscovery {
             None => return Ok(None),
         };
 
-        // Check if this is a 15-minute market
-        let is_15min = FIFTEEN_MIN_KEYWORDS.iter().any(|kw| title.contains(kw));
+        // Check if this market matches our configured window duration
+        // First check title keywords, then slug patterns as fallback
+        let keywords = self.config.window_duration.keywords();
+        let slug_patterns = self.config.window_duration.slug_patterns();
 
-        if !is_15min {
+        let matches_title = keywords.iter().any(|kw| title.contains(kw));
+        let matches_slug = event.slug.as_ref().map_or(false, |slug| {
+            let slug_lower = slug.to_lowercase();
+            slug_patterns.iter().any(|p| slug_lower.contains(p))
+        });
+
+        if !matches_title && !matches_slug {
             return Ok(None);
         }
 
@@ -277,8 +289,8 @@ impl MarketDiscovery {
             }
         };
 
-        // For 15-minute markets, window_start is 15 minutes before end
-        let window_start = window_end - chrono::Duration::minutes(15);
+        // Calculate window_start based on configured duration
+        let window_start = window_end - self.config.window_duration.as_duration();
 
         // Parse strike price from title
         let strike_price = self.parse_strike_price(&title);
@@ -293,6 +305,7 @@ impl MarketDiscovery {
             window_start,
             window_end,
             discovered_at: Utc::now(),
+            window_duration: self.config.window_duration,
         };
 
         Ok(Some(discovered_market))
@@ -556,13 +569,21 @@ mod tests {
     }
 
     #[test]
-    fn test_is_15min_market() {
+    fn test_window_duration_keywords() {
+        // Test 15-minute market detection
         let title = "btc 15 minute up or down";
-        assert!(FIFTEEN_MIN_KEYWORDS.iter().any(|kw| title.contains(kw)));
+        let fifteen_min_keywords = WindowDuration::FifteenMin.keywords();
+        assert!(fifteen_min_keywords.iter().any(|kw| title.contains(kw)));
         assert!(UP_DOWN_KEYWORDS.iter().any(|kw| title.contains(kw)));
 
-        let title2 = "btc hourly prediction";
-        assert!(!FIFTEEN_MIN_KEYWORDS.iter().any(|kw| title2.contains(kw)));
+        // Test 1-hour market detection via slug patterns
+        let one_hour_patterns = WindowDuration::OneHour.slug_patterns();
+        let slug = "bitcoin-up-or-down-january-14-9am-et";
+        assert!(one_hour_patterns.iter().any(|p| slug.contains(p)));
+
+        // Non-matching title
+        let title2 = "btc weekly prediction";
+        assert!(!fifteen_min_keywords.iter().any(|kw| title2.contains(kw)));
     }
 
     #[test]
@@ -577,6 +598,7 @@ mod tests {
             window_start: Utc::now() - chrono::Duration::minutes(5),
             window_end: Utc::now() + chrono::Duration::minutes(10),
             discovered_at: Utc::now(),
+            window_duration: WindowDuration::FifteenMin,
         };
 
         assert!(market.is_active());

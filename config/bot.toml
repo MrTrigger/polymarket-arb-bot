@@ -20,15 +20,18 @@
 # - backtest: Historical data replay
 mode = "paper"
 
-# Assets to trade (15-minute up/down markets)
+# Assets to trade
 assets = ["BTC", "ETH", "SOL"]
+
+# Market window duration: "15min" or "1h"
+window_duration = "15min"
 
 # Log level: trace, debug, info, warn, error
 log_level = "info"
 
 [clickhouse]
 url = "http://localhost:8123"
-database = "default"
+database = "polymarket"
 max_rows = 10000
 max_bytes = 10485760  # 10MB
 period_secs = 5
@@ -143,21 +146,31 @@ min_margin_late_bps = 50       # 0.5% in late phase
 
 [engines.directional]
 # Directional engine: Signal-based asymmetric allocations
-# Uses percentage-based thresholds that scale with asset price:
-#   >12 min: 0.06% strong / 0.03% lean
-#   9-12 min: 0.05% / 0.025%
-#   6-9 min: 0.04% / 0.015%
-#   3-6 min: 0.035% / 0.012%
-#   <3 min: 0.025% / 0.008%
+# OPTIMIZED via Python backtest (14 days, 180 markets):
+#   - Best config: Strong 0.03%, Strong ratio 0.90 -> 5.99% return, 61% win rate
+#   - Lean signals are net negative (39-48% win rate) -> use high threshold to reduce
+#   - BTC outperforms (13.86%) vs ETH/SOL (1-3%)
+#
+# Time-scaled thresholds (% from opening price):
+#   >30 min: 0.03% strong / 0.02% lean (base thresholds)
+#   10-30 min: 0.021% strong / 0.014% lean (factor 0.7)
+#   3-10 min: 0.015% strong / 0.01% lean (factor 0.5)
+#   <3 min: 0.009% strong / 0.006% lean (factor 0.3)
 enabled = true
 min_seconds_remaining = 60     # Minimum time to enter directional trade
-max_combined_cost = 1.05       # Max combined YES+NO cost (allow slight premium)
+max_combined_cost = 1.02       # Max combined YES+NO cost (tighter than before)
 max_spread_bps = 500           # Max bid-ask spread to trade (5%)
 min_favorable_depth = 50.0     # Minimum depth on favorable side ($50)
 
-# Signal allocation ratios
-strong_up_ratio = 0.78         # Strong UP signal: 78% YES, 22% NO
-lean_up_ratio = 0.60           # Lean UP signal: 60% YES, 40% NO
+# Signal thresholds (in basis points from open price)
+# Strong signals have positive expectancy; lean signals are marginal
+# Note: These are used for late-phase (<3 min) only; earlier phases use time-scaled values
+strong_threshold_late_bps = 9  # 0.009% for late phase (factor 0.3 of 0.03%)
+lean_threshold_late_bps = 6    # 0.006% for late phase (factor 0.3 of 0.02%)
+
+# Signal allocation ratios (OPTIMIZED: 0.90 strong ratio is best)
+strong_up_ratio = 0.90         # Strong UP signal: 90% YES, 10% NO
+lean_up_ratio = 0.55           # Lean UP signal: 55% YES, 45% NO (low ratio since lean signals marginal)
 neutral_ratio = 0.50           # Neutral signal: 50/50
 
 [engines.maker]
