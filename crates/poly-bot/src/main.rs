@@ -79,6 +79,14 @@ async fn main() -> ExitCode {
 }
 
 async fn run() -> Result<()> {
+    // Load environment variables from .env file (if present)
+    if let Err(e) = dotenvy::dotenv() {
+        // Only warn if it's not a "file not found" error
+        if !matches!(e, dotenvy::Error::Io(ref io_err) if io_err.kind() == std::io::ErrorKind::NotFound) {
+            eprintln!("Warning: Failed to load .env file: {}", e);
+        }
+    }
+
     // Parse CLI arguments
     let args = Args::parse();
 

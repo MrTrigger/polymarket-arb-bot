@@ -780,8 +780,17 @@ impl BotConfig {
         }
 
         // ClickHouse credentials
+        // Support both full URL and separate host/port
         if let Ok(url) = std::env::var("CLICKHOUSE_URL") {
-            self.clickhouse.url = url;
+            // If URL already has protocol and port, use as-is
+            if url.starts_with("http://") || url.starts_with("https://") {
+                self.clickhouse.url = url;
+            } else {
+                // Construct URL from host and HTTP port
+                // Note: CLICKHOUSE_HTTP_PORT is for HTTP interface (default 8123)
+                let port = std::env::var("CLICKHOUSE_HTTP_PORT").unwrap_or_else(|_| "8123".to_string());
+                self.clickhouse.url = format!("http://{}:{}", url, port);
+            }
         }
         if let Ok(user) = std::env::var("CLICKHOUSE_USER") {
             self.clickhouse.user = Some(user);

@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS spot_prices (
 ) ENGINE = MergeTree()
 ORDER BY (asset, timestamp)
 PARTITION BY toYYYYMMDD(timestamp)
-TTL timestamp + INTERVAL 90 DAY;
+TTL toDate(timestamp) + INTERVAL 90 DAY;
 
 -- Order book snapshots (periodic full state)
 CREATE TABLE IF NOT EXISTS orderbook_snapshots (
@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS orderbook_snapshots (
 ) ENGINE = MergeTree()
 ORDER BY (token_id, timestamp)
 PARTITION BY toYYYYMMDD(timestamp)
-TTL timestamp + INTERVAL 90 DAY;
+TTL toDate(timestamp) + INTERVAL 90 DAY;
 
 -- Order book deltas (incremental updates)
 CREATE TABLE IF NOT EXISTS orderbook_deltas (
@@ -55,7 +55,7 @@ CREATE TABLE IF NOT EXISTS orderbook_deltas (
 ) ENGINE = MergeTree()
 ORDER BY (token_id, timestamp)
 PARTITION BY toYYYYMMDD(timestamp)
-TTL timestamp + INTERVAL 90 DAY;
+TTL toDate(timestamp) + INTERVAL 90 DAY;
 
 -- Price history from Polymarket API (historical import)
 CREATE TABLE IF NOT EXISTS price_history (
@@ -96,7 +96,7 @@ CREATE TABLE IF NOT EXISTS decisions (
 ) ENGINE = MergeTree()
 ORDER BY (event_id, timestamp)
 PARTITION BY toYYYYMMDD(timestamp)
-TTL timestamp + INTERVAL 180 DAY;
+TTL toDate(timestamp) + INTERVAL 180 DAY;
 
 -- Counterfactual analysis (post-settlement what-if)
 CREATE TABLE IF NOT EXISTS counterfactuals (
@@ -120,7 +120,7 @@ CREATE TABLE IF NOT EXISTS counterfactuals (
 ) ENGINE = MergeTree()
 ORDER BY (event_id, settlement_time)
 PARTITION BY toYYYYMMDD(settlement_time)
-TTL settlement_time + INTERVAL 180 DAY;
+TTL toDate(settlement_time) + INTERVAL 180 DAY;
 
 -- Anomaly detection (observability)
 CREATE TABLE IF NOT EXISTS anomalies (
@@ -138,4 +138,4 @@ CREATE TABLE IF NOT EXISTS anomalies (
 ) ENGINE = MergeTree()
 ORDER BY (anomaly_type, timestamp)
 PARTITION BY toYYYYMMDD(timestamp)
-TTL timestamp + INTERVAL 90 DAY;
+TTL toDate(timestamp) + INTERVAL 90 DAY;
