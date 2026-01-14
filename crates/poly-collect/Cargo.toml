@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 # Internal
 poly-common = { path = "../poly-common" }
+poly-market = { path = "../poly-market" }
 
 # Async runtime
 tokio = { workspace = true }

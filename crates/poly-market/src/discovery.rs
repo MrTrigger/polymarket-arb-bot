@@ -1,34 +1,27 @@
 //! Market discovery via Polymarket Gamma API.
 //!
-//! Discovers active 15-minute up/down markets for crypto assets (BTC, ETH, SOL, XRP),
-//! extracts YES/NO token IDs, and stores market metadata to ClickHouse.
+//! Discovers active 15-minute up/down markets for crypto assets.
 
 use std::collections::HashSet;
-use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use poly_common::{ClickHouseClient, CryptoAsset, MarketWindow};
+use poly_common::CryptoAsset;
 use reqwest::Client;
 use rust_decimal::Decimal;
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
-// Re-export types from poly-market for convenience
-pub use poly_market::{GammaEvent, GammaMarket, GammaTag, TokenIds};
+use crate::types::{GammaEvent, GammaMarket, TokenIds};
 
 /// Gamma API base URL.
 const GAMMA_API_URL: &str = "https://gamma-api.polymarket.com";
-
-/// Tag slugs for crypto 15-minute markets.
-/// These may need adjustment based on actual Polymarket tagging.
-#[allow(dead_code)]
-const CRYPTO_TAG_SLUGS: &[&str] = &["crypto", "bitcoin", "ethereum", "solana", "xrp"];
 
 /// Keywords to identify 15-minute up/down markets in titles.
 const FIFTEEN_MIN_KEYWORDS: &[&str] = &["15 min", "15-min", "15min", "15 minute"];
 const UP_DOWN_KEYWORDS: &[&str] = &["up or down", "higher or lower", "above or below"];
 
+/// Errors that can occur during market discovery.
 #[derive(Debug, Error)]
 pub enum DiscoveryError {
     #[error("HTTP request failed: {0}")]
@@ -37,46 +30,112 @@ pub enum DiscoveryError {
     #[error("JSON parsing failed: {0}")]
     Json(#[from] serde_json::Error),
 
-    #[error("ClickHouse error: {0}")]
-    ClickHouse(#[from] poly_common::ClickHouseError),
-
     #[error("Invalid market data: {0}")]
     InvalidData(String),
+}
+
+/// A discovered market ready for trading/tracking.
+#[derive(Debug, Clone)]
+pub struct DiscoveredMarket {
+    /// Event ID from Polymarket.
+    pub event_id: String,
+    /// Condition ID for the market.
+    pub condition_id: String,
+    /// Crypto asset (BTC, ETH, etc.).
+    pub asset: CryptoAsset,
+    /// YES token ID for CLOB subscription.
+    pub yes_token_id: String,
+    /// NO token ID for CLOB subscription.
+    pub no_token_id: String,
+    /// Strike price for the up/down market.
+    pub strike_price: Decimal,
+    /// Window start time.
+    pub window_start: DateTime<Utc>,
+    /// Window end time (settlement).
+    pub window_end: DateTime<Utc>,
+    /// When this market was discovered.
+    pub discovered_at: DateTime<Utc>,
+}
+
+impl DiscoveredMarket {
+    /// Get time remaining until window end.
+    pub fn time_remaining(&self) -> chrono::Duration {
+        self.window_end - Utc::now()
+    }
+
+    /// Check if the window is still active.
+    pub fn is_active(&self) -> bool {
+        let now = Utc::now();
+        now >= self.window_start && now < self.window_end
+    }
+
+    /// Check if the window has expired.
+    pub fn is_expired(&self) -> bool {
+        Utc::now() >= self.window_end
+    }
+
+    /// Get minutes remaining.
+    pub fn minutes_remaining(&self) -> f64 {
+        self.time_remaining().num_seconds() as f64 / 60.0
+    }
+}
+
+/// Configuration for market discovery.
+#[derive(Debug, Clone)]
+pub struct DiscoveryConfig {
+    /// Assets to track.
+    pub assets: Vec<CryptoAsset>,
+    /// HTTP request timeout.
+    pub request_timeout: Duration,
+    /// Discovery polling interval.
+    pub poll_interval: Duration,
+}
+
+impl Default for DiscoveryConfig {
+    fn default() -> Self {
+        Self {
+            assets: vec![CryptoAsset::Btc, CryptoAsset::Eth, CryptoAsset::Sol],
+            request_timeout: Duration::from_secs(30),
+            poll_interval: Duration::from_secs(30),
+        }
+    }
 }
 
 /// Market discovery client for finding 15-minute crypto markets.
 pub struct MarketDiscovery {
     http: Client,
-    db: Arc<ClickHouseClient>,
-    /// Assets to track.
-    assets: Vec<CryptoAsset>,
+    config: DiscoveryConfig,
     /// Known market event IDs to avoid re-processing.
     known_markets: HashSet<String>,
-    /// Recently discovered market windows (for CLOB subscription).
-    discovered_windows: Vec<MarketWindow>,
 }
 
 impl MarketDiscovery {
     /// Create a new market discovery client.
-    pub fn new(db: Arc<ClickHouseClient>, assets: Vec<CryptoAsset>) -> Self {
+    pub fn new(config: DiscoveryConfig) -> Self {
         let http = Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(config.request_timeout)
             .build()
             .expect("Failed to create HTTP client");
 
         Self {
             http,
-            db,
-            assets,
+            config,
             known_markets: HashSet::new(),
-            discovered_windows: Vec::new(),
         }
     }
 
-    /// Discover active 15-minute markets and store new ones to ClickHouse.
-    /// Returns the number of new markets discovered.
-    pub async fn discover(&mut self) -> Result<usize, DiscoveryError> {
-        info!("Starting market discovery for {:?}", self.assets);
+    /// Create with default config.
+    pub fn with_assets(assets: Vec<CryptoAsset>) -> Self {
+        Self::new(DiscoveryConfig {
+            assets,
+            ..Default::default()
+        })
+    }
+
+    /// Discover active 15-minute markets.
+    /// Returns newly discovered markets (not seen before).
+    pub async fn discover(&mut self) -> Result<Vec<DiscoveredMarket>, DiscoveryError> {
+        info!("Starting market discovery for {:?}", self.config.assets);
 
         let events = self.fetch_active_events().await?;
         debug!("Fetched {} active events", events.len());
@@ -95,30 +154,35 @@ impl MarketDiscovery {
             }
 
             // Check if this is a 15-minute crypto market
-            if let Some(market_window) = self.parse_crypto_market(&event)? {
+            if let Some(market) = self.parse_crypto_market(&event)? {
                 info!(
-                    "Discovered new market: {} {} (ends {})",
-                    market_window.asset, market_window.event_id, market_window.window_end
+                    "Discovered new market: {} {} strike={} (ends {})",
+                    market.asset, market.event_id, market.strike_price, market.window_end
                 );
-                new_markets.push(market_window);
+                new_markets.push(market);
                 self.known_markets.insert(event_id);
             }
         }
 
-        // Store new markets to ClickHouse and update discovered windows
-        if !new_markets.is_empty() {
-            self.store_markets(&new_markets).await?;
-            // Extend discovered windows for CLOB subscription
-            self.discovered_windows.extend(new_markets.clone());
-        }
-
-        Ok(new_markets.len())
+        Ok(new_markets)
     }
 
-    /// Get all discovered market windows (for CLOB subscription).
-    /// This is a non-async method that returns a clone of discovered windows.
-    pub async fn get_discovered_windows(&self) -> Result<Vec<MarketWindow>, DiscoveryError> {
-        Ok(self.discovered_windows.clone())
+    /// Discover all active markets (including previously seen).
+    pub async fn discover_all(&mut self) -> Result<Vec<DiscoveredMarket>, DiscoveryError> {
+        let events = self.fetch_active_events().await?;
+        let mut markets = Vec::new();
+
+        for event in events {
+            if let Some(market) = self.parse_crypto_market(&event)? {
+                // Track in known markets
+                if let Some(id) = &event.id {
+                    self.known_markets.insert(id.clone());
+                }
+                markets.push(market);
+            }
+        }
+
+        Ok(markets)
     }
 
     /// Fetch active events from Gamma API.
@@ -141,29 +205,25 @@ impl MarketDiscovery {
         Ok(events)
     }
 
-    /// Parse a Gamma event into a MarketWindow if it's a valid 15-minute crypto market.
+    /// Parse a Gamma event into a DiscoveredMarket if it's a valid 15-minute crypto market.
     fn parse_crypto_market(
         &self,
         event: &GammaEvent,
-    ) -> Result<Option<MarketWindow>, DiscoveryError> {
+    ) -> Result<Option<DiscoveredMarket>, DiscoveryError> {
         let title = match &event.title {
             Some(t) => t.to_lowercase(),
             None => return Ok(None),
         };
 
         // Check if this is a 15-minute market
-        let is_15min = FIFTEEN_MIN_KEYWORDS
-            .iter()
-            .any(|kw| title.contains(kw));
+        let is_15min = FIFTEEN_MIN_KEYWORDS.iter().any(|kw| title.contains(kw));
 
         if !is_15min {
             return Ok(None);
         }
 
         // Check if it's an up/down market
-        let is_up_down = UP_DOWN_KEYWORDS
-            .iter()
-            .any(|kw| title.contains(kw));
+        let is_up_down = UP_DOWN_KEYWORDS.iter().any(|kw| title.contains(kw));
 
         if !is_up_down {
             debug!("Skipping non-up/down market: {}", title);
@@ -171,8 +231,7 @@ impl MarketDiscovery {
         }
 
         // Determine which crypto asset this is for
-        let asset = self.detect_asset(&title)?;
-        let asset = match asset {
+        let asset = match self.detect_asset(&title) {
             Some(a) => a,
             None => {
                 debug!("No matching asset for market: {}", title);
@@ -181,7 +240,7 @@ impl MarketDiscovery {
         };
 
         // Check if we're tracking this asset
-        if !self.assets.contains(&asset) {
+        if !self.config.assets.contains(&asset) {
             return Ok(None);
         }
 
@@ -189,14 +248,16 @@ impl MarketDiscovery {
         let market = match &event.markets {
             Some(markets) if !markets.is_empty() => &markets[0],
             _ => {
-                warn!("Event {} has no markets", event.id.as_deref().unwrap_or("unknown"));
+                warn!(
+                    "Event {} has no markets",
+                    event.id.as_deref().unwrap_or("unknown")
+                );
                 return Ok(None);
             }
         };
 
         // Parse token IDs
-        let token_ids = self.parse_token_ids(market)?;
-        let token_ids = match token_ids {
+        let token_ids = match self.parse_token_ids(market)? {
             Some(t) => t,
             None => {
                 warn!(
@@ -208,8 +269,7 @@ impl MarketDiscovery {
         };
 
         // Parse timestamps
-        let window_end = self.parse_datetime(&event.end_date)?;
-        let window_end = match window_end {
+        let window_end = match self.parse_datetime(&event.end_date)? {
             Some(t) => t,
             None => {
                 warn!("Could not parse end_date for event {:?}", event.id);
@@ -220,13 +280,13 @@ impl MarketDiscovery {
         // For 15-minute markets, window_start is 15 minutes before end
         let window_start = window_end - chrono::Duration::minutes(15);
 
-        // Parse strike price from title (e.g., "BTC above $100,000")
+        // Parse strike price from title
         let strike_price = self.parse_strike_price(&title);
 
-        let market_window = MarketWindow {
+        let discovered_market = DiscoveredMarket {
             event_id: event.id.clone().unwrap_or_default(),
             condition_id: market.condition_id.clone().unwrap_or_default(),
-            asset: asset.as_str().to_string(),
+            asset,
             yes_token_id: token_ids.yes_token_id,
             no_token_id: token_ids.no_token_id,
             strike_price,
@@ -235,31 +295,30 @@ impl MarketDiscovery {
             discovered_at: Utc::now(),
         };
 
-        Ok(Some(market_window))
+        Ok(Some(discovered_market))
     }
 
     /// Detect which crypto asset a market title refers to.
-    fn detect_asset(&self, title: &str) -> Result<Option<CryptoAsset>, DiscoveryError> {
+    fn detect_asset(&self, title: &str) -> Option<CryptoAsset> {
         let title_lower = title.to_lowercase();
 
         if title_lower.contains("btc") || title_lower.contains("bitcoin") {
-            return Ok(Some(CryptoAsset::Btc));
+            return Some(CryptoAsset::Btc);
         }
         if title_lower.contains("eth") || title_lower.contains("ethereum") {
-            return Ok(Some(CryptoAsset::Eth));
+            return Some(CryptoAsset::Eth);
         }
         if title_lower.contains("sol") || title_lower.contains("solana") {
-            return Ok(Some(CryptoAsset::Sol));
+            return Some(CryptoAsset::Sol);
         }
         if title_lower.contains("xrp") || title_lower.contains("ripple") {
-            return Ok(Some(CryptoAsset::Xrp));
+            return Some(CryptoAsset::Xrp);
         }
 
-        Ok(None)
+        None
     }
 
     /// Parse token IDs from the market's clob_token_ids field.
-    /// The API returns this as a JSON string: "[\"123\", \"456\"]"
     fn parse_token_ids(&self, market: &GammaMarket) -> Result<Option<TokenIds>, DiscoveryError> {
         let clob_tokens_str = match &market.clob_token_ids {
             Some(s) => s,
@@ -270,7 +329,10 @@ impl MarketDiscovery {
         let tokens: Vec<String> = match serde_json::from_str(clob_tokens_str) {
             Ok(t) => t,
             Err(e) => {
-                debug!("Failed to parse clob_token_ids '{}': {}", clob_tokens_str, e);
+                debug!(
+                    "Failed to parse clob_token_ids '{}': {}",
+                    clob_tokens_str, e
+                );
                 return Ok(None);
             }
         };
@@ -315,7 +377,10 @@ impl MarketDiscovery {
     }
 
     /// Parse a datetime string from the API.
-    fn parse_datetime(&self, dt_str: &Option<String>) -> Result<Option<DateTime<Utc>>, DiscoveryError> {
+    fn parse_datetime(
+        &self,
+        dt_str: &Option<String>,
+    ) -> Result<Option<DateTime<Utc>>, DiscoveryError> {
         let s = match dt_str {
             Some(s) => s,
             None => return Ok(None),
@@ -364,37 +429,36 @@ impl MarketDiscovery {
         Decimal::ZERO
     }
 
-    /// Store discovered markets to ClickHouse.
-    async fn store_markets(&self, markets: &[MarketWindow]) -> Result<(), DiscoveryError> {
-        self.db
-            .insert_market_windows(markets)
-            .await
-            .map_err(DiscoveryError::ClickHouse)?;
-        info!("Stored {} new markets to ClickHouse", markets.len());
-        Ok(())
+    /// Get count of known markets.
+    pub fn known_market_count(&self) -> usize {
+        self.known_markets.len()
     }
 
-    /// Get all currently known active markets.
-    pub fn active_markets(&self) -> &HashSet<String> {
-        &self.known_markets
+    /// Clear known markets (useful for testing or resetting state).
+    pub fn clear_known_markets(&mut self) {
+        self.known_markets.clear();
     }
 
-    /// Run discovery loop with periodic refresh.
-    pub async fn run_loop(
+    /// Run discovery loop with callback.
+    pub async fn run_loop<F>(
         mut self,
-        interval: Duration,
         mut shutdown: tokio::sync::broadcast::Receiver<()>,
-    ) -> Result<(), DiscoveryError> {
+        mut on_discovery: F,
+    ) -> Result<(), DiscoveryError>
+    where
+        F: FnMut(Vec<DiscoveredMarket>),
+    {
         info!(
-            "Starting discovery loop with {} second interval",
-            interval.as_secs()
+            "Starting discovery loop with {:?} interval",
+            self.config.poll_interval
         );
 
         loop {
             match self.discover().await {
-                Ok(count) => {
-                    if count > 0 {
-                        info!("Discovery found {} new markets", count);
+                Ok(markets) => {
+                    if !markets.is_empty() {
+                        info!("Discovery found {} new markets", markets.len());
+                        on_discovery(markets);
                     } else {
                         debug!("Discovery found no new markets");
                     }
@@ -405,7 +469,7 @@ impl MarketDiscovery {
             }
 
             tokio::select! {
-                _ = tokio::time::sleep(interval) => {}
+                _ = tokio::time::sleep(self.config.poll_interval) => {}
                 _ = shutdown.recv() => {
                     info!("Discovery loop received shutdown signal");
                     break;
@@ -421,60 +485,43 @@ impl MarketDiscovery {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_detect_asset() {
-        let discovery = MarketDiscovery {
-            http: Client::new(),
-            db: Arc::new(ClickHouseClient::with_defaults()),
+    fn test_discovery() -> MarketDiscovery {
+        MarketDiscovery::new(DiscoveryConfig {
             assets: vec![
                 CryptoAsset::Btc,
                 CryptoAsset::Eth,
                 CryptoAsset::Sol,
                 CryptoAsset::Xrp,
             ],
-            known_markets: HashSet::new(),
-            discovered_windows: Vec::new(),
-        };
+            ..Default::default()
+        })
+    }
 
+    #[test]
+    fn test_detect_asset() {
+        let discovery = test_discovery();
+
+        assert_eq!(discovery.detect_asset("will btc go up"), Some(CryptoAsset::Btc));
         assert_eq!(
-            discovery.detect_asset("will btc go up").unwrap(),
+            discovery.detect_asset("bitcoin 15 minute"),
             Some(CryptoAsset::Btc)
         );
         assert_eq!(
-            discovery.detect_asset("bitcoin 15 minute").unwrap(),
-            Some(CryptoAsset::Btc)
-        );
-        assert_eq!(
-            discovery.detect_asset("eth price prediction").unwrap(),
+            discovery.detect_asset("eth price prediction"),
             Some(CryptoAsset::Eth)
         );
         assert_eq!(
-            discovery.detect_asset("ethereum 15min").unwrap(),
+            discovery.detect_asset("ethereum 15min"),
             Some(CryptoAsset::Eth)
         );
-        assert_eq!(
-            discovery.detect_asset("sol up or down").unwrap(),
-            Some(CryptoAsset::Sol)
-        );
-        assert_eq!(
-            discovery.detect_asset("xrp price").unwrap(),
-            Some(CryptoAsset::Xrp)
-        );
-        assert_eq!(
-            discovery.detect_asset("random market").unwrap(),
-            None
-        );
+        assert_eq!(discovery.detect_asset("sol up or down"), Some(CryptoAsset::Sol));
+        assert_eq!(discovery.detect_asset("xrp price"), Some(CryptoAsset::Xrp));
+        assert_eq!(discovery.detect_asset("random market"), None);
     }
 
     #[test]
     fn test_parse_strike_price() {
-        let discovery = MarketDiscovery {
-            http: Client::new(),
-            db: Arc::new(ClickHouseClient::with_defaults()),
-            assets: vec![],
-            known_markets: HashSet::new(),
-            discovered_windows: Vec::new(),
-        };
+        let discovery = test_discovery();
 
         assert_eq!(
             discovery.parse_strike_price("Will BTC be above $100,000 at 12:15 UTC?"),
@@ -484,21 +531,12 @@ mod tests {
             discovery.parse_strike_price("ETH above $3,500.50"),
             Decimal::new(350050, 2)
         );
-        assert_eq!(
-            discovery.parse_strike_price("no price here"),
-            Decimal::ZERO
-        );
+        assert_eq!(discovery.parse_strike_price("no price here"), Decimal::ZERO);
     }
 
     #[test]
     fn test_parse_token_ids() {
-        let discovery = MarketDiscovery {
-            http: Client::new(),
-            db: Arc::new(ClickHouseClient::with_defaults()),
-            assets: vec![],
-            known_markets: HashSet::new(),
-            discovered_windows: Vec::new(),
-        };
+        let discovery = test_discovery();
 
         let market = GammaMarket {
             id: Some("test".to_string()),
@@ -525,5 +563,33 @@ mod tests {
 
         let title2 = "btc hourly prediction";
         assert!(!FIFTEEN_MIN_KEYWORDS.iter().any(|kw| title2.contains(kw)));
+    }
+
+    #[test]
+    fn test_discovered_market_time_methods() {
+        let market = DiscoveredMarket {
+            event_id: "test".to_string(),
+            condition_id: "cond".to_string(),
+            asset: CryptoAsset::Btc,
+            yes_token_id: "yes".to_string(),
+            no_token_id: "no".to_string(),
+            strike_price: Decimal::from(100000),
+            window_start: Utc::now() - chrono::Duration::minutes(5),
+            window_end: Utc::now() + chrono::Duration::minutes(10),
+            discovered_at: Utc::now(),
+        };
+
+        assert!(market.is_active());
+        assert!(!market.is_expired());
+        assert!(market.minutes_remaining() > 9.0);
+        assert!(market.minutes_remaining() < 11.0);
+    }
+
+    #[test]
+    fn test_discovery_config_default() {
+        let config = DiscoveryConfig::default();
+        assert_eq!(config.assets.len(), 3);
+        assert_eq!(config.request_timeout, Duration::from_secs(30));
+        assert_eq!(config.poll_interval, Duration::from_secs(30));
     }
 }

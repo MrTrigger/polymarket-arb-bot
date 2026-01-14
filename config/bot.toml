@@ -18,7 +18,7 @@
 # - paper: Real data, simulated execution
 # - shadow: Real data, log-only (no execution)
 # - backtest: Historical data replay
-mode = "shadow"
+mode = "paper"
 
 # Assets to trade (15-minute up/down markets)
 assets = ["BTC", "ETH", "SOL"]
@@ -124,3 +124,46 @@ speed = 0.0
 
 # Parameter sweep mode for optimization
 sweep_enabled = false
+
+# ============================================================================
+# Trading Engines Configuration
+# ============================================================================
+# Priority order determines which engine takes precedence
+# Engines can run concurrently when non-conflicting (e.g., maker with directional)
+
+[engines]
+priority = ["directional", "arbitrage", "maker"]
+
+[engines.arbitrage]
+# Arbitrage engine: Buy YES+NO when combined < $1.00 (risk-free profit)
+enabled = true
+min_margin_early_bps = 250     # 2.5% minimum margin in early phase
+min_margin_mid_bps = 150       # 1.5% in mid phase
+min_margin_late_bps = 50       # 0.5% in late phase
+
+[engines.directional]
+# Directional engine: Signal-based asymmetric allocations
+# Uses percentage-based thresholds that scale with asset price:
+#   >12 min: 0.06% strong / 0.03% lean
+#   9-12 min: 0.05% / 0.025%
+#   6-9 min: 0.04% / 0.015%
+#   3-6 min: 0.035% / 0.012%
+#   <3 min: 0.025% / 0.008%
+enabled = true
+min_seconds_remaining = 60     # Minimum time to enter directional trade
+max_combined_cost = 1.05       # Max combined YES+NO cost (allow slight premium)
+max_spread_bps = 500           # Max bid-ask spread to trade (5%)
+min_favorable_depth = 50.0     # Minimum depth on favorable side ($50)
+
+# Signal allocation ratios
+strong_up_ratio = 0.78         # Strong UP signal: 78% YES, 22% NO
+lean_up_ratio = 0.60           # Lean UP signal: 60% YES, 40% NO
+neutral_ratio = 0.50           # Neutral signal: 50/50
+
+[engines.maker]
+# Maker engine: Passive limit orders for rebates
+enabled = false                # Disabled for initial paper trading
+min_seconds_remaining = 120    # Minimum time remaining
+min_spread_bps = 100           # Minimum spread to participate (1%)
+max_spread_bps = 1000          # Maximum spread (10%)
+default_order_size = 50.0      # Default order size in USDC

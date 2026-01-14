@@ -158,6 +158,14 @@ impl LiveDataSource {
         let markets = self.active_markets.read().await;
         markets.values().cloned().collect()
     }
+
+    /// Get a handle to the active markets state for external use (e.g., discovery).
+    ///
+    /// This allows external components to add markets to the data source
+    /// even after the data source has been moved into a strategy loop.
+    pub fn active_markets_handle(&self) -> ActiveMarketsState {
+        Arc::clone(&self.active_markets)
+    }
 }
 
 #[async_trait]

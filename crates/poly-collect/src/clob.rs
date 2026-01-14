@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use poly_common::{ClickHouseClient, MarketWindow, OrderBookDelta, OrderBookSnapshot};
 use rust_decimal::Decimal;
@@ -20,6 +20,11 @@ use tokio_tungstenite::{
     tungstenite::{protocol::Message, Error as WsError},
 };
 use tracing::{debug, error, info, warn};
+
+// Re-export types from poly-market for convenience
+pub use poly_market::{
+    parse_timestamp, BookMessage, OrderBookState, OrderSummary, PriceChange, PriceChangeMessage,
+};
 
 /// Polymarket CLOB WebSocket URL.
 const CLOB_WS_URL: &str = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
@@ -100,197 +105,10 @@ struct SubscriptionOp {
     operation: &'static str,
 }
 
-/// Orderbook level from CLOB WebSocket.
-#[derive(Debug, Clone, Deserialize)]
-pub struct OrderSummary {
-    pub price: String,
-    pub size: String,
-}
-
-/// Book message from CLOB WebSocket.
-#[derive(Debug, Clone, Deserialize)]
-pub struct BookMessage {
-    pub event_type: String,
-    pub asset_id: String,
-    pub market: String,
-    pub timestamp: String,
-    pub hash: String,
-    pub bids: Vec<OrderSummary>,
-    pub asks: Vec<OrderSummary>,
-}
-
-/// Price change entry.
-#[derive(Debug, Clone, Deserialize)]
-pub struct PriceChange {
-    pub asset_id: String,
-    pub price: String,
-    pub size: String,
-    pub side: String,
-    #[serde(default)]
-    pub hash: Option<String>,
-    #[serde(default)]
-    pub best_bid: Option<String>,
-    #[serde(default)]
-    pub best_ask: Option<String>,
-}
-
-/// Price change message from CLOB WebSocket.
-#[derive(Debug, Clone, Deserialize)]
-pub struct PriceChangeMessage {
-    pub event_type: String,
-    pub asset_id: String,
-    pub market: String,
-    pub timestamp: String,
-    pub price_changes: Vec<PriceChange>,
-}
-
 /// Generic message for detecting event type.
 #[derive(Debug, Deserialize)]
 struct GenericMessage {
     event_type: Option<String>,
-}
-
-/// In-memory orderbook state for a single token.
-#[derive(Debug, Clone, Default)]
-pub struct OrderBookState {
-    /// Token ID.
-    pub token_id: String,
-    /// Event/condition ID.
-    pub event_id: String,
-    /// Bid levels (price -> size).
-    pub bids: HashMap<Decimal, Decimal>,
-    /// Ask levels (price -> size).
-    pub asks: HashMap<Decimal, Decimal>,
-    /// Last update timestamp.
-    pub last_update: Option<DateTime<Utc>>,
-}
-
-impl OrderBookState {
-    pub fn new(token_id: String, event_id: String) -> Self {
-        Self {
-            token_id,
-            event_id,
-            bids: HashMap::new(),
-            asks: HashMap::new(),
-            last_update: None,
-        }
-    }
-
-    /// Apply a full book snapshot.
-    pub fn apply_book(&mut self, book: &BookMessage) {
-        self.bids.clear();
-        self.asks.clear();
-
-        for level in &book.bids {
-            if let (Ok(price), Ok(size)) = (level.price.parse(), level.size.parse()) {
-                self.bids.insert(price, size);
-            }
-        }
-        for level in &book.asks {
-            if let (Ok(price), Ok(size)) = (level.price.parse(), level.size.parse()) {
-                self.asks.insert(price, size);
-            }
-        }
-
-        self.last_update = parse_timestamp(&book.timestamp);
-    }
-
-    /// Apply price changes (deltas).
-    pub fn apply_price_change(&mut self, change: &PriceChange) {
-        let price: Decimal = match change.price.parse() {
-            Ok(p) => p,
-            Err(_) => return,
-        };
-        let size: Decimal = match change.size.parse() {
-            Ok(s) => s,
-            Err(_) => return,
-        };
-
-        let book = match change.side.to_lowercase().as_str() {
-            "buy" | "bid" => &mut self.bids,
-            "sell" | "ask" => &mut self.asks,
-            _ => return,
-        };
-
-        if size.is_zero() {
-            book.remove(&price);
-        } else {
-            book.insert(price, size);
-        }
-    }
-
-    /// Get best bid price and size.
-    pub fn best_bid(&self) -> (Decimal, Decimal) {
-        self.bids
-            .iter()
-            .max_by_key(|(p, _)| *p)
-            .map(|(p, s)| (*p, *s))
-            .unwrap_or((Decimal::ZERO, Decimal::ZERO))
-    }
-
-    /// Get best ask price and size.
-    pub fn best_ask(&self) -> (Decimal, Decimal) {
-        self.asks
-            .iter()
-            .min_by_key(|(p, _)| *p)
-            .map(|(p, s)| (*p, *s))
-            .unwrap_or((Decimal::ONE, Decimal::ZERO))
-    }
-
-    /// Calculate spread in basis points.
-    pub fn spread_bps(&self) -> u32 {
-        let (best_bid, _) = self.best_bid();
-        let (best_ask, _) = self.best_ask();
-        if best_bid.is_zero() || best_ask.is_zero() {
-            return 0;
-        }
-        let spread = best_ask - best_bid;
-        let mid = (best_ask + best_bid) / Decimal::TWO;
-        if mid.is_zero() {
-            return 0;
-        }
-        // bps = (spread / mid) * 10000
-        ((spread / mid) * Decimal::from(10000))
-            .to_string()
-            .parse::<f64>()
-            .unwrap_or(0.0) as u32
-    }
-
-    /// Calculate total bid depth (sum of sizes).
-    pub fn bid_depth(&self) -> Decimal {
-        self.bids.values().copied().sum()
-    }
-
-    /// Calculate total ask depth (sum of sizes).
-    pub fn ask_depth(&self) -> Decimal {
-        self.asks.values().copied().sum()
-    }
-
-    /// Generate a snapshot record for ClickHouse.
-    pub fn to_snapshot(&self, timestamp: DateTime<Utc>) -> OrderBookSnapshot {
-        let (best_bid, best_bid_size) = self.best_bid();
-        let (best_ask, best_ask_size) = self.best_ask();
-
-        OrderBookSnapshot {
-            token_id: self.token_id.clone(),
-            event_id: self.event_id.clone(),
-            timestamp,
-            best_bid,
-            best_bid_size,
-            best_ask,
-            best_ask_size,
-            spread_bps: self.spread_bps(),
-            bid_depth: self.bid_depth(),
-            ask_depth: self.ask_depth(),
-        }
-    }
-}
-
-/// Parse timestamp from milliseconds string.
-fn parse_timestamp(ts: &str) -> Option<DateTime<Utc>> {
-    ts.parse::<i64>()
-        .ok()
-        .and_then(|ms| Utc.timestamp_millis_opt(ms).single())
 }
 
 /// Shared state for active markets (token_id -> market info).

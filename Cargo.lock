@@ -1636,6 +1636,7 @@ dependencies = [
  "futures-util",
  "hex",
  "poly-common",
+ "poly-market",
  "reqwest",
  "rust_decimal",
  "rust_decimal_macros",
@@ -1660,6 +1661,7 @@ dependencies = [
  "dashmap",
  "futures-util",
  "poly-common",
+ "poly-market",
  "regex",
  "reqwest",
  "rust_decimal",
@@ -1706,6 +1708,25 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "poly-market"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "futures-util",
+ "poly-common",
+ "regex",
+ "reqwest",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.17",
+ "tokio",
+ "tokio-tungstenite 0.24.0",
+ "tracing",
 ]
 
 [[package]]

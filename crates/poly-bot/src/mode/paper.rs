@@ -25,10 +25,11 @@ use rust_decimal::Decimal;
 use tokio::sync::broadcast;
 use tracing::{error, info, warn};
 
-use poly_common::ClickHouseClient;
+use poly_common::{ClickHouseClient, CryptoAsset};
+use poly_market::{DiscoveryConfig, MarketDiscovery};
 
-use crate::config::{BotConfig, ObservabilityConfig, TradingMode};
-use crate::data_source::live::{LiveDataSource, LiveDataSourceConfig};
+use crate::config::{BotConfig, EnginesConfig, ObservabilityConfig, TradingMode};
+use crate::data_source::live::{ActiveMarket, LiveDataSource, LiveDataSourceConfig};
 use crate::executor::paper::{PaperExecutor, PaperExecutorConfig};
 use crate::observability::{
     create_shared_analyzer, create_shared_detector_with_capture, AnomalyConfig, CaptureConfig,
@@ -48,6 +49,10 @@ pub struct PaperModeConfig {
     pub strategy: StrategyConfig,
     /// Observability configuration.
     pub observability: ObservabilityConfig,
+    /// Engines configuration (arbitrage, directional, maker).
+    pub engines: EnginesConfig,
+    /// Market discovery configuration.
+    pub discovery: DiscoveryConfig,
     /// Initial virtual balance (USDC).
     pub initial_balance: Decimal,
     /// Graceful shutdown timeout (seconds).
@@ -61,6 +66,8 @@ impl Default for PaperModeConfig {
             executor: PaperExecutorConfig::default(),
             strategy: StrategyConfig::default(),
             observability: ObservabilityConfig::default(),
+            engines: EnginesConfig::default(),
+            discovery: DiscoveryConfig::default(),
             initial_balance: Decimal::new(10000, 0), // $10,000 default for paper
             shutdown_timeout_secs: 30,
         }
@@ -79,11 +86,31 @@ impl PaperModeConfig {
             ..Default::default()
         };
 
+        // Convert string assets to CryptoAsset enum for discovery
+        let discovery_assets: Vec<CryptoAsset> = config
+            .assets
+            .iter()
+            .filter_map(|s| match s.to_uppercase().as_str() {
+                "BTC" | "BITCOIN" => Some(CryptoAsset::Btc),
+                "ETH" | "ETHEREUM" => Some(CryptoAsset::Eth),
+                "SOL" | "SOLANA" => Some(CryptoAsset::Sol),
+                "XRP" | "RIPPLE" => Some(CryptoAsset::Xrp),
+                _ => None,
+            })
+            .collect();
+
+        let discovery_config = DiscoveryConfig {
+            assets: discovery_assets,
+            ..Default::default()
+        };
+
         Self {
             data_source: LiveDataSourceConfig::default(),
             executor: executor_config,
             strategy: StrategyConfig::from_trading_config(&config.trading),
             observability: config.observability.clone(),
+            engines: config.engines.clone(),
+            discovery: discovery_config,
             initial_balance: Decimal::new(10000, 0),
             shutdown_timeout_secs: 30,
         }
@@ -167,9 +194,31 @@ impl PaperMode {
             "Paper executor configuration"
         );
 
+        // Log enabled engines
+        let enabled_engines = self.config.engines.enabled_engines();
+        info!(
+            engines = ?enabled_engines,
+            arbitrage = self.config.engines.arbitrage.enabled,
+            directional = self.config.engines.directional.enabled,
+            maker = self.config.engines.maker.enabled,
+            "Trading engines configuration"
+        );
+
         // Create data source (real market data)
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         let data_source = LiveDataSource::new(self.config.data_source.clone());
+
+        // Get handle to active markets before moving data_source
+        let active_markets = data_source.active_markets_handle();
+
+        // Spawn market discovery task
+        let discovery_shutdown = self.shutdown_tx.subscribe();
+        let discovery_config = self.config.discovery.clone();
+        let _discovery_handle = tokio::spawn(run_market_discovery(
+            discovery_config,
+            active_markets,
+            discovery_shutdown,
+        ));
 
         // Create paper executor (simulated fills)
         let mut executor_config = self.config.executor.clone();
@@ -179,12 +228,13 @@ impl PaperMode {
         // Set up observability
         let (capture, obs_tasks) = self.setup_observability().await?;
 
-        // Create strategy loop
-        let mut strategy = StrategyLoop::new(
+        // Create strategy loop with engines config
+        let mut strategy = StrategyLoop::with_engines(
             data_source,
             executor,
             self.state.clone(),
             self.config.strategy.clone(),
+            self.config.engines.clone(),
         );
 
         // Add observability sender if capture is enabled
@@ -404,6 +454,65 @@ impl PaperMode {
     }
 }
 
+/// Run market discovery in a background task.
+///
+/// Periodically queries the Gamma API for new 15-minute markets
+/// and adds them to the active markets state for CLOB subscription.
+async fn run_market_discovery(
+    config: DiscoveryConfig,
+    active_markets: crate::data_source::live::ActiveMarketsState,
+    mut shutdown: broadcast::Receiver<()>,
+) {
+    info!(
+        "Starting market discovery for {:?}",
+        config.assets.iter().map(|a| a.as_str()).collect::<Vec<_>>()
+    );
+
+    let mut discovery = MarketDiscovery::new(config.clone());
+    let poll_interval = config.poll_interval;
+
+    loop {
+        // Discover new markets
+        match discovery.discover().await {
+            Ok(markets) => {
+                if !markets.is_empty() {
+                    info!("Discovered {} new markets", markets.len());
+
+                    // Add discovered markets to the active markets state
+                    let mut active = active_markets.write().await;
+                    for market in &markets {
+                        let active_market = ActiveMarket {
+                            event_id: market.event_id.clone(),
+                            yes_token_id: market.yes_token_id.clone(),
+                            no_token_id: market.no_token_id.clone(),
+                            asset: market.asset,
+                            strike_price: market.strike_price,
+                            window_end: market.window_end,
+                        };
+                        info!(
+                            "Adding market {} ({} strike={}) to active markets",
+                            market.event_id, market.asset, market.strike_price
+                        );
+                        active.insert(market.event_id.clone(), active_market);
+                    }
+                }
+            }
+            Err(e) => {
+                error!("Market discovery error: {}", e);
+            }
+        }
+
+        // Wait for next poll or shutdown
+        tokio::select! {
+            _ = tokio::time::sleep(poll_interval) => {}
+            _ = shutdown.recv() => {
+                info!("Market discovery received shutdown signal");
+                break;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -490,5 +599,19 @@ mod tests {
         assert_eq!(config.executor.max_position_per_market, dec!(500));
         assert_eq!(config.executor.fee_rate, Decimal::ZERO);
         assert!(config.executor.enforce_balance);
+    }
+
+    #[test]
+    fn test_paper_mode_engines_config() {
+        let mut bot_config = BotConfig::default();
+        bot_config.engines.arbitrage.enabled = true;
+        bot_config.engines.directional.enabled = true;
+        bot_config.engines.maker.enabled = false;
+
+        let config = PaperModeConfig::from_bot_config(&bot_config);
+
+        assert!(config.engines.arbitrage.enabled);
+        assert!(config.engines.directional.enabled);
+        assert!(!config.engines.maker.enabled);
     }
 }
