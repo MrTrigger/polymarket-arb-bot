@@ -121,7 +121,7 @@
       "id": "p3-2",
       "title": "Phase 3: Implement ConfidenceSizer",
       "description": "Create ConfidenceSizer with TradingConfig, spent, trades tracking. Implement get_order_size(factors) returning OrderSizeResult. Add confidence calculators: time_confidence(), distance_confidence(), signal_confidence(), book_confidence().",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p1-1", "p1-2", "p3-1"],
       "files": [
         "crates/poly-bot/src/strategy/confidence_sizing.rs"

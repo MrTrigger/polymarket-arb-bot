@@ -2861,3 +2861,77 @@ Notes for next task (p3-2):
 - SizingConfig ready for ConfidenceSizer integration
 - ConfidenceSizer will use market_budget() and base_order_size()
 - Add confidence calculators and OrderSizeResult enum
+
+---
+
+### [2026-01-14] Task p3-2: Implement ConfidenceSizer
+Files created:
+- crates/poly-bot/src/strategy/confidence_sizing.rs
+
+Files modified:
+- crates/poly-bot/src/strategy/mod.rs (added confidence_sizing module and exports)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-bot strategy::confidence_sizing: PASSED (28 tests)
+- cargo test -p poly-bot: PASSED (621 tests total)
+
+ConfidenceSizer features:
+- new(config: SizingConfig): Constructor with configuration
+- with_balance(balance: Decimal): Convenience constructor
+- get_order_size(&factors): Main sizing method returns OrderSizeResult
+- record_trade(cost): Updates spent amount and trade count
+- market_budget()/spent()/remaining_budget(): Budget tracking
+- is_budget_exhausted(): Check if budget is depleted
+- reset(): Reset for new market session
+
+OrderSizeResult struct:
+- size: Calculated order size in USDC
+- is_valid: Whether order is valid (size >= min, budget available)
+- base_size: Base size before confidence adjustment
+- confidence_multiplier: Applied multiplier (0.5x to 3.0x)
+- confidence: Full Confidence breakdown
+- rejection_reason: Optional SizeRejection enum
+- budget_remaining: Budget after this order
+- trades_remaining: Estimated trades left
+
+SizeRejection enum:
+- BudgetExhausted: Market budget depleted
+- BelowMinimum: Size < min_order_size
+- NoBalance: No available balance
+
+Confidence calculation helpers (delegated to ConfidenceCalculator):
+- time_confidence(minutes_remaining, distance)
+- distance_confidence(distance)
+- signal_confidence(signal)
+- book_confidence(imbalance, favorable_depth)
+
+Sizing formula:
+- order_size = base_order_size × confidence_multiplier
+- base_order_size = market_budget / expected_trades_per_market
+- confidence_multiplier = (time × distance × signal × book)^0.25 × 1.5
+- Capped between 0.5x and config.max_confidence_multiplier
+
+Test coverage:
+- Sizer creation and balance configuration
+- Order size calculation (neutral, high, low confidence)
+- Budget management (record_trade, remaining, exhausted)
+- Size capping at remaining budget
+- Below minimum rejection
+- Multiplier capping at config max
+- Balance scaling ($500, $1000, $5000, $25000)
+- Confidence helper methods
+- Spec scenario tests (weak and strong confidence)
+- Serialization tests
+
+Key decisions:
+- ConfidenceSizer delegates confidence calculation to ConfidenceCalculator
+- Budget tracking per market session (reset between markets)
+- Uses existing SizingConfig from config.rs (p3-1)
+- OrderSizeResult is serializable for observability
+- trades_remaining is an estimate based on base_size
+
+Notes for next task (p3-3):
+- ConfidenceSizer now ready for SizingStrategy trait integration
+- Next: Create SizingMode enum and SizingStrategy trait
+- HybridSizer will compose PositionSizer + ConfidenceSizer

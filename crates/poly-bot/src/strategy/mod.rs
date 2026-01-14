@@ -29,6 +29,7 @@
 
 pub mod arb;
 pub mod confidence;
+pub mod confidence_sizing;
 pub mod signal;
 pub mod sizing;
 pub mod toxic;
@@ -58,6 +59,7 @@ pub use arb::{ArbDetector, ArbOpportunity, ArbRejection, ArbThresholds};
 pub use confidence::{
     Confidence, ConfidenceCalculator, ConfidenceFactors, MAX_MULTIPLIER, MIN_MULTIPLIER,
 };
+pub use confidence_sizing::{ConfidenceSizer, OrderSizeResult, SizeRejection};
 pub use signal::{
     calculate_distance, distance_bps, get_signal, get_thresholds, Signal, SignalThresholds,
 };
