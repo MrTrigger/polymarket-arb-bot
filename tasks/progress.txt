@@ -2935,3 +2935,95 @@ Notes for next task (p3-3):
 - ConfidenceSizer now ready for SizingStrategy trait integration
 - Next: Create SizingMode enum and SizingStrategy trait
 - HybridSizer will compose PositionSizer + ConfidenceSizer
+
+---
+
+### [2026-01-14] Task p3-3: Add configurable sizing mode
+Files modified:
+- crates/poly-bot/src/strategy/sizing.rs (added SizingMode, SizingStrategy, HybridSizer)
+- crates/poly-bot/src/strategy/mod.rs (exported new types)
+- crates/poly-bot/src/strategy/confidence.rs (added ConfidenceFactors::neutral())
+- crates/poly-bot/src/config.rs (added mode field to SizingConfig and SizingToml)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-bot strategy::sizing: PASSED (41 tests)
+
+SizingMode enum:
+- Limits: Fixed base sizing with max position/exposure limits (MVP)
+- Confidence: Dynamic sizing based on market confidence factors
+- Hybrid: Confidence-based sizing with limit caps (recommended)
+
+SizingMode methods:
+- parse(s): Parse from string (case-insensitive)
+- FromStr trait implementation for idiomatic parsing
+- Display trait for serialization
+- Default: Limits (backwards compatible)
+
+SizingStrategy trait:
+- calculate(&input): Returns UnifiedSizingResult
+- can_trade(position, exposure): Quick limit check
+- mode(): Returns SizingMode
+- record_trade(cost): Budget tracking for confidence mode
+- reset(): Session reset
+
+SizingInput struct:
+- opportunity: &ArbOpportunity
+- inventory: Option<&Inventory>
+- total_exposure: Decimal
+- toxic_warning: Option<&ToxicFlowWarning>
+- confidence_factors: Option<ConfidenceFactors>
+- with_confidence(): Builder method to add factors
+
+UnifiedSizingResult struct:
+- size, is_valid, expected_cost, expected_profit
+- limit_reason: Option<String>
+- confidence_multiplier: Decimal
+- strategy: SizingMode
+- from_limits_result(), from_confidence_result(): Converters
+
+Trait implementations:
+- PositionSizer implements SizingStrategy (Limits mode)
+- ConfidenceSizer implements SizingStrategy (Confidence mode)
+- HybridSizer implements SizingStrategy (Hybrid mode)
+
+HybridSizer:
+- Combines ConfidenceSizer + PositionSizer
+- Calculates confidence-based size first
+- Applies limits as caps (takes minimum)
+- Falls back to neutral confidence if factors not provided
+- Both can_trade() checks must pass
+
+Factory function:
+- create_sizer(mode, trading_config) -> Box<dyn SizingStrategy>
+- Returns appropriate sizer implementation for mode
+
+TOML config support:
+- Added mode field to SizingConfig and SizingToml
+- Default: "limits" for backwards compatibility
+- Can set [trading.sizing.mode] = "hybrid" in config
+
+ConfidenceFactors::neutral():
+- Added neutral() constructor for HybridSizer fallback
+- Returns baseline factors (~1.5x multiplier)
+- distance=25, minutes=7, Signal::Neutral, imbalance=0, depth=15000
+
+Test coverage (19 new tests):
+- SizingMode: default, parse, display, serialization, FromStr
+- SizingInput: new, with_confidence builder
+- UnifiedSizingResult: invalid, serialization
+- SizingStrategy: limits implements, confidence implements, requires factors
+- HybridSizer: creation, with confidence, without confidence, respects limits, can_trade
+- Factory: create limits/confidence/hybrid, usable
+
+Key decisions:
+- SizingStrategy trait is object-safe (Send + Sync) for runtime switching
+- HybridSizer composes rather than inherits from other sizers
+- UnifiedSizingResult normalizes output from all strategies
+- SizingInput aggregates all possible inputs (strategies use what they need)
+- Mode stored as String in config for TOML simplicity
+
+Notes for next task (p4-1):
+- Sizing strategy system complete
+- PnlRiskManager can use TradeDecision enum from p1-3
+- Risk checking separate from sizing (different concern)

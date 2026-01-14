@@ -77,6 +77,20 @@ impl ConfidenceFactors {
             favorable_depth,
         }
     }
+
+    /// Create neutral confidence factors (results in ~1.5x multiplier).
+    ///
+    /// Useful when confidence factors are not available but you still want
+    /// confidence-based sizing with a baseline size.
+    pub fn neutral() -> Self {
+        Self {
+            distance_to_strike: Decimal::new(25, 0), // $25 from strike
+            minutes_remaining: Decimal::new(7, 0),   // Mid-market
+            signal: Signal::Neutral,
+            book_imbalance: Decimal::ZERO,           // No imbalance
+            favorable_depth: Decimal::new(15000, 0), // Medium depth
+        }
+    }
 }
 
 /// Breakdown of confidence into component multipliers.

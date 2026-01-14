@@ -63,7 +63,10 @@ pub use confidence_sizing::{ConfidenceSizer, OrderSizeResult, SizeRejection};
 pub use signal::{
     calculate_distance, distance_bps, get_signal, get_thresholds, Signal, SignalThresholds,
 };
-pub use sizing::{PositionSizer, SizingAdjustments, SizingConfig, SizingLimit, SizingResult};
+pub use sizing::{
+    create_sizer, HybridSizer, PositionSizer, SizingAdjustments, SizingConfig, SizingInput,
+    SizingLimit, SizingMode, SizingResult, SizingStrategy, UnifiedSizingResult,
+};
 pub use toxic::{
     ToxicFlowConfig, ToxicFlowDetector, ToxicFlowWarning, ToxicIndicators, ToxicSeverity,
 };

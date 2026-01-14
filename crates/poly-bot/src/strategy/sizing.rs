@@ -1,12 +1,27 @@
 //! Position sizing for arbitrage trades.
 //!
-//! This module calculates appropriate trade sizes based on:
-//! - Configuration limits (max position per market, max total exposure)
-//! - Available liquidity in the order book
-//! - Current inventory imbalance
-//! - Toxic flow warnings
+//! This module provides multiple sizing strategies:
 //!
-//! ## MVP Approach
+//! - **Limits**: Fixed base sizing with max position/exposure limits
+//! - **Confidence**: Dynamic sizing based on market confidence factors
+//! - **Hybrid**: Confidence-based sizing with limit caps (recommended)
+//!
+//! ## Sizing Modes
+//!
+//! ```ignore
+//! // In config/bot.toml:
+//! [trading.sizing]
+//! mode = "hybrid"  # "limits" | "confidence" | "hybrid"
+//! ```
+//!
+//! ## SizingStrategy Trait
+//!
+//! All sizers implement the `SizingStrategy` trait, enabling:
+//! - Configurable sizing via TOML
+//! - Runtime strategy switching
+//! - Composition (HybridSizer wraps both strategies)
+//!
+//! ## MVP Approach (Limits Mode)
 //!
 //! For MVP, we use fixed base sizing with adjustments:
 //! 1. Start with `base_order_size` from config
@@ -21,8 +36,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::TradingConfig;
 use crate::strategy::arb::ArbOpportunity;
+use crate::strategy::confidence::ConfidenceFactors;
+use crate::strategy::confidence_sizing::{ConfidenceSizer, OrderSizeResult};
 use crate::strategy::toxic::ToxicFlowWarning;
 use crate::types::{Inventory, InventoryState};
+use crate::config::SizingConfig as ConfidenceSizingConfig;
 
 /// Configuration for position sizing.
 #[derive(Debug, Clone)]
@@ -351,6 +369,396 @@ impl PositionSizer {
         let max_by_exposure = remaining_exposure / cost_per_share;
 
         max_by_position.min(max_by_exposure).max(Decimal::ZERO)
+    }
+}
+
+// ============================================================================
+// Sizing Mode and Strategy
+// ============================================================================
+
+/// Sizing mode determines which strategy is used for order sizing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SizingMode {
+    /// Fixed base sizing with max position/exposure limits (MVP approach).
+    #[default]
+    Limits,
+    /// Dynamic sizing based on market confidence factors.
+    Confidence,
+    /// Confidence-based sizing with limit caps (recommended for production).
+    Hybrid,
+}
+
+impl SizingMode {
+    /// Parse sizing mode from string.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "limits" => Some(SizingMode::Limits),
+            "confidence" => Some(SizingMode::Confidence),
+            "hybrid" => Some(SizingMode::Hybrid),
+            _ => None,
+        }
+    }
+}
+
+impl std::str::FromStr for SizingMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        SizingMode::parse(s).ok_or_else(|| format!("invalid sizing mode: {}", s))
+    }
+}
+
+impl std::fmt::Display for SizingMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SizingMode::Limits => write!(f, "limits"),
+            SizingMode::Confidence => write!(f, "confidence"),
+            SizingMode::Hybrid => write!(f, "hybrid"),
+        }
+    }
+}
+
+/// Input parameters for sizing calculation.
+///
+/// This struct aggregates all inputs needed by any sizing strategy,
+/// allowing strategies to use only what they need.
+#[derive(Debug, Clone)]
+pub struct SizingInput<'a> {
+    /// The arbitrage opportunity being sized.
+    pub opportunity: &'a ArbOpportunity,
+    /// Current inventory for this market.
+    pub inventory: Option<&'a Inventory>,
+    /// Current total exposure across all markets.
+    pub total_exposure: Decimal,
+    /// Toxic flow warning if any.
+    pub toxic_warning: Option<&'a ToxicFlowWarning>,
+    /// Confidence factors for confidence-based sizing.
+    pub confidence_factors: Option<ConfidenceFactors>,
+}
+
+impl<'a> SizingInput<'a> {
+    /// Create a new sizing input with required fields.
+    pub fn new(
+        opportunity: &'a ArbOpportunity,
+        inventory: Option<&'a Inventory>,
+        total_exposure: Decimal,
+        toxic_warning: Option<&'a ToxicFlowWarning>,
+    ) -> Self {
+        Self {
+            opportunity,
+            inventory,
+            total_exposure,
+            toxic_warning,
+            confidence_factors: None,
+        }
+    }
+
+    /// Add confidence factors for confidence-based sizing.
+    pub fn with_confidence(mut self, factors: ConfidenceFactors) -> Self {
+        self.confidence_factors = Some(factors);
+        self
+    }
+}
+
+/// Unified result type for all sizing strategies.
+///
+/// Converts between `SizingResult` (limits) and `OrderSizeResult` (confidence).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnifiedSizingResult {
+    /// Calculated position size (in shares).
+    pub size: Decimal,
+    /// Whether this is a valid trade.
+    pub is_valid: bool,
+    /// Expected cost for this size.
+    pub expected_cost: Decimal,
+    /// Expected profit for this size.
+    pub expected_profit: Decimal,
+    /// Reason if size was limited or rejected.
+    pub limit_reason: Option<String>,
+    /// Confidence multiplier if confidence-based (1.0 for limits-only).
+    pub confidence_multiplier: Decimal,
+    /// Source strategy that produced this result.
+    pub strategy: SizingMode,
+}
+
+impl UnifiedSizingResult {
+    /// Create an invalid result.
+    pub fn invalid(reason: &str, strategy: SizingMode) -> Self {
+        Self {
+            size: Decimal::ZERO,
+            is_valid: false,
+            expected_cost: Decimal::ZERO,
+            expected_profit: Decimal::ZERO,
+            limit_reason: Some(reason.to_string()),
+            confidence_multiplier: Decimal::ONE,
+            strategy,
+        }
+    }
+
+    /// Convert from a limits-based SizingResult.
+    pub fn from_limits_result(result: &SizingResult, _opportunity: &ArbOpportunity) -> Self {
+        Self {
+            size: result.size,
+            is_valid: result.is_valid,
+            expected_cost: result.expected_cost,
+            expected_profit: result.expected_profit,
+            limit_reason: result.limit_reason.map(|l| l.to_string()),
+            confidence_multiplier: result.adjustments.combined_multiplier,
+            strategy: SizingMode::Limits,
+        }
+    }
+
+    /// Convert from a confidence-based OrderSizeResult.
+    pub fn from_confidence_result(result: &OrderSizeResult, opportunity: &ArbOpportunity) -> Self {
+        // Calculate expected cost/profit based on opportunity
+        let cost_per_share = opportunity.combined_cost;
+        let expected_cost = result.size * cost_per_share;
+        let expected_profit = result.size * opportunity.margin;
+
+        Self {
+            size: result.size,
+            is_valid: result.is_valid,
+            expected_cost,
+            expected_profit,
+            limit_reason: result.rejection_reason.map(|r| r.to_string()),
+            confidence_multiplier: result.confidence_multiplier,
+            strategy: SizingMode::Confidence,
+        }
+    }
+}
+
+/// Trait for sizing strategies.
+///
+/// All sizing implementations (Limits, Confidence, Hybrid) implement this trait
+/// to enable configurable and composable sizing.
+pub trait SizingStrategy: Send + Sync {
+    /// Calculate position size for the given inputs.
+    fn calculate(&self, input: &SizingInput<'_>) -> UnifiedSizingResult;
+
+    /// Check if trading is possible given current limits.
+    fn can_trade(&self, existing_position: Decimal, total_exposure: Decimal) -> bool;
+
+    /// Get the sizing mode this strategy implements.
+    fn mode(&self) -> SizingMode;
+
+    /// Record a completed trade (for budget tracking in confidence mode).
+    fn record_trade(&mut self, cost: Decimal);
+
+    /// Reset for a new market session.
+    fn reset(&mut self);
+}
+
+// Implement SizingStrategy for PositionSizer (Limits mode)
+impl SizingStrategy for PositionSizer {
+    fn calculate(&self, input: &SizingInput<'_>) -> UnifiedSizingResult {
+        let result = self.calculate_size(
+            input.opportunity,
+            input.inventory,
+            input.total_exposure,
+            input.toxic_warning,
+        );
+        UnifiedSizingResult::from_limits_result(&result, input.opportunity)
+    }
+
+    fn can_trade(&self, existing_position: Decimal, total_exposure: Decimal) -> bool {
+        PositionSizer::can_trade(self, existing_position, total_exposure)
+    }
+
+    fn mode(&self) -> SizingMode {
+        SizingMode::Limits
+    }
+
+    fn record_trade(&mut self, _cost: Decimal) {
+        // PositionSizer doesn't track budget
+    }
+
+    fn reset(&mut self) {
+        // PositionSizer doesn't have session state
+    }
+}
+
+// Implement SizingStrategy for ConfidenceSizer
+impl SizingStrategy for ConfidenceSizer {
+    fn calculate(&self, input: &SizingInput<'_>) -> UnifiedSizingResult {
+        // Confidence mode requires ConfidenceFactors
+        let factors = match &input.confidence_factors {
+            Some(f) => f,
+            None => {
+                return UnifiedSizingResult::invalid(
+                    "confidence factors required for confidence mode",
+                    SizingMode::Confidence,
+                );
+            }
+        };
+
+        let result = self.get_order_size(factors);
+        UnifiedSizingResult::from_confidence_result(&result, input.opportunity)
+    }
+
+    fn can_trade(&self, _existing_position: Decimal, _total_exposure: Decimal) -> bool {
+        // ConfidenceSizer uses budget, not position limits
+        !self.is_budget_exhausted()
+    }
+
+    fn mode(&self) -> SizingMode {
+        SizingMode::Confidence
+    }
+
+    fn record_trade(&mut self, cost: Decimal) {
+        ConfidenceSizer::record_trade(self, cost);
+    }
+
+    fn reset(&mut self) {
+        ConfidenceSizer::reset(self);
+    }
+}
+
+/// Hybrid sizer that combines confidence-based sizing with limit caps.
+///
+/// This is the recommended mode for production:
+/// 1. Calculate size using confidence factors
+/// 2. Apply position/exposure limits from PositionSizer
+/// 3. Apply toxic flow and inventory adjustments
+///
+/// The result is confidence-scaled sizes that respect hard limits.
+#[derive(Debug, Clone)]
+pub struct HybridSizer {
+    /// Confidence-based sizer for dynamic sizing.
+    confidence_sizer: ConfidenceSizer,
+    /// Limits-based sizer for cap enforcement.
+    limits_sizer: PositionSizer,
+}
+
+impl HybridSizer {
+    /// Create a new hybrid sizer.
+    pub fn new(confidence_config: ConfidenceSizingConfig, limits_config: SizingConfig) -> Self {
+        Self {
+            confidence_sizer: ConfidenceSizer::new(confidence_config),
+            limits_sizer: PositionSizer::new(limits_config),
+        }
+    }
+
+    /// Create from trading config with default limits.
+    pub fn from_trading_config(trading_config: &TradingConfig) -> Self {
+        Self {
+            confidence_sizer: ConfidenceSizer::new(trading_config.sizing.clone()),
+            limits_sizer: PositionSizer::from_trading_config(trading_config),
+        }
+    }
+
+    /// Get the confidence sizer.
+    pub fn confidence_sizer(&self) -> &ConfidenceSizer {
+        &self.confidence_sizer
+    }
+
+    /// Get the limits sizer.
+    pub fn limits_sizer(&self) -> &PositionSizer {
+        &self.limits_sizer
+    }
+}
+
+impl SizingStrategy for HybridSizer {
+    fn calculate(&self, input: &SizingInput<'_>) -> UnifiedSizingResult {
+        // Step 1: Check if limits allow trading at all
+        let existing_position = input.inventory
+            .map(|inv| inv.total_exposure())
+            .unwrap_or(Decimal::ZERO);
+
+        if !self.limits_sizer.can_trade(existing_position, input.total_exposure) {
+            return UnifiedSizingResult::invalid("position or exposure limit reached", SizingMode::Hybrid);
+        }
+
+        // Step 2: Get confidence-based size (or use defaults if no factors)
+        let confidence_result = if let Some(factors) = &input.confidence_factors {
+            self.confidence_sizer.get_order_size(factors)
+        } else {
+            // Without confidence factors, use base size with neutral confidence
+            let factors = ConfidenceFactors::neutral();
+            self.confidence_sizer.get_order_size(&factors)
+        };
+
+        // If confidence sizing rejects, return that rejection
+        if !confidence_result.is_valid {
+            return UnifiedSizingResult::from_confidence_result(&confidence_result, input.opportunity);
+        }
+
+        // Step 3: Apply limits to the confidence-sized order
+        let limits_result = self.limits_sizer.calculate_size(
+            input.opportunity,
+            input.inventory,
+            input.total_exposure,
+            input.toxic_warning,
+        );
+
+        // Step 4: Take the minimum of confidence and limits sizes
+        let final_size = confidence_result.size.min(limits_result.size);
+
+        // Check minimum
+        if final_size < self.limits_sizer.config().min_order_size {
+            return UnifiedSizingResult::invalid("below minimum order size", SizingMode::Hybrid);
+        }
+
+        // Determine which was the limiting factor
+        let (limit_reason, final_multiplier) = if confidence_result.size <= limits_result.size {
+            (
+                confidence_result.rejection_reason.map(|r| r.to_string())
+                    .or_else(|| Some("confidence sized".to_string())),
+                confidence_result.confidence_multiplier,
+            )
+        } else {
+            (
+                limits_result.limit_reason.map(|l| l.to_string()),
+                limits_result.adjustments.combined_multiplier * confidence_result.confidence_multiplier,
+            )
+        };
+
+        let cost_per_share = input.opportunity.combined_cost;
+        UnifiedSizingResult {
+            size: final_size,
+            is_valid: true,
+            expected_cost: final_size * cost_per_share,
+            expected_profit: final_size * input.opportunity.margin,
+            limit_reason,
+            confidence_multiplier: final_multiplier,
+            strategy: SizingMode::Hybrid,
+        }
+    }
+
+    fn can_trade(&self, existing_position: Decimal, total_exposure: Decimal) -> bool {
+        // Both conditions must be met
+        self.limits_sizer.can_trade(existing_position, total_exposure)
+            && !self.confidence_sizer.is_budget_exhausted()
+    }
+
+    fn mode(&self) -> SizingMode {
+        SizingMode::Hybrid
+    }
+
+    fn record_trade(&mut self, cost: Decimal) {
+        self.confidence_sizer.record_trade(cost);
+    }
+
+    fn reset(&mut self) {
+        self.confidence_sizer.reset();
+    }
+}
+
+/// Factory function to create a sizer based on mode.
+///
+/// # Arguments
+///
+/// * `mode` - The sizing mode to use
+/// * `trading_config` - Trading configuration with sizing parameters
+///
+/// # Returns
+///
+/// A boxed `SizingStrategy` implementation for the given mode.
+pub fn create_sizer(mode: SizingMode, trading_config: &TradingConfig) -> Box<dyn SizingStrategy> {
+    match mode {
+        SizingMode::Limits => Box::new(PositionSizer::from_trading_config(trading_config)),
+        SizingMode::Confidence => Box::new(ConfidenceSizer::new(trading_config.sizing.clone())),
+        SizingMode::Hybrid => Box::new(HybridSizer::from_trading_config(trading_config)),
     }
 }
 
@@ -715,5 +1123,289 @@ mod tests {
 
         // Exposed state should recommend rebalancing
         assert!(inventory.state().should_rebalance());
+    }
+
+    // =========================================================================
+    // SizingMode Tests
+    // =========================================================================
+
+    #[test]
+    fn test_sizing_mode_default() {
+        let mode: SizingMode = Default::default();
+        assert_eq!(mode, SizingMode::Limits);
+    }
+
+    #[test]
+    fn test_sizing_mode_parse() {
+        assert_eq!(SizingMode::parse("limits"), Some(SizingMode::Limits));
+        assert_eq!(SizingMode::parse("LIMITS"), Some(SizingMode::Limits));
+        assert_eq!(SizingMode::parse("confidence"), Some(SizingMode::Confidence));
+        assert_eq!(SizingMode::parse("CONFIDENCE"), Some(SizingMode::Confidence));
+        assert_eq!(SizingMode::parse("hybrid"), Some(SizingMode::Hybrid));
+        assert_eq!(SizingMode::parse("HYBRID"), Some(SizingMode::Hybrid));
+        assert_eq!(SizingMode::parse("invalid"), None);
+    }
+
+    #[test]
+    fn test_sizing_mode_from_str_trait() {
+        use std::str::FromStr;
+        assert_eq!(SizingMode::from_str("limits").unwrap(), SizingMode::Limits);
+        assert_eq!(SizingMode::from_str("hybrid").unwrap(), SizingMode::Hybrid);
+        assert!(SizingMode::from_str("invalid").is_err());
+    }
+
+    #[test]
+    fn test_sizing_mode_display() {
+        assert_eq!(SizingMode::Limits.to_string(), "limits");
+        assert_eq!(SizingMode::Confidence.to_string(), "confidence");
+        assert_eq!(SizingMode::Hybrid.to_string(), "hybrid");
+    }
+
+    #[test]
+    fn test_sizing_mode_serialization() {
+        let mode = SizingMode::Hybrid;
+        let json = serde_json::to_string(&mode).unwrap();
+        assert!(json.contains("hybrid"));
+
+        let parsed: SizingMode = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, SizingMode::Hybrid);
+    }
+
+    // =========================================================================
+    // SizingInput Tests
+    // =========================================================================
+
+    #[test]
+    fn test_sizing_input_new() {
+        let opportunity = create_test_opportunity(dec!(0.45), dec!(0.52), dec!(1000));
+        let input = SizingInput::new(&opportunity, None, Decimal::ZERO, None);
+
+        assert_eq!(input.total_exposure, Decimal::ZERO);
+        assert!(input.inventory.is_none());
+        assert!(input.toxic_warning.is_none());
+        assert!(input.confidence_factors.is_none());
+    }
+
+    #[test]
+    fn test_sizing_input_with_confidence() {
+        let opportunity = create_test_opportunity(dec!(0.45), dec!(0.52), dec!(1000));
+        let factors = ConfidenceFactors::neutral();
+
+        let input = SizingInput::new(&opportunity, None, Decimal::ZERO, None)
+            .with_confidence(factors);
+
+        assert!(input.confidence_factors.is_some());
+    }
+
+    // =========================================================================
+    // UnifiedSizingResult Tests
+    // =========================================================================
+
+    #[test]
+    fn test_unified_result_invalid() {
+        let result = UnifiedSizingResult::invalid("test reason", SizingMode::Limits);
+
+        assert!(!result.is_valid);
+        assert_eq!(result.size, Decimal::ZERO);
+        assert_eq!(result.limit_reason, Some("test reason".to_string()));
+        assert_eq!(result.strategy, SizingMode::Limits);
+    }
+
+    #[test]
+    fn test_unified_result_serialization() {
+        let result = UnifiedSizingResult {
+            size: dec!(50),
+            is_valid: true,
+            expected_cost: dec!(48.5),
+            expected_profit: dec!(1.5),
+            limit_reason: Some("base size".to_string()),
+            confidence_multiplier: dec!(1.5),
+            strategy: SizingMode::Hybrid,
+        };
+
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("hybrid"));
+        assert!(json.contains("confidence_multiplier"));
+
+        let parsed: UnifiedSizingResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.size, dec!(50));
+        assert_eq!(parsed.strategy, SizingMode::Hybrid);
+    }
+
+    // =========================================================================
+    // SizingStrategy Trait Implementation Tests
+    // =========================================================================
+
+    #[test]
+    fn test_limits_sizer_implements_strategy() {
+        let sizer = PositionSizer::default();
+
+        assert_eq!(sizer.mode(), SizingMode::Limits);
+        assert!(sizer.can_trade(Decimal::ZERO, Decimal::ZERO));
+
+        let opportunity = create_test_opportunity(dec!(0.45), dec!(0.52), dec!(1000));
+        let input = SizingInput::new(&opportunity, None, Decimal::ZERO, None);
+        let result = sizer.calculate(&input);
+
+        assert!(result.is_valid);
+        assert_eq!(result.strategy, SizingMode::Limits);
+    }
+
+    #[test]
+    fn test_confidence_sizer_implements_strategy() {
+        use crate::config::SizingConfig as ConfSizingConfig;
+        let config = ConfSizingConfig::new(dec!(5000));
+        let sizer = ConfidenceSizer::new(config);
+
+        assert_eq!(sizer.mode(), SizingMode::Confidence);
+        assert!(sizer.can_trade(Decimal::ZERO, Decimal::ZERO));
+
+        let opportunity = create_test_opportunity(dec!(0.45), dec!(0.52), dec!(1000));
+        let factors = ConfidenceFactors::neutral();
+        let input = SizingInput::new(&opportunity, None, Decimal::ZERO, None)
+            .with_confidence(factors);
+        let result = sizer.calculate(&input);
+
+        assert!(result.is_valid);
+        assert_eq!(result.strategy, SizingMode::Confidence);
+    }
+
+    #[test]
+    fn test_confidence_sizer_requires_factors() {
+        use crate::config::SizingConfig as ConfSizingConfig;
+        let config = ConfSizingConfig::new(dec!(5000));
+        let sizer = ConfidenceSizer::new(config);
+
+        let opportunity = create_test_opportunity(dec!(0.45), dec!(0.52), dec!(1000));
+        // No confidence factors provided
+        let input = SizingInput::new(&opportunity, None, Decimal::ZERO, None);
+        let result = sizer.calculate(&input);
+
+        // Should reject without factors
+        assert!(!result.is_valid);
+        assert!(result.limit_reason.unwrap().contains("confidence factors required"));
+    }
+
+    // =========================================================================
+    // HybridSizer Tests
+    // =========================================================================
+
+    #[test]
+    fn test_hybrid_sizer_creation() {
+        let trading_config = TradingConfig::default();
+        let sizer = HybridSizer::from_trading_config(&trading_config);
+
+        assert_eq!(sizer.mode(), SizingMode::Hybrid);
+    }
+
+    #[test]
+    fn test_hybrid_sizer_with_confidence() {
+        let trading_config = TradingConfig::default();
+        let sizer = HybridSizer::from_trading_config(&trading_config);
+
+        let opportunity = create_test_opportunity(dec!(0.45), dec!(0.52), dec!(1000));
+        let factors = ConfidenceFactors::neutral();
+        let input = SizingInput::new(&opportunity, None, Decimal::ZERO, None)
+            .with_confidence(factors);
+
+        let result = sizer.calculate(&input);
+
+        assert!(result.is_valid);
+        assert_eq!(result.strategy, SizingMode::Hybrid);
+        // Should have non-trivial confidence multiplier
+        assert!(result.confidence_multiplier > Decimal::ZERO);
+    }
+
+    #[test]
+    fn test_hybrid_sizer_without_confidence_uses_neutral() {
+        let trading_config = TradingConfig::default();
+        let sizer = HybridSizer::from_trading_config(&trading_config);
+
+        let opportunity = create_test_opportunity(dec!(0.45), dec!(0.52), dec!(1000));
+        // No confidence factors - should use neutral defaults
+        let input = SizingInput::new(&opportunity, None, Decimal::ZERO, None);
+
+        let result = sizer.calculate(&input);
+
+        assert!(result.is_valid);
+        assert_eq!(result.strategy, SizingMode::Hybrid);
+    }
+
+    #[test]
+    fn test_hybrid_sizer_respects_limits() {
+        let trading_config = TradingConfig::default();
+        let sizer = HybridSizer::from_trading_config(&trading_config);
+
+        let opportunity = create_test_opportunity(dec!(0.45), dec!(0.52), dec!(1000));
+        // Provide high confidence factors that would suggest a large size
+        let factors = ConfidenceFactors::new(
+            dec!(100), // Far from strike
+            dec!(1),   // Final minute
+            crate::strategy::signal::Signal::StrongUp,
+            dec!(0.5), // High imbalance
+            dec!(60000), // Deep book
+        );
+        let input = SizingInput::new(&opportunity, None, Decimal::ZERO, None)
+            .with_confidence(factors);
+
+        let result = sizer.calculate(&input);
+
+        assert!(result.is_valid);
+        // Size should be capped by limits (base_order_size = 50)
+        // Even with high confidence, limits apply
+        assert!(result.size <= dec!(150)); // 50 * 3.0 max multiplier
+    }
+
+    #[test]
+    fn test_hybrid_sizer_can_trade() {
+        let trading_config = TradingConfig::default();
+        let sizer = HybridSizer::from_trading_config(&trading_config);
+
+        // Fresh start
+        assert!(sizer.can_trade(Decimal::ZERO, Decimal::ZERO));
+
+        // At limits
+        assert!(!sizer.can_trade(dec!(1000), Decimal::ZERO)); // Position limit
+        assert!(!sizer.can_trade(Decimal::ZERO, dec!(5000))); // Exposure limit
+    }
+
+    // =========================================================================
+    // Factory Function Tests
+    // =========================================================================
+
+    #[test]
+    fn test_create_sizer_limits() {
+        let trading_config = TradingConfig::default();
+        let sizer = create_sizer(SizingMode::Limits, &trading_config);
+
+        assert_eq!(sizer.mode(), SizingMode::Limits);
+    }
+
+    #[test]
+    fn test_create_sizer_confidence() {
+        let trading_config = TradingConfig::default();
+        let sizer = create_sizer(SizingMode::Confidence, &trading_config);
+
+        assert_eq!(sizer.mode(), SizingMode::Confidence);
+    }
+
+    #[test]
+    fn test_create_sizer_hybrid() {
+        let trading_config = TradingConfig::default();
+        let sizer = create_sizer(SizingMode::Hybrid, &trading_config);
+
+        assert_eq!(sizer.mode(), SizingMode::Hybrid);
+    }
+
+    #[test]
+    fn test_factory_sizer_usable() {
+        let trading_config = TradingConfig::default();
+        let sizer = create_sizer(SizingMode::Hybrid, &trading_config);
+
+        let opportunity = create_test_opportunity(dec!(0.45), dec!(0.52), dec!(1000));
+        let input = SizingInput::new(&opportunity, None, Decimal::ZERO, None);
+
+        let result = sizer.calculate(&input);
+        assert!(result.is_valid);
     }
 }

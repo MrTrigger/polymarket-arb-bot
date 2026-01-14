@@ -136,7 +136,7 @@
       "id": "p3-3",
       "title": "Phase 3: Add configurable sizing mode",
       "description": "Add SizingMode enum (Limits, Confidence, Hybrid). Create SizingStrategy trait. Implement for existing PositionSizer and new ConfidenceSizer. Create HybridSizer that applies confidence then caps with limits. Add factory function.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p3-2"],
       "files": [
         "crates/poly-bot/src/config.rs",

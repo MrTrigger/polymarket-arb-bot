@@ -126,6 +126,12 @@ pub struct TradingConfig {
 /// - Actual size = base_order_size × confidence_multiplier (0.5x to 3.0x)
 #[derive(Debug, Clone)]
 pub struct SizingConfig {
+    /// Sizing mode: "limits" | "confidence" | "hybrid".
+    /// - limits: Fixed base sizing with max position/exposure limits
+    /// - confidence: Dynamic sizing based on market confidence factors
+    /// - hybrid: Confidence-based sizing with limit caps (recommended)
+    pub mode: String,
+
     /// Total available balance for trading (USDC).
     pub available_balance: Decimal,
 
@@ -151,6 +157,20 @@ impl SizingConfig {
     /// Uses sensible defaults for all other parameters.
     pub fn new(available_balance: Decimal) -> Self {
         Self {
+            mode: "limits".to_string(),
+            available_balance,
+            max_market_allocation: Decimal::new(20, 2),    // 0.20 = 20%
+            expected_trades_per_market: 200,
+            min_order_size: Decimal::ONE,                  // $1.00
+            max_confidence_multiplier: Decimal::new(3, 0), // 3.0x
+            min_hedge_ratio: Decimal::new(20, 2),          // 0.20 = 20%
+        }
+    }
+
+    /// Create a new SizingConfig with a specific mode.
+    pub fn with_mode(available_balance: Decimal, mode: &str) -> Self {
+        Self {
+            mode: mode.to_string(),
             available_balance,
             max_market_allocation: Decimal::new(20, 2),    // 0.20 = 20%
             expected_trades_per_market: 200,
@@ -639,6 +659,8 @@ impl Default for TradingToml {
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 struct SizingToml {
+    /// Sizing mode: "limits" | "confidence" | "hybrid"
+    mode: String,
     available_balance: f64,
     max_market_allocation: f64,
     expected_trades_per_market: u32,
@@ -650,6 +672,7 @@ struct SizingToml {
 impl Default for SizingToml {
     fn default() -> Self {
         Self {
+            mode: "limits".to_string(),
             available_balance: 5000.0,
             max_market_allocation: 0.20,
             expected_trades_per_market: 200,
@@ -808,6 +831,7 @@ impl From<TomlConfig> for BotConfig {
                 early_threshold_secs: toml.trading.early_threshold_secs,
                 mid_threshold_secs: toml.trading.mid_threshold_secs,
                 sizing: SizingConfig {
+                    mode: toml.trading.sizing.mode,
                     available_balance: f64_to_decimal(toml.trading.sizing.available_balance),
                     max_market_allocation: f64_to_decimal(toml.trading.sizing.max_market_allocation),
                     expected_trades_per_market: toml.trading.sizing.expected_trades_per_market,
