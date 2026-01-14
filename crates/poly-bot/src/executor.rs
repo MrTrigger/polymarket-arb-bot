@@ -27,6 +27,7 @@
 pub mod backtest;
 pub mod chase;
 pub mod fill;
+pub mod interval;
 pub mod live;
 pub mod noop;
 pub mod paper;

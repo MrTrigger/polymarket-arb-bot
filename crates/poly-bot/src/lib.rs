@@ -58,6 +58,9 @@ pub use executor::chase::{
 pub use executor::fill::{
     FillData, FillHandler, FillHandlerConfig, FillResult, InventorySnapshot, PartialFillState,
 };
+pub use executor::interval::{
+    TradeInterval, TradeIntervalConfig, TradeIntervalSnapshot, DEFAULT_MIN_INTERVAL_MS,
+};
 pub use state::{
     ActiveWindow, ControlFlags, GlobalState, InventoryPosition, InventoryState, LiveOrderBook,
     MetricsCounters, MetricsSnapshot, SharedMarketData, ShadowOrderState, WindowPhase,

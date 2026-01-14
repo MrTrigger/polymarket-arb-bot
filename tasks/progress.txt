@@ -3518,3 +3518,75 @@ Notes for next task (p8-1 or p9-1):
 - Next: TradeInterval (p8-1) or comprehensive unit tests (p9-1)
 - Consider adding more integration tests for multi-engine scenarios
 - Maker price calculation (p8-2) already exists in maker.rs
+
+---
+
+### [2026-01-14] Task p8-1: Implement TradeInterval
+Files created:
+- crates/poly-bot/src/executor/interval.rs
+
+Files modified:
+- crates/poly-bot/src/executor.rs (added interval module export)
+- crates/poly-bot/src/lib.rs (added interval type exports)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-bot interval: PASSED (19 tests)
+
+TradeInterval features:
+- Enforces minimum time between trades (default 500ms)
+- Lock-free using atomic operations (fast hot path)
+- can_trade(): Check if trading is allowed (~10ns when disabled)
+- record_trade(): Record trade execution timestamp
+- time_until_next(): Get remaining wait time
+- time_since_last_trade(): Get elapsed time since last trade
+
+TradeIntervalConfig:
+- min_interval_ms: Configurable minimum interval (default 500)
+- enabled: Toggle enforcement on/off
+- disabled() constructor for testing
+- from_config() for loading from TOML
+
+Implementation details:
+- Uses Instant::now() as epoch to avoid system clock issues
+- Stores last_trade_us + 1 to distinguish from "never traded" (0)
+- Atomic u64 with Acquire/Release ordering for thread safety
+- Trade count tracked separately with Relaxed ordering
+
+TradeIntervalSnapshot for observability:
+- min_interval_ms, enabled, trade_count
+- can_trade, time_until_next_ms
+- Serializable for logging/storage
+
+Tests added (19):
+- test_config_default
+- test_config_new
+- test_config_disabled
+- test_interval_default
+- test_interval_first_trade_allowed
+- test_interval_record_trade
+- test_interval_enforces_minimum
+- test_interval_allows_after_wait
+- test_interval_disabled
+- test_interval_from_config
+- test_interval_from_disabled_config
+- test_interval_reset
+- test_interval_reset_all
+- test_interval_snapshot
+- test_interval_multiple_trades
+- test_interval_time_since_last_trade
+- test_interval_concurrent_access
+- test_interval_zero_duration
+- test_snapshot_serialization
+
+Key decisions:
+- Store elapsed_us + 1 to handle edge case when epoch just started
+- Use Duration::ZERO check for disabled mode (no atomic load needed)
+- Separate trade_count from interval enforcement
+- reset() keeps count, reset_all() clears everything
+
+Notes for next tasks:
+- p8-2 (maker price calculation) ready - no dependencies
+- p9-1 (unit tests) ready - depends on p7-3 (completed)
+- TradeInterval can integrate with StrategyLoop main loop
+- Consider adding to LiveMode/PaperMode execution paths
