@@ -326,7 +326,7 @@
       "id": "p9-1",
       "title": "Phase 9: Unit tests for all new modules",
       "description": "Add comprehensive unit tests: Signal detection (all time brackets), Confidence calculation (spec examples), TradingConfig scaling, ConfidenceSizer (budget, multipliers), PnlRiskManager (all rules), DirectionalDetector, DecisionAggregator priority.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p7-3"],
       "files": [
         "crates/poly-bot/src/strategy/signal.rs",

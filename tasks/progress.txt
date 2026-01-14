@@ -3650,3 +3650,37 @@ Notes for next tasks:
 - p9-1 (unit tests) is next ready task
 - pricing.rs can be integrated with maker strategy
 - Consider using get_maker_prices_both_sides for two-sided MM
+
+---
+
+### [2026-01-14] Task p9-1: Unit tests for all new modules
+Files verified:
+- crates/poly-bot/src/strategy/signal.rs (29 tests)
+- crates/poly-bot/src/strategy/confidence.rs (41 tests)
+- crates/poly-bot/src/strategy/confidence_sizing.rs (28 tests)
+- crates/poly-bot/src/risk/pnl.rs (48 tests)
+- crates/poly-bot/src/strategy/directional.rs (32 tests)
+- crates/poly-bot/src/strategy/aggregator.rs (24 tests)
+
+Verification:
+- cargo test -p poly-bot: PASSED (908 total tests, 202 in target modules)
+- All modules have comprehensive inline tests
+
+Test coverage summary:
+- Signal detection: All 5 time brackets tested, threshold boundary tests included
+- Confidence calculation: Spec examples verified, geometric mean tested
+- TradingConfig scaling: $500-$25000 accounts tested, min floor enforced
+- ConfidenceSizer: Budget exhaustion, multiplier caps, sizing formulas verified
+- PnlRiskManager: All rules tested (10% daily loss, 3 consecutive losses, 20% hedge)
+- DirectionalDetector: All signal levels tested (StrongUp/Down, LeanUp/Down, Neutral skip)
+- DecisionAggregator: Priority ordering, conflict resolution, concurrent maker support
+
+Key findings:
+- Tests were already added during each module's implementation (p1-p8 phases)
+- All acceptance criteria met with comprehensive coverage
+- Serialization tests ensure observability data integrity
+
+Notes for next task (p9-2):
+- Integration tests should verify multi-engine cooperation
+- Need to test backtest mode with directional + maker engines
+- Test confidence sizing integration with strategy loop

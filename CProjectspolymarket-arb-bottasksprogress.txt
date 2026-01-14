@@ -46,3 +46,51 @@ Notes for next task (p8-5):
 - Backtest mode requires ClickHouse for data loading
 - All modes now complete and ready to integrate
 
+
+---
+
+### [2026-01-14] Task p5-1: Implement DirectionalDetector
+Files created:
+- crates/poly-bot/src/strategy/directional.rs
+
+Files modified:
+- crates/poly-bot/src/strategy/mod.rs (added directional module export)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-bot strategy::directional: PASSED (32 tests)
+
+DirectionalDetector features:
+- DirectionalOpportunity struct with signal, ratios, confidence, prices
+- DirectionalSkipReason enum for rejection cases
+- DirectionalConfig with configurable thresholds
+- detect() method using Signal system from p1-1
+- has_potential() fast filter for pre-screening
+- calculate_imbalance() helper for order book analysis
+
+Signal ratio mapping (per spec):
+- StrongUp: 78% UP / 22% DOWN
+- LeanUp: 60% UP / 40% DOWN
+- Neutral: Skip (no directional edge)
+- LeanDown: 40% UP / 60% DOWN  
+- StrongDown: 22% UP / 78% DOWN
+
+Skip reasons implemented:
+- NeutralSignal: No directional edge when spot near strike
+- NoSpotPrice: Missing Binance price data
+- InvalidStrike: Zero or invalid strike price
+- BookNotReady: Order book has no bids/asks
+- InsufficientTime: <60 seconds remaining
+- SpreadTooWide: Spread >10% of price
+
+Key decisions:
+- Uses ConfidenceCalculator from p1-2 for sizing multipliers
+- Order book imbalance based on raw size sums (not price*size)
+- Token IDs accessed via OrderBook.token_id field
+- Distance calculated as (spot-strike)/strike ratio
+
+Notes for next task (p5-2):
+- execute_directional() needs to use ratios for asymmetric sizing
+- Calculate maker prices inside spread for both YES/NO
+- Use post_only: true for maker orders
+- Update inventory after fills
