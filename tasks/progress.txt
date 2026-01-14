@@ -3684,3 +3684,69 @@ Notes for next task (p9-2):
 - Integration tests should verify multi-engine cooperation
 - Need to test backtest mode with directional + maker engines
 - Test confidence sizing integration with strategy loop
+
+---
+
+### [2026-01-14] Task p9-2: Integration tests
+Files created:
+- crates/poly-bot/tests/test_directional_strategy.rs (33 tests)
+- crates/poly-bot/tests/test_multi_engine.rs (35 tests)
+- crates/poly-bot/tests/test_confidence_sizing.rs (30 tests)
+- crates/poly-bot/tests/test_pnl_risk.rs (40 tests)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-bot: PASSED (all 1046 tests, 138 new integration tests)
+
+test_directional_strategy.rs (33 tests):
+- Signal detection: Strong/Lean Up/Down detection, neutral at strike
+- Threshold tightening: Verified 5 time brackets (>10min to <1min)
+- Allocation ratios: All signals tested (78/22, 60/40, 50/50, etc.)
+- DirectionalDetector: Detection, skip reasons, has_potential filter
+- Confidence integration: ConfidenceFactors with DirectionalDetector
+- Distance calculation: Above/below/at strike handling
+- Config customization: Custom spread, time, cost limits
+- Serialization: Signal and DirectionalOpportunity round-trips
+
+test_multi_engine.rs (35 tests):
+- EngineType: Display, equality checks
+- EnginesConfig: Default values, arbitrage_only, priority ordering
+- EngineDecision: Type wrapping, event_id extraction, expected_value calculation
+- Concurrency rules: Maker can run with anything, arb/directional mutually exclusive
+- DecisionAggregator: Priority-based selection, custom priority support
+- Aggregation scenarios: Single engine, multiple engines, all three engines
+- Concurrent maker: Maker runs alongside primary when available
+- Serialization: EngineDecision, AggregatedDecision round-trips
+
+test_confidence_sizing.rs (30 tests):
+- SizingConfig: Default values, market_budget, base_order_size calculations
+- Balance scaling: $500-$1M accounts, minimum floor at $1
+- ConfidenceSizer: Neutral/high/low confidence scenarios
+- Multiplier caps: Verified 0.5x-3.0x bounds
+- Budget management: Tracking, exhaustion, caps at remaining
+- Multiple trades: Session simulation, reset functionality
+- SizeRejection: Display, serialization
+- Edge cases: Zero balance, very large balance
+
+test_pnl_risk.rs (40 tests):
+- PnlRiskConfig: Default values, daily_loss_limit calculation
+- PnlRiskManager: Approval flow, rejection flow, warning zone
+- Daily loss limits: Exceeding limit blocks trading
+- Consecutive losses: Tracking, reset on win, auto-disable at 3
+- Hedge ratio: Balanced position approval, rebalance required
+- Daily reset: Clears P&L, re-enables trading
+- Manual control: enable/disable methods
+- Position: Total cost/shares, ratios, P&L calculation, serialization
+- TradeDecision: All variants tested, serialization
+
+Key learnings:
+- Spread check must be < 10% (not <=) to pass DirectionalDetector
+- calculate_distance() returns signed value (negative for below strike)
+- Signal thresholds: >10min uses 0.20%/0.08%, <1min uses 0.03%/0.01%
+- check_trade() takes Option<&Position>, not &Position directly
+- aggregate() takes Vec<MakerOpportunity>, not Option<Vec>
+
+Notes for next task (p9-3):
+- Integration tests complete, backtest validation is next
+- Need to run actual backtest with directional engine
+- Compare P&L results to spec Section 8 expectations

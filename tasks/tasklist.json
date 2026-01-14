@@ -345,7 +345,7 @@
       "id": "p9-2",
       "title": "Phase 9: Integration tests",
       "description": "Create integration tests: test_directional_strategy.rs, test_multi_engine.rs, test_confidence_sizing.rs, test_pnl_risk.rs. Verify strategy runs correctly in backtest mode.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p9-1"],
       "files": [
         "crates/poly-bot/tests/test_directional_strategy.rs",
