@@ -2758,3 +2758,54 @@ Notes for next task (p2-3):
 - MarketSession needs to combine fee rate and reward config
 - Can use FeeRateClient and RewardsClient together
 - Consider adding MarketSession to TrackedMarket or as standalone
+
+---
+
+### [2026-01-14] Task p2-3: Create MarketSession with cached API data
+Files modified:
+- crates/poly-bot/src/types.rs (added MarketSession, TokenPair, MarketSessionError)
+- crates/poly-bot/src/lib.rs (exported new types)
+
+Files updated:
+- tasks/tasklist.json (marked p2-3 as completed)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-bot: PASSED (76 tests in types module)
+
+Types implemented:
+- TokenPair: YES/NO token ID container with iter(), contains(), outcome_for() helpers
+- MarketSessionError: Error enum for FeeRate and Rewards API failures
+- MarketSession: Cached API data for a trading session
+
+MarketSession fields:
+- event_id, condition_id: Market identifiers
+- asset: CryptoAsset (BTC, ETH, SOL, XRP)
+- tokens: TokenPair for YES/NO token IDs
+- strike_price: Decimal strike for up/down market
+- window_end: DateTime<Utc> for session expiry
+- fee_rate_bps: u32 cached from FeeRateClient
+- reward_config: Option<RewardsConfig> cached from RewardsClient
+- created_at: DateTime<Utc> for session start
+
+MarketSession methods:
+- new(): Async constructor that fetches and caches API data
+- with_data(): Sync constructor for testing/manual use
+- fee_rate_decimal(): Convert bps to Decimal (0.10 for 1000 bps)
+- has_fees(), has_rewards(): Quick checks
+- qualifies_for_rewards(size, spread_bps): Check maker rebate eligibility
+- rewards_min_size(), rewards_max_spread_bps(): Access reward constraints
+- seconds_remaining(), is_expired(), is_active(): Window timing
+- calculate_fee(size, price): Compute fee for a trade
+
+Key decisions:
+- MarketSession is separate from TrackedMarket (strategy/mod.rs)
+- TrackedMarket handles runtime state (books, inventory, toxic warnings)
+- MarketSession handles cached API data (fees, rewards)
+- Integration point: TrackedMarket can optionally hold MarketSession
+- #[allow(clippy::too_many_arguments)] on constructors (all fields needed)
+
+Notes for next tasks:
+- p3-1 (TradingConfig) has no dependencies - ready to start
+- MarketSession ready for integration with StrategyLoop
+- Fee calculation via calculate_fee() for cost basis tracking

@@ -90,7 +90,7 @@
       "id": "p2-3",
       "title": "Phase 2: Create MarketSession with cached API data",
       "description": "Add MarketSession struct containing market_id, tokens, strike, fee_rate_bps, reward_config. Implement MarketSession::new() that fetches and caches API data. Integrate with TrackedMarket or StrategyLoop.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p2-1", "p2-2"],
       "files": [
         "crates/poly-bot/src/types.rs"

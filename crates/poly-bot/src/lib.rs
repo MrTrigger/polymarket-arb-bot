@@ -65,7 +65,10 @@ pub use risk::{
     ChaseReason, CloseReason, LegRiskAction, LegRiskAssessment, LegRiskConfig, LegRiskManager,
     LegState, LegStatus,
 };
-pub use types::{EngineType, Inventory, MarketState, OrderBook, Position, PriceLevel, TradeDecision};
+pub use types::{
+    EngineType, Inventory, MarketSession, MarketSessionError, MarketState, OrderBook, Position,
+    PriceLevel, TokenPair, TradeDecision,
+};
 pub use observability::{
     ActionType, Counterfactual, DecisionContext, DecisionSnapshot, ObservabilityEvent,
     OutcomeType, SnapshotBuilder,

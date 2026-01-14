@@ -3,10 +3,13 @@
 //! CRITICAL: All prices and quantities use `rust_decimal::Decimal`.
 //! NEVER use f64 for financial math.
 
+use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 use poly_common::types::{CryptoAsset, Outcome, Side};
+
+use crate::api::{FeeRateClient, FeeRateError, RewardsClient, RewardsConfig, RewardsError};
 
 // ============================================================================
 // Engine and Trade Decision Types
@@ -324,6 +327,249 @@ impl Position {
             up_cost: inv.yes_cost_basis,
             down_cost: inv.no_cost_basis,
         }
+    }
+}
+
+// ============================================================================
+// Market Session
+// ============================================================================
+
+/// Token pair identifiers for a binary market.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenPair {
+    /// YES (UP) token ID.
+    pub yes_token_id: String,
+    /// NO (DOWN) token ID.
+    pub no_token_id: String,
+}
+
+impl TokenPair {
+    /// Create a new token pair.
+    pub fn new(yes_token_id: impl Into<String>, no_token_id: impl Into<String>) -> Self {
+        Self {
+            yes_token_id: yes_token_id.into(),
+            no_token_id: no_token_id.into(),
+        }
+    }
+
+    /// Returns an iterator over both token IDs.
+    pub fn iter(&self) -> impl Iterator<Item = &str> {
+        [self.yes_token_id.as_str(), self.no_token_id.as_str()].into_iter()
+    }
+
+    /// Check if a token ID belongs to this pair.
+    pub fn contains(&self, token_id: &str) -> bool {
+        self.yes_token_id == token_id || self.no_token_id == token_id
+    }
+
+    /// Get the outcome for a token ID.
+    pub fn outcome_for(&self, token_id: &str) -> Option<Outcome> {
+        if token_id == self.yes_token_id {
+            Some(Outcome::Yes)
+        } else if token_id == self.no_token_id {
+            Some(Outcome::No)
+        } else {
+            None
+        }
+    }
+}
+
+/// Errors that can occur when creating a market session.
+#[derive(Debug, thiserror::Error)]
+pub enum MarketSessionError {
+    /// Failed to fetch fee rate.
+    #[error("Failed to fetch fee rate: {0}")]
+    FeeRate(#[from] FeeRateError),
+
+    /// Failed to fetch rewards config.
+    #[error("Failed to fetch rewards config: {0}")]
+    Rewards(#[from] RewardsError),
+}
+
+/// Cached API data for a market trading session.
+///
+/// A `MarketSession` holds all the API-fetched data needed to trade a single
+/// market: fee rates, reward configurations, and market metadata. This data
+/// is fetched once when the session starts and cached for its duration.
+///
+/// ## Usage
+///
+/// ```ignore
+/// let session = MarketSession::new(
+///     "event_123",
+///     "condition_456",
+///     CryptoAsset::Btc,
+///     TokenPair::new("yes_token", "no_token"),
+///     dec!(100000),
+///     window_end,
+///     &fee_client,
+///     &rewards_client,
+/// ).await?;
+///
+/// // Use cached data
+/// let fee_decimal = session.fee_rate_decimal();
+/// if session.qualifies_for_rewards(size, spread_bps) {
+///     // Apply maker rebate logic
+/// }
+/// ```
+#[derive(Debug, Clone)]
+pub struct MarketSession {
+    /// Event ID from Polymarket.
+    pub event_id: String,
+    /// Condition ID for this market (used for rewards API).
+    pub condition_id: String,
+    /// Asset this market tracks.
+    pub asset: CryptoAsset,
+    /// Token IDs for YES/NO outcomes.
+    pub tokens: TokenPair,
+    /// Strike price for the up/down market.
+    pub strike_price: Decimal,
+    /// When the window ends.
+    pub window_end: DateTime<Utc>,
+    /// Fee rate in basis points (cached from API).
+    pub fee_rate_bps: u32,
+    /// Reward configuration (cached from API, if available).
+    pub reward_config: Option<RewardsConfig>,
+    /// When this session was created.
+    pub created_at: DateTime<Utc>,
+}
+
+impl MarketSession {
+    /// Create a new market session, fetching and caching API data.
+    ///
+    /// This fetches the fee rate and reward configuration from the APIs
+    /// and caches them for the duration of the session.
+    ///
+    /// # Arguments
+    ///
+    /// * `event_id` - Event ID from Polymarket
+    /// * `condition_id` - Condition ID for rewards API
+    /// * `asset` - The crypto asset this market tracks
+    /// * `tokens` - YES/NO token pair
+    /// * `strike_price` - Strike price for the up/down market
+    /// * `window_end` - When the trading window ends
+    /// * `fee_client` - Client for fetching fee rates
+    /// * `rewards_client` - Client for fetching reward configs
+    #[allow(clippy::too_many_arguments)]
+    pub async fn new(
+        event_id: impl Into<String>,
+        condition_id: impl Into<String>,
+        asset: CryptoAsset,
+        tokens: TokenPair,
+        strike_price: Decimal,
+        window_end: DateTime<Utc>,
+        fee_client: &FeeRateClient,
+        rewards_client: &RewardsClient,
+    ) -> Result<Self, MarketSessionError> {
+        let event_id = event_id.into();
+        let condition_id = condition_id.into();
+
+        // Fetch fee rate (use YES token - both tokens should have same fee)
+        let fee_rate_bps = fee_client.get_fee_rate(&tokens.yes_token_id).await?;
+
+        // Fetch reward config (may not exist for all markets)
+        let reward_config = rewards_client.get_reward_config(&condition_id).await?;
+
+        Ok(Self {
+            event_id,
+            condition_id,
+            asset,
+            tokens,
+            strike_price,
+            window_end,
+            fee_rate_bps,
+            reward_config,
+            created_at: Utc::now(),
+        })
+    }
+
+    /// Create a session with pre-fetched data (for testing or manual construction).
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_data(
+        event_id: impl Into<String>,
+        condition_id: impl Into<String>,
+        asset: CryptoAsset,
+        tokens: TokenPair,
+        strike_price: Decimal,
+        window_end: DateTime<Utc>,
+        fee_rate_bps: u32,
+        reward_config: Option<RewardsConfig>,
+    ) -> Self {
+        Self {
+            event_id: event_id.into(),
+            condition_id: condition_id.into(),
+            asset,
+            tokens,
+            strike_price,
+            window_end,
+            fee_rate_bps,
+            reward_config,
+            created_at: Utc::now(),
+        }
+    }
+
+    /// Returns the fee rate as a decimal multiplier (e.g., 0.10 for 1000 bps).
+    #[inline]
+    pub fn fee_rate_decimal(&self) -> Decimal {
+        Decimal::new(self.fee_rate_bps as i64, 4)
+    }
+
+    /// Returns true if this market has fees enabled.
+    #[inline]
+    pub fn has_fees(&self) -> bool {
+        self.fee_rate_bps > 0
+    }
+
+    /// Returns true if this market has active reward program.
+    #[inline]
+    pub fn has_rewards(&self) -> bool {
+        self.reward_config.as_ref().is_some_and(|c| c.active)
+    }
+
+    /// Check if an order qualifies for maker rebates.
+    ///
+    /// # Arguments
+    ///
+    /// * `size` - Order size in shares
+    /// * `spread_bps` - Current spread in basis points
+    pub fn qualifies_for_rewards(&self, size: Decimal, spread_bps: u32) -> bool {
+        self.reward_config
+            .as_ref()
+            .is_some_and(|c| c.qualifies(size, spread_bps))
+    }
+
+    /// Get the minimum order size for rewards (if rewards are active).
+    pub fn rewards_min_size(&self) -> Option<Decimal> {
+        self.reward_config.as_ref().filter(|c| c.active).map(|c| c.min_size)
+    }
+
+    /// Get the maximum spread for rewards in bps (if rewards are active).
+    pub fn rewards_max_spread_bps(&self) -> Option<u32> {
+        self.reward_config.as_ref().filter(|c| c.active).map(|c| c.max_spread_bps)
+    }
+
+    /// Returns seconds remaining until window close.
+    pub fn seconds_remaining(&self) -> i64 {
+        (self.window_end - Utc::now()).num_seconds().max(0)
+    }
+
+    /// Returns true if the window has expired.
+    pub fn is_expired(&self) -> bool {
+        Utc::now() >= self.window_end
+    }
+
+    /// Returns true if the window is currently active.
+    pub fn is_active(&self) -> bool {
+        let now = Utc::now();
+        now < self.window_end && now >= self.created_at
+    }
+
+    /// Calculate the fee for a given trade size.
+    ///
+    /// Fee = size * price * fee_rate
+    pub fn calculate_fee(&self, size: Decimal, price: Decimal) -> Decimal {
+        let notional = size * price;
+        notional * self.fee_rate_decimal()
     }
 }
 
@@ -1487,5 +1733,217 @@ mod tests {
         assert_eq!(parsed.down_shares, pos.down_shares);
         assert_eq!(parsed.up_cost, pos.up_cost);
         assert_eq!(parsed.down_cost, pos.down_cost);
+    }
+
+    // =========================================================================
+    // TokenPair Tests
+    // =========================================================================
+
+    #[test]
+    fn test_token_pair_new() {
+        let pair = TokenPair::new("yes_123", "no_456");
+        assert_eq!(pair.yes_token_id, "yes_123");
+        assert_eq!(pair.no_token_id, "no_456");
+    }
+
+    #[test]
+    fn test_token_pair_iter() {
+        let pair = TokenPair::new("yes_123", "no_456");
+        let tokens: Vec<&str> = pair.iter().collect();
+        assert_eq!(tokens.len(), 2);
+        assert!(tokens.contains(&"yes_123"));
+        assert!(tokens.contains(&"no_456"));
+    }
+
+    #[test]
+    fn test_token_pair_contains() {
+        let pair = TokenPair::new("yes_123", "no_456");
+        assert!(pair.contains("yes_123"));
+        assert!(pair.contains("no_456"));
+        assert!(!pair.contains("other_789"));
+    }
+
+    #[test]
+    fn test_token_pair_outcome_for() {
+        let pair = TokenPair::new("yes_123", "no_456");
+        assert_eq!(pair.outcome_for("yes_123"), Some(Outcome::Yes));
+        assert_eq!(pair.outcome_for("no_456"), Some(Outcome::No));
+        assert_eq!(pair.outcome_for("other"), None);
+    }
+
+    #[test]
+    fn test_token_pair_serialization() {
+        let pair = TokenPair::new("yes_123", "no_456");
+        let json = serde_json::to_string(&pair).unwrap();
+        let parsed: TokenPair = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, pair);
+    }
+
+    // =========================================================================
+    // MarketSession Tests
+    // =========================================================================
+
+    fn create_test_session(fee_rate_bps: u32, has_rewards: bool) -> MarketSession {
+        let reward_config = if has_rewards {
+            Some(RewardsConfig::new(dec!(10), 200, dec!(100), true))
+        } else {
+            None
+        };
+
+        MarketSession::with_data(
+            "event_123",
+            "condition_456",
+            CryptoAsset::Btc,
+            TokenPair::new("yes_token", "no_token"),
+            dec!(100000),
+            Utc::now() + chrono::Duration::minutes(15),
+            fee_rate_bps,
+            reward_config,
+        )
+    }
+
+    #[test]
+    fn test_market_session_with_data() {
+        let session = create_test_session(1000, false);
+
+        assert_eq!(session.event_id, "event_123");
+        assert_eq!(session.condition_id, "condition_456");
+        assert_eq!(session.asset, CryptoAsset::Btc);
+        assert_eq!(session.tokens.yes_token_id, "yes_token");
+        assert_eq!(session.tokens.no_token_id, "no_token");
+        assert_eq!(session.strike_price, dec!(100000));
+        assert_eq!(session.fee_rate_bps, 1000);
+        assert!(session.reward_config.is_none());
+    }
+
+    #[test]
+    fn test_market_session_fee_rate_decimal() {
+        // 1000 bps = 10% = 0.10
+        let session = create_test_session(1000, false);
+        assert_eq!(session.fee_rate_decimal(), dec!(0.1000));
+
+        // 500 bps = 5% = 0.05
+        let session_500 = create_test_session(500, false);
+        assert_eq!(session_500.fee_rate_decimal(), dec!(0.0500));
+
+        // 0 bps = 0%
+        let session_zero = create_test_session(0, false);
+        assert_eq!(session_zero.fee_rate_decimal(), dec!(0.0000));
+    }
+
+    #[test]
+    fn test_market_session_has_fees() {
+        let session_with_fees = create_test_session(1000, false);
+        assert!(session_with_fees.has_fees());
+
+        let session_no_fees = create_test_session(0, false);
+        assert!(!session_no_fees.has_fees());
+    }
+
+    #[test]
+    fn test_market_session_has_rewards() {
+        let session_with_rewards = create_test_session(1000, true);
+        assert!(session_with_rewards.has_rewards());
+
+        let session_no_rewards = create_test_session(1000, false);
+        assert!(!session_no_rewards.has_rewards());
+    }
+
+    #[test]
+    fn test_market_session_qualifies_for_rewards() {
+        let session = create_test_session(1000, true);
+
+        // Qualifies: size >= 10, spread <= 200
+        assert!(session.qualifies_for_rewards(dec!(10), 200));
+        assert!(session.qualifies_for_rewards(dec!(100), 50));
+
+        // Doesn't qualify: size too small
+        assert!(!session.qualifies_for_rewards(dec!(5), 100));
+
+        // Doesn't qualify: spread too wide
+        assert!(!session.qualifies_for_rewards(dec!(100), 300));
+
+        // No rewards config
+        let session_no_rewards = create_test_session(1000, false);
+        assert!(!session_no_rewards.qualifies_for_rewards(dec!(100), 50));
+    }
+
+    #[test]
+    fn test_market_session_rewards_min_size() {
+        let session = create_test_session(1000, true);
+        assert_eq!(session.rewards_min_size(), Some(dec!(10)));
+
+        let session_no_rewards = create_test_session(1000, false);
+        assert_eq!(session_no_rewards.rewards_min_size(), None);
+    }
+
+    #[test]
+    fn test_market_session_rewards_max_spread_bps() {
+        let session = create_test_session(1000, true);
+        assert_eq!(session.rewards_max_spread_bps(), Some(200));
+
+        let session_no_rewards = create_test_session(1000, false);
+        assert_eq!(session_no_rewards.rewards_max_spread_bps(), None);
+    }
+
+    #[test]
+    fn test_market_session_calculate_fee() {
+        let session = create_test_session(1000, false); // 10% fee
+
+        // size=100, price=0.50 => notional = 50
+        // fee = 50 * 0.10 = 5
+        let fee = session.calculate_fee(dec!(100), dec!(0.50));
+        assert_eq!(fee, dec!(5));
+
+        // size=200, price=0.45 => notional = 90
+        // fee = 90 * 0.10 = 9
+        let fee2 = session.calculate_fee(dec!(200), dec!(0.45));
+        assert_eq!(fee2, dec!(9));
+    }
+
+    #[test]
+    fn test_market_session_is_active() {
+        let session = create_test_session(1000, false);
+        // Window ends in 15 minutes, should be active
+        assert!(session.is_active());
+        assert!(!session.is_expired());
+    }
+
+    #[test]
+    fn test_market_session_seconds_remaining() {
+        let window_end = Utc::now() + chrono::Duration::seconds(300);
+        let session = MarketSession::with_data(
+            "event_123",
+            "condition_456",
+            CryptoAsset::Btc,
+            TokenPair::new("yes_token", "no_token"),
+            dec!(100000),
+            window_end,
+            1000,
+            None,
+        );
+
+        // Should be around 300 seconds (allow some tolerance for test execution)
+        let remaining = session.seconds_remaining();
+        assert!(remaining > 295 && remaining <= 300);
+    }
+
+    #[test]
+    fn test_market_session_expired() {
+        let window_end = Utc::now() - chrono::Duration::seconds(60); // 1 minute ago
+        let session = MarketSession::with_data(
+            "event_123",
+            "condition_456",
+            CryptoAsset::Btc,
+            TokenPair::new("yes_token", "no_token"),
+            dec!(100000),
+            window_end,
+            1000,
+            None,
+        );
+
+        assert!(session.is_expired());
+        assert!(!session.is_active());
+        assert_eq!(session.seconds_remaining(), 0);
     }
 }
