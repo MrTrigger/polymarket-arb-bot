@@ -15,6 +15,8 @@ use poly_bot::strategy::{
 };
 use poly_bot::strategy::signal::{calculate_distance, get_signal, get_thresholds};
 use poly_bot::types::{MarketState, PriceLevel};
+#[allow(unused_imports)]
+use poly_bot::strategy::Confidence;
 use poly_common::types::CryptoAsset;
 
 // ============================================================================
