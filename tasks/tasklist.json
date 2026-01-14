@@ -233,7 +233,7 @@
       "id": "p6-2",
       "title": "Phase 6: Implement maker order management",
       "description": "Add execute_maker() method. Track active maker orders per market. Implement order refresh logic (cancel stale, place new). Handle partial fills properly.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p6-1"],
       "files": [
         "crates/poly-bot/src/strategy/mod.rs"

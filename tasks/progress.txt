@@ -3268,3 +3268,60 @@ Notes for next task (p6-2):
 - Track active maker orders per market
 - Implement order refresh (cancel stale, place new)
 - Handle partial fills
+
+---
+
+### [2026-01-14] Task p6-2: Implement maker order management
+Files modified:
+- crates/poly-bot/src/strategy/mod.rs
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-bot: PASSED (821 tests, 10 new)
+
+Types added:
+- MakerOrderConfig: stale_threshold_ms (5s), price_refresh_threshold_bps (20), max_orders_per_market (4)
+- ActiveMakerOrder: Tracks order_id, token_id, side, price, original/remaining/filled sizes, timestamps
+
+TrackedMarket changes:
+- Added active_maker_orders: HashMap<String, ActiveMakerOrder> field
+- Initialized to empty HashMap in TrackedMarket::new()
+
+Methods added to StrategyLoop:
+- execute_maker(): Places GTC maker orders for passive rebate capture
+  - Cancels stale orders (>5s old)
+  - Cancels orders with price >20 bps from optimal
+  - Respects max_orders_per_market limit
+  - Handles immediate fills, partial fills, and pending orders
+  - Updates inventory and volume metrics on fills
+- refresh_maker_orders(): Periodically refreshes stale orders
+  - Called on heartbeat to maintain active maker positions
+  - Records partial fills from cancelled orders
+- handle_maker_fill(): Updates tracking on external fill events
+  - Removes fully filled orders from tracking
+- active_maker_order_count(): Returns count of active orders for a market
+
+Key decisions:
+- Methods marked #[allow(dead_code)] since they're used in p7-3 (engine integration)
+- Used let-chains (if let Some(x) = y && condition) per clippy recommendations
+- Order refresh is aggressive (5s stale threshold) to stay competitive
+- Price refresh at 20 bps to avoid excessive cancellations
+- GTC orders used for passive maker strategy
+- Partial fills tracked correctly with remaining_size calculation
+
+Tests implemented:
+- MakerOrderConfig default values
+- ActiveMakerOrder::new() field initialization
+- is_stale() with various time differences
+- needs_price_refresh() at various price levels
+- needs_price_refresh() with zero price edge case
+- record_fill() with multiple partial fills
+- is_fully_filled() transitions
+- Overfill handling (negative remaining size)
+- active_maker_order_count() on StrategyLoop
+- TrackedMarket active_maker_orders initialization
+
+Notes for next task (p7-1):
+- execute_maker is ready but not wired into main loop yet
+- p7-3 will integrate all engines (arb, directional, maker) into StrategyLoop
+- refresh_maker_orders should be called on heartbeat events

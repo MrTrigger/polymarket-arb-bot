@@ -48,12 +48,117 @@ use tracing::{debug, info, trace, warn};
 
 use poly_common::types::{CryptoAsset, Outcome, Side};
 
+// ============================================================================
+// Active Maker Order Tracking
+// ============================================================================
+
+/// Configuration for maker order management.
+#[derive(Debug, Clone)]
+pub struct MakerOrderConfig {
+    /// Maximum age (ms) before an order is considered stale and should be refreshed.
+    pub stale_threshold_ms: i64,
+    /// Minimum price change (bps) to trigger order refresh.
+    pub price_refresh_threshold_bps: u32,
+    /// Maximum number of active maker orders per market.
+    pub max_orders_per_market: usize,
+}
+
+impl Default for MakerOrderConfig {
+    fn default() -> Self {
+        Self {
+            stale_threshold_ms: 5000,        // 5 seconds
+            price_refresh_threshold_bps: 20, // 0.2% price change
+            max_orders_per_market: 4,        // 2 per side (YES/NO)
+        }
+    }
+}
+
+/// An active maker order being tracked by the strategy.
+#[derive(Debug, Clone)]
+pub struct ActiveMakerOrder {
+    /// Order ID assigned by the exchange.
+    pub order_id: String,
+    /// Token ID this order is for.
+    pub token_id: String,
+    /// Buy or Sell.
+    pub side: Side,
+    /// Order price.
+    pub price: Decimal,
+    /// Original order size.
+    pub original_size: Decimal,
+    /// Remaining unfilled size.
+    pub remaining_size: Decimal,
+    /// Filled size so far.
+    pub filled_size: Decimal,
+    /// Timestamp when order was placed (ms).
+    pub placed_at_ms: i64,
+    /// Timestamp of last update (ms).
+    pub updated_at_ms: i64,
+}
+
+impl ActiveMakerOrder {
+    /// Create a new active maker order.
+    pub fn new(
+        order_id: String,
+        token_id: String,
+        side: Side,
+        price: Decimal,
+        size: Decimal,
+        now_ms: i64,
+    ) -> Self {
+        Self {
+            order_id,
+            token_id,
+            side,
+            price,
+            original_size: size,
+            remaining_size: size,
+            filled_size: Decimal::ZERO,
+            placed_at_ms: now_ms,
+            updated_at_ms: now_ms,
+        }
+    }
+
+    /// Check if this order is stale (older than threshold).
+    #[inline]
+    pub fn is_stale(&self, now_ms: i64, threshold_ms: i64) -> bool {
+        now_ms - self.placed_at_ms > threshold_ms
+    }
+
+    /// Check if the price has moved significantly from the order price.
+    ///
+    /// Returns true if the optimal price differs from the order price
+    /// by more than the threshold.
+    pub fn needs_price_refresh(&self, optimal_price: Decimal, threshold_bps: u32) -> bool {
+        if self.price.is_zero() {
+            return false;
+        }
+        let diff = (optimal_price - self.price).abs();
+        let diff_bps_decimal = diff / self.price * Decimal::from(10000u32);
+        let diff_bps: u32 = diff_bps_decimal.try_into().unwrap_or(0);
+        diff_bps > threshold_bps
+    }
+
+    /// Record a partial fill.
+    pub fn record_fill(&mut self, filled_size: Decimal, now_ms: i64) {
+        self.filled_size += filled_size;
+        self.remaining_size = self.original_size - self.filled_size;
+        self.updated_at_ms = now_ms;
+    }
+
+    /// Check if order is fully filled.
+    #[inline]
+    pub fn is_fully_filled(&self) -> bool {
+        self.remaining_size <= Decimal::ZERO
+    }
+}
+
 use crate::config::TradingConfig;
 use crate::data_source::{
     BookDeltaEvent, BookSnapshotEvent, DataSource, DataSourceError, FillEvent, MarketEvent,
     SpotPriceEvent, WindowCloseEvent, WindowOpenEvent,
 };
-use crate::executor::{Executor, ExecutorError, OrderRequest, OrderType};
+use crate::executor::{Executor, ExecutorError, OrderRequest, OrderResult, OrderType};
 use crate::state::GlobalState;
 use crate::types::{Inventory, MarketState, OrderBook};
 
@@ -213,6 +318,8 @@ struct TrackedMarket {
     yes_toxic_warning: Option<ToxicFlowWarning>,
     /// Latest toxic warning for NO token.
     no_toxic_warning: Option<ToxicFlowWarning>,
+    /// Active maker orders for this market (keyed by order_id).
+    active_maker_orders: HashMap<String, ActiveMakerOrder>,
 }
 
 impl TrackedMarket {
@@ -236,6 +343,7 @@ impl TrackedMarket {
             inventory: Inventory::new(event.event_id.clone()),
             yes_toxic_warning: None,
             no_toxic_warning: None,
+            active_maker_orders: HashMap::new(),
         }
     }
 
@@ -1046,6 +1154,325 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
         Ok(TradeAction::Execute)
     }
 
+    /// Execute maker strategy for passive rebate capture.
+    ///
+    /// Places GTC (Good-Till-Cancelled) orders at optimal maker prices inside
+    /// the spread. These orders provide liquidity and earn rebates when filled.
+    ///
+    /// This method:
+    /// 1. Checks for existing active orders that need refresh or cancellation
+    /// 2. Cancels stale orders or orders with prices too far from optimal
+    /// 3. Places new maker orders at the current optimal price
+    ///
+    /// # Arguments
+    ///
+    /// * `opportunity` - The detected maker opportunity with price and size
+    ///
+    /// # Returns
+    ///
+    /// The trade action taken (Execute, SkipSizing, etc.)
+    #[allow(dead_code)] // Used in phase 7 when engines are integrated
+    async fn execute_maker(
+        &mut self,
+        opportunity: &MakerOpportunity,
+    ) -> Result<TradeAction, StrategyError> {
+        let event_id = &opportunity.event_id;
+        let token_id = &opportunity.token_id;
+        let now_ms = chrono::Utc::now().timestamp_millis();
+
+        // Get the tracked market
+        let market = match self.markets.get_mut(event_id) {
+            Some(m) => m,
+            None => {
+                warn!("No tracked market for maker: {}", event_id);
+                return Ok(TradeAction::SkipSizing);
+            }
+        };
+
+        // Default maker order config
+        let maker_config = MakerOrderConfig::default();
+
+        // Check for existing orders on this token that need management
+        let orders_to_cancel: Vec<String> = market
+            .active_maker_orders
+            .iter()
+            .filter(|(_, order)| {
+                order.token_id == *token_id
+                    && (order.is_stale(now_ms, maker_config.stale_threshold_ms)
+                        || order.needs_price_refresh(
+                            opportunity.price,
+                            maker_config.price_refresh_threshold_bps,
+                        )
+                        || order.is_fully_filled())
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        // Cancel stale/misplaced orders
+        for order_id in &orders_to_cancel {
+            debug!("Cancelling stale maker order: {}", order_id);
+            match self.executor.cancel_order(order_id).await {
+                Ok(cancellation) => {
+                    // Record any partial fills from cancelled order
+                    if cancellation.filled_size > Decimal::ZERO
+                        && let Some(order) = market.active_maker_orders.get(order_id)
+                    {
+                        let cost = cancellation.filled_size * order.price;
+                        let outcome = if order.token_id == market.yes_token_id {
+                            Outcome::Yes
+                        } else {
+                            Outcome::No
+                        };
+                        market.inventory.record_fill(outcome, cancellation.filled_size, cost);
+                    }
+                    market.active_maker_orders.remove(order_id);
+                }
+                Err(e) => {
+                    warn!("Failed to cancel maker order {}: {}", order_id, e);
+                    // Remove from tracking anyway to avoid repeated cancellation attempts
+                    market.active_maker_orders.remove(order_id);
+                }
+            }
+        }
+
+        // Check if we already have an active order at this price for this token
+        let has_existing_at_price = market
+            .active_maker_orders
+            .values()
+            .any(|o| o.token_id == *token_id && o.side == opportunity.side && o.price == opportunity.price);
+
+        if has_existing_at_price {
+            trace!("Already have maker order at {} for {}", opportunity.price, token_id);
+            return Ok(TradeAction::Execute);
+        }
+
+        // Check if we're at max orders for this market
+        if market.active_maker_orders.len() >= maker_config.max_orders_per_market {
+            trace!("Max maker orders reached for {}", event_id);
+            return Ok(TradeAction::SkipSizing);
+        }
+
+        // Determine outcome based on token
+        let outcome = if *token_id == market.yes_token_id {
+            Outcome::Yes
+        } else {
+            Outcome::No
+        };
+
+        // Generate request ID
+        let req_id_base = self.decision_counter;
+        self.decision_counter += 1;
+
+        // Create the maker order
+        let order = OrderRequest {
+            request_id: format!("maker-{}-{}", req_id_base, if outcome == Outcome::Yes { "yes" } else { "no" }),
+            event_id: event_id.clone(),
+            token_id: token_id.clone(),
+            outcome,
+            side: opportunity.side,
+            size: opportunity.size,
+            price: Some(opportunity.price),
+            order_type: OrderType::Gtc, // Good-till-cancelled for passive maker
+            timeout_ms: None,
+            timestamp: Utc::now(),
+        };
+
+        info!(
+            "Placing maker order: {} {} {} @ {} size={} expected_rebate={}",
+            event_id,
+            if outcome == Outcome::Yes { "YES" } else { "NO" },
+            opportunity.side,
+            opportunity.price,
+            opportunity.size,
+            opportunity.expected_rebate
+        );
+
+        // Place the order
+        let result = self.executor.place_order(order).await;
+
+        match result {
+            Ok(OrderResult::Filled(fill)) => {
+                // Immediate fill - record it
+                let cost = fill.size * fill.price + fill.fee;
+                market.inventory.record_fill(outcome, fill.size, cost);
+
+                // Update volume metrics
+                let volume_cents = (fill.size * fill.price * Decimal::new(100, 0))
+                    .try_into()
+                    .unwrap_or(0u64);
+                self.state.metrics.add_volume_cents(volume_cents);
+                self.state.record_success();
+
+                debug!("Maker order filled immediately: {} @ {}", fill.size, fill.price);
+            }
+            Ok(OrderResult::PartialFill(fill)) => {
+                // Partial fill - record filled portion and track remaining
+                let cost = fill.filled_size * fill.avg_price + fill.fee;
+                market.inventory.record_fill(outcome, fill.filled_size, cost);
+
+                // Track remaining as active order
+                let remaining_size = fill.requested_size - fill.filled_size;
+                if remaining_size > Decimal::ZERO {
+                    let active_order = ActiveMakerOrder::new(
+                        fill.order_id.clone(),
+                        token_id.clone(),
+                        opportunity.side,
+                        opportunity.price,
+                        remaining_size,
+                        now_ms,
+                    );
+                    market.active_maker_orders.insert(fill.order_id, active_order);
+                }
+
+                // Update metrics
+                let volume_cents = (fill.filled_size * fill.avg_price * Decimal::new(100, 0))
+                    .try_into()
+                    .unwrap_or(0u64);
+                self.state.metrics.add_volume_cents(volume_cents);
+                self.state.record_success();
+
+                debug!("Maker order partially filled: {} / {} @ {}",
+                    fill.filled_size, fill.requested_size, fill.avg_price);
+            }
+            Ok(OrderResult::Pending(pending)) => {
+                // Order is pending - track it
+                let active_order = ActiveMakerOrder::new(
+                    pending.order_id.clone(),
+                    token_id.clone(),
+                    opportunity.side,
+                    opportunity.price,
+                    opportunity.size,
+                    now_ms,
+                );
+                market.active_maker_orders.insert(pending.order_id, active_order);
+                debug!("Maker order pending: {}", pending.request_id);
+            }
+            Ok(OrderResult::Rejected(rejection)) => {
+                warn!("Maker order rejected: {}", rejection.reason);
+                return Ok(TradeAction::SkipSizing);
+            }
+            Ok(OrderResult::Cancelled(_)) => {
+                // Shouldn't happen for new orders
+                warn!("Maker order unexpectedly cancelled");
+                return Ok(TradeAction::SkipSizing);
+            }
+            Err(e) => {
+                warn!("Maker order failed: {}", e);
+                if self.state.record_failure(self.config.max_consecutive_failures) {
+                    self.state.trip_circuit_breaker();
+                    warn!("Circuit breaker tripped after consecutive failures");
+                }
+                return Ok(TradeAction::SkipSizing);
+            }
+        }
+
+        Ok(TradeAction::Execute)
+    }
+
+    /// Refresh active maker orders that have become stale or mispriced.
+    ///
+    /// This method should be called periodically (e.g., on heartbeat) to:
+    /// 1. Cancel orders that are too old
+    /// 2. Cancel orders where price has moved significantly
+    /// 3. Place new orders at current optimal prices
+    ///
+    /// # Arguments
+    ///
+    /// * `event_id` - The market to refresh orders for
+    /// * `maker_config` - Configuration for staleness thresholds
+    #[allow(dead_code)] // Used in phase 7 when engines are integrated
+    async fn refresh_maker_orders(
+        &mut self,
+        event_id: &str,
+        maker_config: &MakerOrderConfig,
+    ) -> Result<(), StrategyError> {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+
+        // Get the market - need to do this in steps to avoid borrow issues
+        let market = match self.markets.get(event_id) {
+            Some(m) => m,
+            None => return Ok(()),
+        };
+
+        // Collect orders that need refresh
+        let orders_to_refresh: Vec<(String, String, Side)> = market
+            .active_maker_orders
+            .iter()
+            .filter(|(_, order)| {
+                order.is_stale(now_ms, maker_config.stale_threshold_ms)
+                    || order.is_fully_filled()
+            })
+            .map(|(id, order)| (id.clone(), order.token_id.clone(), order.side))
+            .collect();
+
+        if orders_to_refresh.is_empty() {
+            return Ok(());
+        }
+
+        debug!("Refreshing {} stale maker orders for {}", orders_to_refresh.len(), event_id);
+
+        // Cancel each stale order
+        for (order_id, token_id, _side) in orders_to_refresh {
+            match self.executor.cancel_order(&order_id).await {
+                Ok(cancellation) => {
+                    // Need to get market again due to borrow
+                    if let Some(market) = self.markets.get_mut(event_id) {
+                        // Record any partial fills
+                        if cancellation.filled_size > Decimal::ZERO
+                            && let Some(order) = market.active_maker_orders.get(&order_id)
+                        {
+                            let cost = cancellation.filled_size * order.price;
+                            let outcome = if token_id == market.yes_token_id {
+                                Outcome::Yes
+                            } else {
+                                Outcome::No
+                            };
+                            market.inventory.record_fill(outcome, cancellation.filled_size, cost);
+                        }
+                        market.active_maker_orders.remove(&order_id);
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to cancel stale maker order {}: {}", order_id, e);
+                    // Remove from tracking to avoid repeated attempts
+                    if let Some(market) = self.markets.get_mut(event_id) {
+                        market.active_maker_orders.remove(&order_id);
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Update maker order tracking when a fill event is received.
+    ///
+    /// This handles partial fills on active maker orders by updating
+    /// the tracked remaining size.
+    #[allow(dead_code)] // Used in phase 7 when engines are integrated
+    fn handle_maker_fill(&mut self, event_id: &str, order_id: &str, filled_size: Decimal) {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+
+        if let Some(market) = self.markets.get_mut(event_id)
+            && let Some(order) = market.active_maker_orders.get_mut(order_id)
+        {
+            order.record_fill(filled_size, now_ms);
+
+            // Remove if fully filled
+            if order.is_fully_filled() {
+                market.active_maker_orders.remove(order_id);
+            }
+        }
+    }
+
+    /// Get count of active maker orders for a market.
+    pub fn active_maker_order_count(&self, event_id: &str) -> usize {
+        self.markets
+            .get(event_id)
+            .map(|m| m.active_maker_orders.len())
+            .unwrap_or(0)
+    }
+
     /// Record a decision for observability.
     fn record_decision(
         &mut self,
@@ -1498,5 +1925,210 @@ mod tests {
 
         let price = calculate_maker_price(&book, Side::Sell);
         assert!(price.is_none());
+    }
+
+    // =========================================================================
+    // MakerOrderConfig Tests
+    // =========================================================================
+
+    #[test]
+    fn test_maker_order_config_default() {
+        let config = MakerOrderConfig::default();
+        assert_eq!(config.stale_threshold_ms, 5000);
+        assert_eq!(config.price_refresh_threshold_bps, 20);
+        assert_eq!(config.max_orders_per_market, 4);
+    }
+
+    // =========================================================================
+    // ActiveMakerOrder Tests
+    // =========================================================================
+
+    #[test]
+    fn test_active_maker_order_new() {
+        let order = ActiveMakerOrder::new(
+            "order-123".to_string(),
+            "token-abc".to_string(),
+            Side::Buy,
+            dec!(0.45),
+            dec!(100),
+            1000,
+        );
+
+        assert_eq!(order.order_id, "order-123");
+        assert_eq!(order.token_id, "token-abc");
+        assert_eq!(order.side, Side::Buy);
+        assert_eq!(order.price, dec!(0.45));
+        assert_eq!(order.original_size, dec!(100));
+        assert_eq!(order.remaining_size, dec!(100));
+        assert_eq!(order.filled_size, Decimal::ZERO);
+        assert_eq!(order.placed_at_ms, 1000);
+        assert_eq!(order.updated_at_ms, 1000);
+    }
+
+    #[test]
+    fn test_active_maker_order_is_stale() {
+        let order = ActiveMakerOrder::new(
+            "order-1".to_string(),
+            "token-1".to_string(),
+            Side::Buy,
+            dec!(0.50),
+            dec!(50),
+            1000, // placed at 1000ms
+        );
+
+        // Not stale yet (only 4000ms passed, threshold is 5000)
+        assert!(!order.is_stale(5000, 5000));
+
+        // Now it's stale (5001ms passed > 5000 threshold)
+        assert!(order.is_stale(6001, 5000));
+
+        // Exactly at threshold - not stale
+        assert!(!order.is_stale(6000, 5000));
+    }
+
+    #[test]
+    fn test_active_maker_order_needs_price_refresh() {
+        let order = ActiveMakerOrder::new(
+            "order-1".to_string(),
+            "token-1".to_string(),
+            Side::Buy,
+            dec!(0.50),
+            dec!(50),
+            1000,
+        );
+
+        // Small price change (0.1% = 10 bps) - no refresh needed at 20 bps threshold
+        assert!(!order.needs_price_refresh(dec!(0.4995), 20));
+
+        // Large price change (1% = 100 bps) - needs refresh
+        assert!(order.needs_price_refresh(dec!(0.495), 20));
+
+        // Price at exactly threshold (0.2% = 20 bps)
+        // diff = 0.001, price = 0.50, diff/price = 0.002 = 20 bps
+        assert!(!order.needs_price_refresh(dec!(0.499), 20)); // Not > threshold
+
+        // Just over threshold
+        assert!(order.needs_price_refresh(dec!(0.4989), 20)); // >20 bps
+    }
+
+    #[test]
+    fn test_active_maker_order_needs_price_refresh_zero_price() {
+        let order = ActiveMakerOrder::new(
+            "order-1".to_string(),
+            "token-1".to_string(),
+            Side::Buy,
+            Decimal::ZERO, // Zero price
+            dec!(50),
+            1000,
+        );
+
+        // Should not trigger refresh with zero price
+        assert!(!order.needs_price_refresh(dec!(0.50), 20));
+    }
+
+    #[test]
+    fn test_active_maker_order_record_fill() {
+        let mut order = ActiveMakerOrder::new(
+            "order-1".to_string(),
+            "token-1".to_string(),
+            Side::Buy,
+            dec!(0.50),
+            dec!(100),
+            1000,
+        );
+
+        // First partial fill
+        order.record_fill(dec!(30), 2000);
+        assert_eq!(order.filled_size, dec!(30));
+        assert_eq!(order.remaining_size, dec!(70));
+        assert_eq!(order.updated_at_ms, 2000);
+        assert!(!order.is_fully_filled());
+
+        // Second partial fill
+        order.record_fill(dec!(50), 3000);
+        assert_eq!(order.filled_size, dec!(80));
+        assert_eq!(order.remaining_size, dec!(20));
+        assert_eq!(order.updated_at_ms, 3000);
+        assert!(!order.is_fully_filled());
+
+        // Final fill
+        order.record_fill(dec!(20), 4000);
+        assert_eq!(order.filled_size, dec!(100));
+        assert_eq!(order.remaining_size, Decimal::ZERO);
+        assert_eq!(order.updated_at_ms, 4000);
+        assert!(order.is_fully_filled());
+    }
+
+    #[test]
+    fn test_active_maker_order_is_fully_filled() {
+        let mut order = ActiveMakerOrder::new(
+            "order-1".to_string(),
+            "token-1".to_string(),
+            Side::Buy,
+            dec!(0.50),
+            dec!(100),
+            1000,
+        );
+
+        assert!(!order.is_fully_filled());
+
+        order.record_fill(dec!(100), 2000);
+        assert!(order.is_fully_filled());
+    }
+
+    #[test]
+    fn test_active_maker_order_overfill() {
+        let mut order = ActiveMakerOrder::new(
+            "order-1".to_string(),
+            "token-1".to_string(),
+            Side::Buy,
+            dec!(0.50),
+            dec!(100),
+            1000,
+        );
+
+        // Overfill (shouldn't happen but handle gracefully)
+        order.record_fill(dec!(150), 2000);
+        assert_eq!(order.filled_size, dec!(150));
+        assert_eq!(order.remaining_size, dec!(-50)); // Negative remaining
+        assert!(order.is_fully_filled()); // Still counts as fully filled
+    }
+
+    #[tokio::test]
+    async fn test_active_maker_order_count() {
+        let events = vec![
+            create_window_open_event("event1", CryptoAsset::Btc),
+        ];
+
+        let data_source = MockDataSource::new(events);
+        let executor = MockExecutor::new(dec!(1000));
+        let state = Arc::new(GlobalState::new());
+        let config = StrategyConfig::default();
+
+        let mut strategy = StrategyLoop::new(data_source, executor, state.clone(), config);
+        state.enable_trading();
+
+        let _ = strategy.run().await;
+
+        // No maker orders have been placed yet
+        assert_eq!(strategy.active_maker_order_count("event1"), 0);
+        assert_eq!(strategy.active_maker_order_count("nonexistent"), 0);
+    }
+
+    #[test]
+    fn test_tracked_market_has_active_maker_orders() {
+        let event = WindowOpenEvent {
+            event_id: "test-event".to_string(),
+            asset: CryptoAsset::Btc,
+            yes_token_id: "yes-token".to_string(),
+            no_token_id: "no-token".to_string(),
+            strike_price: dec!(100000),
+            window_start: Utc::now(),
+            window_end: Utc::now() + chrono::Duration::minutes(15),
+            timestamp: Utc::now(),
+        };
+
+        let market = TrackedMarket::new(&event);
+        assert!(market.active_maker_orders.is_empty());
     }
 }
