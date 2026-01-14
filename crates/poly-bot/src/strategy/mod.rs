@@ -28,6 +28,7 @@
 //! 8. Fire-and-forget decision to observability channel
 
 pub mod arb;
+pub mod signal;
 pub mod sizing;
 pub mod toxic;
 
@@ -53,6 +54,9 @@ use crate::state::GlobalState;
 use crate::types::{Inventory, MarketState};
 
 pub use arb::{ArbDetector, ArbOpportunity, ArbRejection, ArbThresholds};
+pub use signal::{
+    calculate_distance, distance_bps, get_signal, get_thresholds, Signal, SignalThresholds,
+};
 pub use sizing::{PositionSizer, SizingAdjustments, SizingConfig, SizingLimit, SizingResult};
 pub use toxic::{
     ToxicFlowConfig, ToxicFlowDetector, ToxicFlowWarning, ToxicIndicators, ToxicSeverity,

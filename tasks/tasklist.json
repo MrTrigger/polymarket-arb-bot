@@ -1,363 +1,376 @@
 {
-  "name": "Polymarket 15-Minute Arbitrage Bot",
+  "name": "V3 Three-Engine Strategy",
   "type": "feature",
-  "created": "2026-01-12T17:30:00Z",
+  "created": "2026-01-14T12:00:00Z",
+  "source": "tasks/spec-v3-strategy.md",
   "config": {
     "backend": "rust",
     "frontend": "none",
-    "infra": "kubernetes"
+    "infra": "none"
   },
   "tasks": [
     {
       "id": "p1-1",
-      "title": "Phase 1: Workspace and shared crate setup",
-      "description": "Create Cargo workspace with poly-common crate containing shared types (CryptoAsset, Side, OrderBookLevel, MarketWindow). Add dependencies: rust_decimal, chrono, serde, clickhouse, tokio.",
+      "title": "Phase 1: Add Signal enum and detection",
+      "description": "Implement directional signal based on BTC price vs strike. Create Signal enum (StrongUp, LeanUp, Neutral, LeanDown, StrongDown) with up_ratio/down_ratio methods. Implement get_signal() and get_thresholds() functions with time-based threshold tightening.",
       "status": "completed",
       "depends": [],
-      "files": ["Cargo.toml", "crates/poly-common/Cargo.toml", "crates/poly-common/src/lib.rs", "crates/poly-common/src/types.rs"],
-      "acceptance": ["cargo check passes for workspace", "poly-common crate compiles"]
+      "files": [
+        "crates/poly-bot/src/strategy/signal.rs",
+        "crates/poly-bot/src/strategy/mod.rs"
+      ],
+      "acceptance": [
+        "cargo clippy -- -D warnings passes",
+        "Unit tests pass for all signal thresholds",
+        "All 5 time brackets tested"
+      ]
     },
     {
       "id": "p1-2",
-      "title": "Phase 1: ClickHouse schema and client",
-      "description": "Define ClickHouse tables (orderbook_snapshots, orderbook_deltas, spot_prices, market_windows) and implement ClickHouseClient wrapper with batch insert, connection config, and table creation helper.",
-      "status": "completed",
+      "title": "Phase 1: Add Confidence types for sizing",
+      "description": "Create ConfidenceFactors struct (distance, minutes_remaining, signal, book_imbalance, favorable_depth) and Confidence struct (time, distance, signal, book). Implement total_multiplier() using geometric mean with 0.5x-3.0x caps.",
+      "status": "pending",
       "depends": ["p1-1"],
-      "files": ["crates/poly-common/src/clickhouse.rs", "crates/poly-common/src/schema.sql"],
-      "acceptance": ["Can connect to ClickHouse", "Can create tables", "Batch insert works"]
+      "files": [
+        "crates/poly-bot/src/strategy/confidence.rs"
+      ],
+      "acceptance": [
+        "cargo clippy -- -D warnings passes",
+        "Confidence calculation matches spec examples",
+        "Unit tests for multiplier caps"
+      ]
     },
     {
       "id": "p1-3",
-      "title": "Phase 1: Market discovery for collector",
-      "description": "Implement market discovery using polymarket-client-sdk Gamma API. Query active crypto events, filter to 15-minute up/down markets, extract YES/NO token IDs, track window timing, store to market_windows table, re-discover every 5 minutes.",
-      "status": "completed",
-      "depends": ["p1-2"],
-      "files": ["crates/poly-collect/Cargo.toml", "crates/poly-collect/src/lib.rs", "crates/poly-collect/src/discovery.rs"],
-      "acceptance": ["Discovers BTC/ETH/SOL 15-min markets", "Extracts token IDs correctly", "Stores metadata to ClickHouse"]
-    },
-    {
-      "id": "p1-4",
-      "title": "Phase 1: Binance WebSocket capture",
-      "description": "Implement minimal custom WebSocket client using tokio-tungstenite. Connect to wss://stream.binance.com:9443/ws, subscribe to btcusdt@trade, ethusdt@trade, solusdt@trade. Parse trades, buffer writes (100-1000 records), flush to spot_prices table, implement reconnection with backoff.",
-      "status": "completed",
-      "depends": ["p1-2"],
-      "files": ["crates/poly-collect/src/binance.rs"],
-      "acceptance": ["Connects to Binance WS", "Captures BTC/ETH/SOL trades", "Writes to ClickHouse", "Reconnects on disconnect"]
-    },
-    {
-      "id": "p1-5",
-      "title": "Phase 1: Polymarket CLOB WebSocket capture",
-      "description": "Implement CLOB WebSocket capture. Connect to Polymarket CLOB WS, subscribe to discovered market token IDs, handle book snapshots and deltas, periodic full snapshot capture (100ms), buffer and batch writes, reconnection with backoff, re-subscribe on new markets.",
-      "status": "completed",
-      "depends": ["p1-3"],
-      "files": ["crates/poly-collect/src/clob.rs"],
-      "acceptance": ["Captures order book snapshots to ClickHouse", "Captures deltas to ClickHouse", "Reconnects on disconnect"]
-    },
-    {
-      "id": "p1-6",
-      "title": "Phase 1: Collector main binary",
-      "description": "Wire everything together in poly-collect main.rs. Parse CLI args (--assets, --clickhouse-url), load TOML config, spawn discovery/Binance/CLOB/flush tasks, implement graceful shutdown (SIGTERM), add health logging (records/sec, connection status).",
-      "status": "completed",
-      "depends": ["p1-4", "p1-5"],
-      "files": ["crates/poly-collect/src/main.rs", "config/collect.toml"],
-      "acceptance": ["Runs continuously", "Captures all data", "Handles disconnects gracefully", "Shuts down cleanly on SIGTERM"]
-    },
-    {
-      "id": "p1-7",
-      "title": "Phase 1: Deployment config",
-      "description": "Create deployment artifacts: config/collect.toml with defaults, Dockerfile for poly-collect, k8s Deployment manifest with resource limits, optional health check endpoint.",
-      "status": "completed",
-      "depends": ["p1-6"],
-      "files": ["config/collect.toml", "deploy/Dockerfile.collect", "deploy/k8s/poly-collect.yaml"],
-      "acceptance": ["Can build Docker image", "Can deploy to k8s cluster", "Pod runs successfully"]
+      "title": "Phase 1: Add Position and trade decision types",
+      "description": "Add EngineType enum (Arbitrage, Directional, MakerRebates), Position struct with cost/share tracking, and calculate_pnl(). Extend TradeDecision with engine variants. Use Decimal for all financial math.",
+      "status": "pending",
+      "depends": [],
+      "files": [
+        "crates/poly-bot/src/types.rs"
+      ],
+      "acceptance": [
+        "cargo clippy -- -D warnings passes",
+        "cargo check passes",
+        "Types integrate with existing Inventory"
+      ]
     },
     {
       "id": "p2-1",
-      "title": "Phase 2: Price history importer",
-      "description": "Implement Polymarket price history API client. Parse date range from CLI, download price history for specified tokens, store to ClickHouse price_history table, handle pagination/rate limits, show progress.",
-      "status": "completed",
-      "depends": ["p1-2"],
-      "files": ["crates/poly-import/Cargo.toml", "crates/poly-import/src/lib.rs", "crates/poly-import/src/prices.rs"],
-      "acceptance": ["Can download price history", "Stores to ClickHouse", "Handles pagination"]
+      "title": "Phase 2: Add fee rate client",
+      "description": "Create api/ module with fee rate fetching from GET /fee-rate?token_id=X. Add FeeRateResponse struct, implement fetch_fee_rate() with in-memory caching per market session. Handle API errors gracefully.",
+      "status": "pending",
+      "depends": [],
+      "files": [
+        "crates/poly-bot/src/api/mod.rs",
+        "crates/poly-bot/src/api/fees.rs"
+      ],
+      "acceptance": [
+        "cargo clippy -- -D warnings passes",
+        "Can fetch fee rate for a token",
+        "Cache prevents redundant API calls"
+      ]
     },
     {
       "id": "p2-2",
-      "title": "Phase 2: Trade history importer",
-      "description": "Implement trade history API client. Download trades for date range, store to ClickHouse trade_history table, handle pagination.",
-      "status": "completed",
-      "depends": ["p1-2"],
-      "files": ["crates/poly-import/src/trades.rs"],
-      "acceptance": ["Can download trade history", "Stores to ClickHouse"]
+      "title": "Phase 2: Add rewards client",
+      "description": "Implement rewards API client with CurrentRewardResponse, RewardsConfig, UserEarningResponse types. Add fetch_current_rewards(), fetch_reward_percentages(), fetch_user_earnings() methods. Support periodic earnings tracking.",
+      "status": "pending",
+      "depends": ["p2-1"],
+      "files": [
+        "crates/poly-bot/src/api/rewards.rs"
+      ],
+      "acceptance": [
+        "cargo clippy -- -D warnings passes",
+        "Can fetch current rewards config",
+        "Can fetch user earnings for a date"
+      ]
     },
     {
       "id": "p2-3",
-      "title": "Phase 2: Import CLI",
-      "description": "Create poly-import main binary. Parse CLI for 'prices' and 'trades' subcommands with --start/--end args, progress reporting, error handling and resume capability.",
-      "status": "completed",
+      "title": "Phase 2: Create MarketSession with cached API data",
+      "description": "Add MarketSession struct containing market_id, tokens, strike, fee_rate_bps, reward_config. Implement MarketSession::new() that fetches and caches API data. Integrate with TrackedMarket or StrategyLoop.",
+      "status": "pending",
       "depends": ["p2-1", "p2-2"],
-      "files": ["crates/poly-import/src/main.rs"],
-      "acceptance": ["poly-import prices --start X --end Y works", "poly-import trades --start X --end Y works"]
+      "files": [
+        "crates/poly-bot/src/types.rs"
+      ],
+      "acceptance": [
+        "cargo clippy -- -D warnings passes",
+        "MarketSession initializes with API data",
+        "Fee rate cached per session"
+      ]
     },
     {
       "id": "p3-1",
-      "title": "Phase 3: Bot configuration system",
-      "description": "Define BotConfig struct with all trading parameters from spec section 15. Define ObservabilityConfig with enable/disable flags. Create config/bot.toml with defaults, implement loading with env var overrides, add validation.",
-      "status": "completed",
-      "depends": ["p1-1"],
-      "files": ["crates/poly-bot/Cargo.toml", "crates/poly-bot/src/lib.rs", "crates/poly-bot/src/config.rs", "config/bot.toml"],
-      "acceptance": ["Loads config from TOML", "Env vars override secrets", "Validates required fields"]
+      "title": "Phase 3: Add TradingConfig with balance scaling",
+      "description": "Create TradingConfig with available_balance, max_market_allocation (0.20), expected_trades_per_market (200), min_order_size ($1), max_confidence_multiplier (3.0), min_hedge_ratio (0.20). Implement market_budget() and base_order_size() methods.",
+      "status": "pending",
+      "depends": [],
+      "files": [
+        "crates/poly-bot/src/config.rs"
+      ],
+      "acceptance": [
+        "cargo clippy -- -D warnings passes",
+        "market_budget = balance * 0.20",
+        "base_order_size = budget / 200",
+        "Unit tests for $500-$25000 scaling"
+      ]
     },
     {
       "id": "p3-2",
-      "title": "Phase 3: Shared state (lock-free)",
-      "description": "Implement GlobalState with DashMaps and atomics. Define SharedMarketData (prices, books, inventory, shadows), ControlFlags (trading_enabled, circuit_breaker), MetricsCounters. Implement #[inline(always)] can_trade() with two atomic loads.",
-      "status": "completed",
-      "depends": ["p3-1"],
-      "files": ["crates/poly-bot/src/state.rs"],
-      "acceptance": ["Lock-free reads on hot path", "can_trade() is ~10ns", "Unit tests pass for concurrent access"]
+      "title": "Phase 3: Implement ConfidenceSizer",
+      "description": "Create ConfidenceSizer with TradingConfig, spent, trades tracking. Implement get_order_size(factors) returning OrderSizeResult. Add confidence calculators: time_confidence(), distance_confidence(), signal_confidence(), book_confidence().",
+      "status": "pending",
+      "depends": ["p1-1", "p1-2", "p3-1"],
+      "files": [
+        "crates/poly-bot/src/strategy/confidence_sizing.rs"
+      ],
+      "acceptance": [
+        "cargo clippy -- -D warnings passes",
+        "Sizing matches spec examples",
+        "BudgetExhausted returned when spent >= budget"
+      ]
     },
     {
       "id": "p3-3",
-      "title": "Phase 3: Market state types",
-      "description": "Define OrderBook with bid/ask levels, MarketState with derived fields (combined_cost, arb_margin), Inventory struct (yes/no shares, cost basis), InventoryState enum (Balanced, Skewed, Exposed, Crisis). Use Decimal not f64.",
-      "status": "completed",
-      "depends": ["p3-1"],
-      "files": ["crates/poly-bot/src/types.rs"],
-      "acceptance": ["Types use rust_decimal", "Inventory state transitions work correctly"]
-    },
-    {
-      "id": "p3-4",
-      "title": "Phase 3: Data source trait",
-      "description": "Define DataSource trait with async fn next_event(). Define MarketEvent enum (PriceUpdate, BookUpdate, Fill, etc.). Implement LiveDataSource (WebSocket connections) and ReplayDataSource (reads from ClickHouse).",
-      "status": "completed",
-      "depends": ["p3-2", "p3-3"],
-      "files": ["crates/poly-bot/src/data_source.rs", "crates/poly-bot/src/data_source/live.rs", "crates/poly-bot/src/data_source/replay.rs"],
-      "acceptance": ["Same strategy code works with live or replay data", "ReplayDataSource loads from ClickHouse"]
-    },
-    {
-      "id": "p3-5",
-      "title": "Phase 3: Executor trait",
-      "description": "Define Executor trait with place_order(), cancel_order(). Define OrderResult enum (Filled, PartialFill, Rejected). Stub LiveExecutor, implement PaperExecutor (simulated fills), implement BacktestExecutor (simulates against historical book).",
-      "status": "completed",
-      "depends": ["p3-3"],
-      "files": ["crates/poly-bot/src/executor.rs", "crates/poly-bot/src/executor/paper.rs", "crates/poly-bot/src/executor/backtest.rs", "crates/poly-bot/src/executor/live.rs"],
-      "acceptance": ["Same strategy code works with real or simulated execution", "PaperExecutor simulates fills"]
+      "title": "Phase 3: Add configurable sizing mode",
+      "description": "Add SizingMode enum (Limits, Confidence, Hybrid). Create SizingStrategy trait. Implement for existing PositionSizer and new ConfidenceSizer. Create HybridSizer that applies confidence then caps with limits. Add factory function.",
+      "status": "pending",
+      "depends": ["p3-2"],
+      "files": [
+        "crates/poly-bot/src/config.rs",
+        "crates/poly-bot/src/strategy/sizing.rs"
+      ],
+      "acceptance": [
+        "cargo clippy -- -D warnings passes",
+        "Can switch modes via TOML config",
+        "Hybrid mode applies both sizing strategies"
+      ]
     },
     {
       "id": "p4-1",
-      "title": "Phase 4: Arbitrage detection",
-      "description": "Implement core arb detection: margin = 1.0 - (yes_ask + no_ask). Time-based threshold selection (2.5% early >5min, 1.5% mid 2-5min, 0.5% late <2min). Confidence scoring. Create ArbOpportunity struct.",
-      "status": "completed",
-      "depends": ["p3-3"],
-      "files": ["crates/poly-bot/src/strategy/mod.rs", "crates/poly-bot/src/strategy/arb.rs"],
-      "acceptance": ["Detects opportunities correctly", "Time-based thresholds work", "Unit tests pass"]
+      "title": "Phase 4: Implement PnlRiskManager",
+      "description": "Create PnlRiskManager with daily_pnl, consecutive_losses, trading_enabled tracking. Implement check_trade() returning TradeDecision (Approve/Reject/ReduceSize/RebalanceRequired). Add daily loss limit (10%), consecutive loss stop (3), hedge ratio check (20%).",
+      "status": "pending",
+      "depends": ["p1-3"],
+      "files": [
+        "crates/poly-bot/src/risk/pnl.rs",
+        "crates/poly-bot/src/risk/mod.rs"
+      ],
+      "acceptance": [
+        "cargo clippy -- -D warnings passes",
+        "Rejects after 10% daily loss",
+        "Disables after 3 consecutive losses",
+        "Requires rebalance below 20% hedge ratio"
+      ]
     },
     {
       "id": "p4-2",
-      "title": "Phase 4: Toxic flow detection",
-      "description": "Implement basic toxic flow detection. Track rolling average order size, detect orders >50x average, detect sudden appearance (<500ms). Return ToxicFlowWarning with severity.",
-      "status": "completed",
-      "depends": ["p3-3"],
-      "files": ["crates/poly-bot/src/strategy/toxic.rs"],
-      "acceptance": ["Detects large sudden orders", "Returns severity levels"]
-    },
-    {
-      "id": "p4-3",
-      "title": "Phase 4: Position sizing",
-      "description": "Implement position sizing. Basic fixed sizing for MVP, respect max_position_per_market, respect max_total_exposure, account for inventory imbalance.",
-      "status": "completed",
-      "depends": ["p3-3", "p4-1"],
-      "files": ["crates/poly-bot/src/strategy/sizing.rs"],
-      "acceptance": ["Sizes respect limits", "Accounts for imbalance"]
-    },
-    {
-      "id": "p4-4",
-      "title": "Phase 4: Strategy loop",
-      "description": "Implement main strategy task. Event loop receiving from DataSource, check can_trade() (single atomic), run arb detection, run toxic flow check, calculate size, send decisions to executor, fire-and-forget to observability channel.",
-      "status": "completed",
-      "depends": ["p3-4", "p4-1", "p4-2", "p4-3"],
-      "files": ["crates/poly-bot/src/strategy/mod.rs"],
-      "acceptance": ["Processes events", "Generates trade decisions", "Hot path is fast"]
+      "title": "Phase 4: Add configurable risk mode",
+      "description": "Add RiskMode enum (CircuitBreaker, DailyPnl, Both). Create RiskChecker trait. Implement CompositeRiskChecker that runs both when mode is Both. Integrate with StrategyLoop pre-trade checks.",
+      "status": "pending",
+      "depends": ["p4-1"],
+      "files": [
+        "crates/poly-bot/src/config.rs",
+        "crates/poly-bot/src/risk/mod.rs"
+      ],
+      "acceptance": [
+        "cargo clippy -- -D warnings passes",
+        "Can select risk mode via config",
+        "Both mode runs CB + PnlRiskManager"
+      ]
     },
     {
       "id": "p5-1",
-      "title": "Phase 5: Shadow bid manager",
-      "description": "Implement shadow bid system. Define ShadowOrder struct, implement PrehashedOrder for fast signing (pre-compute domain separator, type hash, partial struct hash at creation). Implement fire() with fast signing path (<2ms). Store in DashMap by (event_id, side).",
-      "status": "completed",
-      "depends": ["p3-2"],
-      "files": ["crates/poly-bot/src/executor/shadow.rs"],
-      "acceptance": ["Shadow fires within 2ms of primary fill", "Pre-hashing reduces signing time"]
+      "title": "Phase 5: Implement DirectionalDetector",
+      "description": "Create DirectionalDetector using Signal system. Create DirectionalOpportunity struct (signal, up_ratio, down_ratio, confidence). Implement detect() returning opportunity with correct allocation ratios. Add skip reasons.",
+      "status": "pending",
+      "depends": ["p1-1", "p1-2"],
+      "files": [
+        "crates/poly-bot/src/strategy/directional.rs"
+      ],
+      "acceptance": [
+        "cargo clippy -- -D warnings passes",
+        "StrongUp returns 78% UP / 22% DOWN",
+        "Neutral signal skips trading",
+        "Unit tests for each signal level"
+      ]
     },
     {
       "id": "p5-2",
-      "title": "Phase 5: Price chasing",
-      "description": "Implement dynamic limit price adjustment. Ceiling calculation (1.0 - other_leg - min_margin), chase loop (check fill, bump price, repeat), handle partial fills. Configurable step_size, check_interval, max_chase_time.",
-      "status": "completed",
-      "depends": ["p3-5"],
-      "files": ["crates/poly-bot/src/executor/chase.rs"],
-      "acceptance": ["Chases up to ceiling", "Handles timeout", "Handles partial fills"]
-    },
-    {
-      "id": "p5-3",
-      "title": "Phase 5: Live executor",
-      "description": "Implement real order submission via polymarket-client-sdk. Initialize with wallet, implement place_order() with limit orders, implement cancel_order(), fill tracking (WebSocket or polling), fire shadow on primary fill, update inventory on fills.",
-      "status": "completed",
-      "depends": ["p5-1", "p5-2"],
-      "files": ["crates/poly-bot/src/executor/live.rs"],
-      "acceptance": ["Can place real orders", "Can cancel orders", "Fires shadow on fill"]
-    },
-    {
-      "id": "p5-4",
-      "title": "Phase 5: Fill handling",
-      "description": "Implement fill processing. Parse fill events, update inventory, fire shadow bid, handle partial fills, send to observability channel.",
-      "status": "completed",
-      "depends": ["p5-3"],
-      "files": ["crates/poly-bot/src/executor/fill.rs", "crates/poly-bot/src/executor.rs", "crates/poly-bot/src/lib.rs"],
-      "acceptance": ["Fills update inventory", "Triggers shadows correctly", "Handles partials"]
+      "title": "Phase 5: Implement directional execution",
+      "description": "Add execute_directional() to StrategyLoop. Calculate UP/DOWN sizes from signal ratios. Calculate maker prices inside spread. Place orders with post_only: true. Update position tracking and record with sizer.",
+      "status": "pending",
+      "depends": ["p5-1", "p3-2"],
+      "files": [
+        "crates/poly-bot/src/strategy/mod.rs"
+      ],
+      "acceptance": [
+        "cargo clippy -- -D warnings passes",
+        "Places both UP and DOWN orders",
+        "Position updated correctly",
+        "Integration test passes"
+      ]
     },
     {
       "id": "p6-1",
-      "title": "Phase 6: Pre-trade risk checks",
-      "description": "Implement pre-trade validation. Time remaining check (>30s), position size check, total exposure check, imbalance check, daily loss check, toxic severity check.",
-      "status": "completed",
-      "depends": ["p3-3"],
-      "files": ["crates/poly-bot/src/risk/mod.rs", "crates/poly-bot/src/risk/checks.rs"],
-      "acceptance": ["Rejects trades exceeding limits", "All checks implemented"]
+      "title": "Phase 6: Implement MakerDetector",
+      "description": "Create MakerDetector for passive rebate strategy. Create MakerOpportunity struct (token_id, side, price, size, expected_rebate). Implement spread analysis for optimal maker price. Consider rewards_min_size and rewards_max_spread from API.",
+      "status": "pending",
+      "depends": ["p2-2"],
+      "files": [
+        "crates/poly-bot/src/strategy/maker.rs"
+      ],
+      "acceptance": [
+        "cargo clippy -- -D warnings passes",
+        "Detects maker opportunities",
+        "Respects min_size from reward config"
+      ]
     },
     {
       "id": "p6-2",
-      "title": "Phase 6: Circuit breakers",
-      "description": "Implement circuit breakers. Atomic failure counter, trip() sets atomic flag, can_trade() is single atomic load (~10ns), cooldown timer for auto-reset.",
-      "status": "completed",
-      "depends": ["p3-2"],
-      "files": ["crates/poly-bot/src/risk/circuit_breaker.rs"],
-      "acceptance": ["Trips after 3 failures", "Auto-resets after cooldown", "can_trade() is fast"]
-    },
-    {
-      "id": "p6-3",
-      "title": "Phase 6: Leg risk handling",
-      "description": "Implement leg risk response. Detect leg risk condition (one leg filled, other not), calculate exposure, emergency IOC close if exposure > limit, aggressive chase if time pressure.",
-      "status": "completed",
-      "depends": ["p5-4", "p6-1"],
-      "files": ["crates/poly-bot/src/risk/leg_risk.rs"],
-      "acceptance": ["Detects leg risk", "Emergency closes when needed", "Aggressive chase works"]
+      "title": "Phase 6: Implement maker order management",
+      "description": "Add execute_maker() method. Track active maker orders per market. Implement order refresh logic (cancel stale, place new). Handle partial fills properly.",
+      "status": "pending",
+      "depends": ["p6-1"],
+      "files": [
+        "crates/poly-bot/src/strategy/mod.rs"
+      ],
+      "acceptance": [
+        "cargo clippy -- -D warnings passes",
+        "Maintains maker orders",
+        "Cancels and refreshes stale orders",
+        "Integration test passes"
+      ]
     },
     {
       "id": "p7-1",
-      "title": "Phase 7: Decision snapshot types",
-      "description": "Define minimal DecisionSnapshot with only primitives (u64, u8) for hot path. Pre-hash event_id to u64. Define full DecisionContext (built async). Define Counterfactual struct for post-analysis.",
-      "status": "completed",
-      "depends": ["p3-3"],
-      "files": ["crates/poly-bot/src/observability/mod.rs", "crates/poly-bot/src/observability/types.rs"],
-      "acceptance": ["DecisionSnapshot has no allocations", "All primitive types"]
+      "title": "Phase 7: Add engine configuration",
+      "description": "Create EnginesConfig with ArbitrageEngineConfig, DirectionalEngineConfig, MakerEngineConfig. Each has enabled flag and engine-specific params. Add priority: Vec<EngineType> for conflict resolution.",
+      "status": "pending",
+      "depends": ["p1-3"],
+      "files": [
+        "crates/poly-bot/src/config.rs"
+      ],
+      "acceptance": [
+        "cargo clippy -- -D warnings passes",
+        "TOML deserialization works",
+        "Default enables only arbitrage"
+      ]
     },
     {
       "id": "p7-2",
-      "title": "Phase 7: Fire-and-forget capture",
-      "description": "Implement non-blocking channel send from hot path. Create bounded mpsc channel, implement try_send() wrapper, config flag to enable/disable, inline hot path check. Target <10ns overhead.",
-      "status": "completed",
+      "title": "Phase 7: Implement DecisionAggregator",
+      "description": "Create EngineDecision wrapper (engine_type, opportunity, sizing). Create DecisionAggregator. Implement aggregate() that picks best decision based on priority config. Handle conflicts (arb overrides directional).",
+      "status": "pending",
       "depends": ["p7-1"],
-      "files": ["crates/poly-bot/src/observability/capture.rs"],
-      "acceptance": ["<10ns overhead", "Drops if buffer full", "Can disable via config"]
+      "files": [
+        "crates/poly-bot/src/strategy/aggregator.rs"
+      ],
+      "acceptance": [
+        "cargo clippy -- -D warnings passes",
+        "Priority ordering works",
+        "Conflict resolution correct"
+      ]
     },
     {
       "id": "p7-3",
-      "title": "Phase 7: Async enrichment and storage",
-      "description": "Implement background observability processor. Receive from channel, enrich snapshot with full context (strings), buffer records, batch write to ClickHouse, handle backpressure (drop oldest).",
-      "status": "completed",
-      "depends": ["p7-2", "p1-2"],
-      "files": ["crates/poly-bot/src/observability/processor.rs"],
-      "acceptance": ["Batches writes to ClickHouse", "Handles backpressure"]
-    },
-    {
-      "id": "p7-4",
-      "title": "Phase 7: Counterfactual analysis",
-      "description": "Implement post-settlement what-if analysis. Track skipped opportunities, after window settles calculate hypothetical P&L, store counterfactuals to ClickHouse, flag bad decisions for review.",
-      "status": "completed",
-      "depends": ["p7-3"],
-      "files": ["crates/poly-bot/src/observability/counterfactual.rs"],
-      "acceptance": ["Calculates hypothetical P&L", "Stores counterfactuals", "Flags bad decisions"]
-    },
-    {
-      "id": "p7-5",
-      "title": "Phase 7: Anomaly detection",
-      "description": "Implement anomaly detection. Define AnomalyType enum, detect extreme margins/flash crashes/latency spikes, store anomalies with full context, optional alerting (log, webhook).",
-      "status": "completed",
-      "depends": ["p7-3"],
-      "files": ["crates/poly-bot/src/observability/anomaly.rs"],
-      "acceptance": ["Detects anomalies", "Stores with context", "Alerting works"]
+      "title": "Phase 7: Integrate engines into StrategyLoop",
+      "description": "Add engine instances (arb, directional, maker) and aggregator to StrategyLoop. Refactor check_opportunities() to run all enabled engines. Route execution to correct handler. Tag decisions with engine source for observability.",
+      "status": "pending",
+      "depends": ["p5-2", "p6-2", "p7-2"],
+      "files": [
+        "crates/poly-bot/src/strategy/mod.rs"
+      ],
+      "acceptance": [
+        "cargo clippy -- -D warnings passes",
+        "Multi-engine strategy runs",
+        "Observability shows engine source",
+        "Backward compatible with arb-only"
+      ]
     },
     {
       "id": "p8-1",
-      "title": "Phase 8: Live mode",
-      "description": "Implement live trading mode. Wire LiveDataSource + LiveExecutor, full observability enabled, graceful shutdown saves state.",
-      "status": "completed",
-      "depends": ["p4-4", "p5-4", "p6-3", "p7-3"],
-      "files": ["crates/poly-bot/src/mode/mod.rs", "crates/poly-bot/src/mode/live.rs"],
-      "acceptance": ["Trades real money", "Observability works", "Shutdown is graceful"]
+      "title": "Phase 8: Implement TradeInterval",
+      "description": "Create TradeInterval struct with min_interval (500ms) and last_trade tracking. Implement can_trade(), record_trade(), time_until_next(). Integrate into StrategyLoop main loop to avoid API rate limits.",
+      "status": "pending",
+      "depends": [],
+      "files": [
+        "crates/poly-bot/src/executor/interval.rs",
+        "crates/poly-bot/src/executor/mod.rs"
+      ],
+      "acceptance": [
+        "cargo clippy -- -D warnings passes",
+        "Enforces 500ms minimum between trades",
+        "Unit tests pass"
+      ]
     },
     {
       "id": "p8-2",
-      "title": "Phase 8: Paper mode",
-      "description": "Implement paper trading mode. Wire LiveDataSource + PaperExecutor, simulated fills with configurable latency, full observability enabled.",
-      "status": "completed",
-      "depends": ["p4-4", "p3-5", "p7-3"],
-      "files": ["crates/poly-bot/src/mode/paper.rs"],
-      "acceptance": ["Validates strategy with real prices", "Simulates fills realistically"]
-    },
-    {
-      "id": "p8-3",
-      "title": "Phase 8: Shadow mode",
-      "description": "Implement shadow mode. Wire LiveDataSource + NoOpExecutor, log all detected opportunities, validate feed connectivity.",
-      "status": "completed",
-      "depends": ["p4-4", "p3-4"],
-      "files": ["crates/poly-bot/src/mode/shadow.rs", "crates/poly-bot/src/executor/noop.rs"],
-      "acceptance": ["Logs opportunities", "Validates feeds work", "No execution"]
-    },
-    {
-      "id": "p8-4",
-      "title": "Phase 8: Backtest mode",
-      "description": "Implement backtesting. Load data from ClickHouse for date range, wire ReplayDataSource + BacktestExecutor, speed control (1x, 100x, max), generate P&L report, support parameter sweeps.",
-      "status": "completed",
-      "depends": ["p3-4", "p3-5", "p4-4"],
-      "files": ["crates/poly-bot/src/mode/backtest.rs"],
-      "acceptance": ["Runs against historical data", "P&L report generated", "Parameter sweeps work"]
-    },
-    {
-      "id": "p8-5",
-      "title": "Phase 8: Main binary",
-      "description": "Create poly-bot main binary. Parse CLI args (--mode, --config, --start, --end, --speed, --sweep), load config, initialize selected mode, run main loop, graceful shutdown.",
-      "status": "completed",
-      "depends": ["p8-1", "p8-2", "p8-3", "p8-4"],
-      "files": ["crates/poly-bot/src/main.rs"],
-      "acceptance": ["All modes work from CLI", "Config loads correctly", "Shutdown is clean"]
+      "title": "Phase 8: Add maker price calculation",
+      "description": "Implement get_maker_price(book) that calculates optimal price inside spread. Handle spread >3% (40% from bid), 1-3% (30% from bid), <1% (at bid). Return Decimal price.",
+      "status": "pending",
+      "depends": [],
+      "files": [
+        "crates/poly-bot/src/strategy/pricing.rs"
+      ],
+      "acceptance": [
+        "cargo clippy -- -D warnings passes",
+        "Places orders inside spread",
+        "Unit tests for all spread sizes"
+      ]
     },
     {
       "id": "p9-1",
-      "title": "Phase 9: Unit tests",
-      "description": "Add unit tests for core logic: arb detection, inventory state transitions, circuit breaker, toxic flow detection, config loading.",
-      "status": "completed",
-      "depends": ["p4-1", "p4-2", "p6-2", "p3-1"],
-      "files": ["crates/poly-bot/src/strategy/arb.rs", "crates/poly-bot/src/types.rs", "crates/poly-bot/src/risk/circuit_breaker.rs"],
-      "acceptance": ["cargo test passes", "Core logic covered"]
+      "title": "Phase 9: Unit tests for all new modules",
+      "description": "Add comprehensive unit tests: Signal detection (all time brackets), Confidence calculation (spec examples), TradingConfig scaling, ConfidenceSizer (budget, multipliers), PnlRiskManager (all rules), DirectionalDetector, DecisionAggregator priority.",
+      "status": "pending",
+      "depends": ["p7-3"],
+      "files": [
+        "crates/poly-bot/src/strategy/signal.rs",
+        "crates/poly-bot/src/strategy/confidence.rs",
+        "crates/poly-bot/src/strategy/confidence_sizing.rs",
+        "crates/poly-bot/src/risk/pnl.rs",
+        "crates/poly-bot/src/strategy/directional.rs",
+        "crates/poly-bot/src/strategy/aggregator.rs"
+      ],
+      "acceptance": [
+        "cargo test passes",
+        "All modules have inline tests"
+      ]
     },
     {
       "id": "p9-2",
       "title": "Phase 9: Integration tests",
-      "description": "Add integration tests: strategy + mock executor, replay data source, observability pipeline.",
-      "status": "completed",
-      "depends": ["p8-5"],
-      "files": ["crates/poly-bot/tests/integration_strategy.rs", "crates/poly-bot/tests/integration_replay.rs", "crates/poly-bot/tests/integration_observability.rs"],
-      "acceptance": ["End-to-end flow works", "Tests pass"]
+      "description": "Create integration tests: test_directional_strategy.rs, test_multi_engine.rs, test_confidence_sizing.rs, test_pnl_risk.rs. Verify strategy runs correctly in backtest mode.",
+      "status": "pending",
+      "depends": ["p9-1"],
+      "files": [
+        "crates/poly-bot/tests/test_directional_strategy.rs",
+        "crates/poly-bot/tests/test_multi_engine.rs",
+        "crates/poly-bot/tests/test_confidence_sizing.rs",
+        "crates/poly-bot/tests/test_pnl_risk.rs"
+      ],
+      "acceptance": [
+        "cargo test --test '*' passes",
+        "Backtest mode works with new engines"
+      ]
     },
     {
       "id": "p9-3",
       "title": "Phase 9: Backtest validation",
-      "description": "Run backtests on collected data, verify P&L matches expected, check for obvious bugs (negative prices, impossible states).",
-      "status": "completed",
-      "depends": ["p8-4", "p1-7"],
-      "files": ["crates/poly-bot/tests/integration_backtest_validation.rs"],
-      "acceptance": ["P&L calculations correct", "No obvious bugs"]
+      "description": "Run backtest with directional engine enabled. Compare results to spec Section 8 expected economics. Tune thresholds if needed. Document findings and any parameter adjustments.",
+      "status": "pending",
+      "depends": ["p9-2"],
+      "files": [
+        "tasks/progress.txt"
+      ],
+      "acceptance": [
+        "Backtest completes successfully",
+        "P&L within expected range from spec",
+        "Findings documented in progress.txt"
+      ]
     }
   ]
 }

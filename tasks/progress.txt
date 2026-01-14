@@ -2489,3 +2489,80 @@ Notes:
 - ALL TASKS COMPLETE! Project fully implemented from Phase 1-9
 - 35 tasks total, all marked completed
 - Full arbitrage detection, execution, and risk management implemented
+
+---
+
+# V3 Three-Engine Strategy
+
+## [2026-01-14] Strategy Upgrade Initiated
+
+Source: spec/POLYMARKET_BOT_SPEC_v3_RUST.md
+
+### New Strategy: Three Profit Engines
+1. **Directional** (60-70%): Bet based on BTC price vs strike
+2. **Arbitrage** (15-25%): Capture gaps when UP + DOWN < $0.98
+3. **Maker Rebates** (10-20%): Earn from maker orders being filled
+
+### Key Changes from V2
+- Confidence-based order sizing (replaces fixed sizing)
+- Signal system: StrongUp/LeanUp/Neutral/LeanDown/StrongDown
+- Balance-scaled config (20% per market, 200 expected trades)
+- P&L-based risk management (daily loss, consecutive losses)
+- Dynamic fee rate from API (GET /fee-rate)
+- Rewards tracking from API (GET /rewards/markets/current)
+
+### Configurable Layers
+- Engines: Each can be enabled/disabled with priority
+- Sizing: limits | confidence | hybrid
+- Risk: circuit_breaker | daily_pnl | both
+
+### API Endpoints (from rs-clob-client)
+- GET /fee-rate?token_id=X -> { base_fee: u32 }
+- GET /rewards/markets/current -> CurrentRewardResponse[]
+- GET /rewards/user/percentages -> HashMap<String, Decimal>
+- GET /rewards/user/total?date=X -> TotalUserEarningResponse
+
+## Pending Work
+
+See tasklist.json for 23 tasks across 9 phases.
+
+---
+
+---
+
+### [2026-01-14] Task p1-1: Add Signal enum and detection
+Files created:
+- crates/poly-bot/src/strategy/signal.rs
+
+Files modified:
+- crates/poly-bot/src/strategy/mod.rs (added signal module export)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-bot strategy::signal: PASSED (29 tests)
+
+Signal module features:
+- Signal enum: StrongUp, LeanUp, Neutral, LeanDown, StrongDown
+- up_ratio() returns allocation ratio for UP (0.78, 0.60, 0.50, 0.40, 0.22)
+- down_ratio() returns allocation ratio for DOWN (complement of up_ratio)
+- is_directional(), is_strong(), bias_strength() helper methods
+- SignalThresholds struct (strong, lean thresholds)
+- get_thresholds(minutes_remaining) with 5 time brackets:
+  - >10 min: strong=0.20%, lean=0.08% (early)
+  - 5-10 min: strong=0.15%, lean=0.05% (mid-early)
+  - 2-5 min: strong=0.10%, lean=0.03% (mid)
+  - 1-2 min: strong=0.05%, lean=0.02% (late)
+  - <1 min: strong=0.03%, lean=0.01% (very late)
+- get_signal(spot, strike, minutes) returns Signal based on distance
+- calculate_distance(spot, strike) returns distance as ratio
+- distance_bps(spot, strike) returns distance in basis points
+
+Key decisions:
+- Thresholds tighten as time remaining decreases (more certainty = smaller moves matter)
+- Allocation ratios: Strong=78/22, Lean=60/40, Neutral=50/50
+- All calculations use rust_decimal::Decimal (never f64)
+- Exported from strategy::mod.rs for public access
+
+Notes for next task:
+- p1-2 (Confidence types) depends on p1-1 (done)
+- Signal system ready for DirectionalDetector in Phase 5
