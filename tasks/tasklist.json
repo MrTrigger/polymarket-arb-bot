@@ -202,7 +202,7 @@
       "id": "p5-2",
       "title": "Phase 5: Implement directional execution",
       "description": "Add execute_directional() to StrategyLoop. Calculate UP/DOWN sizes from signal ratios. Calculate maker prices inside spread. Place orders with post_only: true. Update position tracking and record with sizer.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p5-1", "p3-2"],
       "files": [
         "crates/poly-bot/src/strategy/mod.rs"

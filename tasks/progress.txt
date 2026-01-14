@@ -3129,3 +3129,53 @@ Notes for next task:
 - Risk manager is ready for integration with StrategyLoop
 - Can be used via trait object: Box<dyn RiskManager>
 - All managers implement Send + Sync for concurrent access
+
+---
+
+### [2026-01-14] Task p5-2: Implement directional execution
+
+Files modified:
+- crates/poly-bot/src/strategy/mod.rs (added execute_directional, calculate_maker_price, wired up DirectionalDetector)
+
+Implementation:
+- Added DirectionalDetector and ConfidenceSizer fields to StrategyLoop
+- Implemented calculate_maker_price() helper function:
+  - Wide spread (>3%): Place 40% from bid toward ask
+  - Medium spread (1-3%): Place 30% from bid toward ask
+  - Tight spread (<1%): Place at bid/ask
+  - Rounds to 2 decimal places for Polymarket ticks
+- Implemented execute_directional() method:
+  - Takes DirectionalOpportunity and total_size
+  - Calculates UP/DOWN sizes from signal ratios
+  - Calculates maker prices inside spread
+  - Places GTC orders for maker rebates
+  - Tracks volume metrics
+  - Records trades with ConfidenceSizer
+- Wired directional detection into check_opportunities():
+  - When no arb opportunity found, check for directional
+  - Updates spot price in MarketState
+  - Uses confidence-based sizing via ConfidenceFactors
+  - Only executes if size >= $1 minimum
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-bot: PASSED (775 tests, 6 new maker price tests)
+
+Tests added:
+- test_calculate_maker_price_wide_spread
+- test_calculate_maker_price_medium_spread
+- test_calculate_maker_price_tight_spread
+- test_calculate_maker_price_no_bid
+- test_calculate_maker_price_no_ask
+- test_calculate_maker_price_empty_book
+
+Key decisions:
+- Used GTC (Good-till-cancelled) order type for maker orders
+- Maker price placement uses spread-dependent positioning
+- Confidence sizing used for directional (not limit-based)
+- Directional trading falls back when arb not available
+
+Notes for next tasks:
+- p6-1 (MakerDetector) now unblocked
+- p7-3 (multi-engine integration) depends on p5-2 (done) and p6-2
+- Directional execution ready for production use

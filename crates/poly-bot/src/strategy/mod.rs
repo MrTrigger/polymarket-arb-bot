@@ -52,9 +52,9 @@ use crate::data_source::{
     BookDeltaEvent, BookSnapshotEvent, DataSource, DataSourceError, FillEvent, MarketEvent,
     SpotPriceEvent, WindowCloseEvent, WindowOpenEvent,
 };
-use crate::executor::{Executor, ExecutorError, OrderRequest};
+use crate::executor::{Executor, ExecutorError, OrderRequest, OrderType};
 use crate::state::GlobalState;
-use crate::types::{Inventory, MarketState};
+use crate::types::{Inventory, MarketState, OrderBook};
 
 pub use arb::{ArbDetector, ArbOpportunity, ArbRejection, ArbThresholds};
 pub use confidence::{
@@ -74,6 +74,62 @@ pub use toxic::{
 pub use directional::{
     DirectionalConfig, DirectionalDetector, DirectionalOpportunity, DirectionalSkipReason,
 };
+
+// ============================================================================
+// Maker Price Calculation
+// ============================================================================
+
+use rust_decimal_macros::dec;
+
+/// Calculate optimal maker price inside the spread.
+///
+/// The maker price is positioned inside the bid-ask spread based on spread width:
+/// - Wide spread (>3%): Place 40% from bid toward ask
+/// - Medium spread (1-3%): Place 30% from bid toward ask
+/// - Tight spread (<1%): Place at bid price
+///
+/// This ensures we're offering a better price than existing bids (for buys)
+/// while still capturing maker rebates.
+fn calculate_maker_price(book: &OrderBook, side: Side) -> Option<Decimal> {
+    let bid = book.best_bid()?;
+    let ask = book.best_ask()?;
+    let spread = ask - bid;
+    let mid = (bid + ask) / Decimal::TWO;
+
+    if mid <= Decimal::ZERO {
+        return None;
+    }
+
+    // Spread as a ratio of mid price
+    let spread_ratio = spread / mid;
+
+    // Determine placement based on spread width
+    let placement_ratio = if spread_ratio > dec!(0.03) {
+        // Wide spread (>3%): aggressive, 40% from bid
+        dec!(0.40)
+    } else if spread_ratio > dec!(0.01) {
+        // Medium spread (1-3%): moderate, 30% from bid
+        dec!(0.30)
+    } else {
+        // Tight spread (<1%): conservative, at bid
+        dec!(0.0)
+    };
+
+    match side {
+        Side::Buy => {
+            // For buying, we place above bid but below ask
+            let price = bid + (spread * placement_ratio);
+            // Round to 2 decimal places (Polymarket uses 0.01 ticks)
+            Some(price.round_dp(2))
+        }
+        Side::Sell => {
+            // For selling, we place below ask but above bid
+            let price = ask - (spread * placement_ratio);
+            // Round to 2 decimal places
+            Some(price.round_dp(2))
+        }
+    }
+}
 
 /// Errors that can occur in the strategy loop.
 #[derive(Debug, Error)]
@@ -243,10 +299,11 @@ impl StrategyConfig {
 /// 1. Receives events from a `DataSource`
 /// 2. Updates internal state (prices, books, inventory)
 /// 3. Detects arbitrage opportunities
-/// 4. Checks for toxic flow
-/// 5. Calculates position size
-/// 6. Submits orders via `Executor`
-/// 7. Sends decisions to observability channel
+/// 4. Detects directional opportunities
+/// 5. Checks for toxic flow
+/// 6. Calculates position size (confidence-based for directional)
+/// 7. Submits orders via `Executor`
+/// 8. Sends decisions to observability channel
 pub struct StrategyLoop<D: DataSource, E: Executor> {
     /// Data source for market events.
     data_source: D,
@@ -258,10 +315,14 @@ pub struct StrategyLoop<D: DataSource, E: Executor> {
     config: StrategyConfig,
     /// Arbitrage detector.
     arb_detector: ArbDetector,
+    /// Directional detector.
+    directional_detector: DirectionalDetector,
     /// Toxic flow detector.
     toxic_detector: ToxicFlowDetector,
-    /// Position sizer.
+    /// Position sizer (limit-based).
     sizer: PositionSizer,
+    /// Confidence-based sizer for directional trades.
+    confidence_sizer: ConfidenceSizer,
     /// Tracked markets by event_id.
     markets: HashMap<String, TrackedMarket>,
     /// Token ID to event ID mapping.
@@ -283,8 +344,11 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
         config: StrategyConfig,
     ) -> Self {
         let arb_detector = ArbDetector::new(config.arb_thresholds.clone());
+        let directional_detector = DirectionalDetector::new();
         let toxic_detector = ToxicFlowDetector::new(config.toxic_config.clone());
         let sizer = PositionSizer::new(config.sizing_config.clone());
+        // Create confidence sizer with the available balance from sizing config
+        let confidence_sizer = ConfidenceSizer::with_balance(config.sizing_config.base_order_size * Decimal::from(200u32));
 
         Self {
             data_source,
@@ -292,8 +356,10 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             state,
             config,
             arb_detector,
+            directional_detector,
             toxic_detector,
             sizer,
+            confidence_sizer,
             markets: HashMap::new(),
             token_to_event: HashMap::new(),
             spot_prices: HashMap::new(),
@@ -627,11 +693,38 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             }
 
             // Fast filter: check if there's potential arb
-            if !ArbDetector::has_potential_arb(&market.state) {
+            let has_arb = ArbDetector::has_potential_arb(&market.state);
+
+            // If no arb, check for directional opportunity
+            if !has_arb {
+                // Update spot price in market state if we have it
+                if let Some(&spot) = self.spot_prices.get(&market.state.asset) {
+                    market.state.spot_price = Some(spot);
+                }
+
+                // Try directional detection (uses state.spot_price)
+                if let Ok(dir_opp) = self.directional_detector.detect(&market.state) {
+                    // Calculate size using confidence-based sizing
+                    let factors = ConfidenceFactors {
+                        distance_to_strike: dir_opp.distance * market.state.strike_price,
+                        minutes_remaining: dir_opp.minutes_remaining,
+                        signal: dir_opp.signal,
+                        book_imbalance: dir_opp.yes_imbalance,
+                        favorable_depth: market.state.yes_book.ask_depth()
+                            .min(market.state.no_book.ask_depth()),
+                    };
+                    let order_result = self.confidence_sizer.get_order_size(&factors);
+                    let total_size = order_result.size;
+
+                    if total_size >= Decimal::ONE {
+                        let _action = self.execute_directional(&dir_opp, total_size).await?;
+                        // Note: Recording directional decisions is left for future enhancement
+                    }
+                }
                 continue;
             }
 
-            // Detect opportunity
+            // Detect arb opportunity
             let opportunity = match self.arb_detector.detect(&market.state) {
                 Ok(opp) => opp,
                 Err(reason) => {
@@ -788,6 +881,163 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             .try_into()
             .unwrap_or(0u64);
         self.state.metrics.add_volume_cents(volume_cents);
+
+        Ok(TradeAction::Execute)
+    }
+
+    /// Execute a directional trade based on signal.
+    ///
+    /// Places maker orders (GTC/post-only) to capture the directional signal
+    /// while earning maker rebates. The UP/DOWN allocation follows the signal
+    /// ratios from the directional opportunity.
+    ///
+    /// # Arguments
+    ///
+    /// * `opportunity` - The detected directional opportunity with signal ratios
+    /// * `total_size` - Total USDC to deploy across UP and DOWN
+    ///
+    /// # Returns
+    ///
+    /// The trade action taken (Execute, SkipSizing, etc.)
+    async fn execute_directional(
+        &mut self,
+        opportunity: &DirectionalOpportunity,
+        total_size: Decimal,
+    ) -> Result<TradeAction, StrategyError> {
+        let event_id = &opportunity.event_id;
+
+        // Get the tracked market for order book access
+        let market = match self.markets.get(event_id) {
+            Some(m) => m,
+            None => {
+                warn!("No tracked market for directional: {}", event_id);
+                return Ok(TradeAction::SkipSizing);
+            }
+        };
+
+        // Calculate UP and DOWN sizes based on signal ratios
+        let up_size = total_size * opportunity.up_ratio;
+        let down_size = total_size * opportunity.down_ratio;
+
+        // Get order books
+        let (yes_book, no_book) = (&market.state.yes_book, &market.state.no_book);
+
+        // Calculate maker prices (inside the spread)
+        let up_price = match calculate_maker_price(yes_book, Side::Buy) {
+            Some(p) => p,
+            None => {
+                debug!("Cannot calculate UP maker price for {}", event_id);
+                return Ok(TradeAction::SkipSizing);
+            }
+        };
+
+        let down_price = match calculate_maker_price(no_book, Side::Buy) {
+            Some(p) => p,
+            None => {
+                debug!("Cannot calculate DOWN maker price for {}", event_id);
+                return Ok(TradeAction::SkipSizing);
+            }
+        };
+
+        info!(
+            "Directional trade: {} signal={:?} distance={:.4}% conf={:.2}x up_size={} down_size={} up_price={} down_price={}",
+            event_id,
+            opportunity.signal,
+            opportunity.distance * Decimal::ONE_HUNDRED,
+            opportunity.confidence.total_multiplier(),
+            up_size,
+            down_size,
+            up_price,
+            down_price
+        );
+
+        // Generate request IDs
+        let req_id_base = self.decision_counter;
+        self.decision_counter += 1;
+
+        // Track total volume for metrics
+        let mut total_volume = Decimal::ZERO;
+
+        // Place UP (YES) order if size is significant
+        if up_size >= Decimal::ONE {
+            let up_order = OrderRequest {
+                request_id: format!("dir-{}-up", req_id_base),
+                event_id: event_id.clone(),
+                token_id: market.yes_token_id.clone(),
+                outcome: Outcome::Yes,
+                side: Side::Buy,
+                size: up_size,
+                price: Some(up_price),
+                order_type: OrderType::Gtc, // Good-till-cancelled for maker
+                timeout_ms: None,
+                timestamp: Utc::now(),
+            };
+
+            let up_result = self.executor.place_order(up_order).await;
+            match up_result {
+                Ok(result) if result.is_filled() => {
+                    let cost = result.filled_cost();
+                    total_volume += cost;
+                    debug!("UP order filled: {} shares @ {}", result.filled_size(), up_price);
+                }
+                Ok(result) => {
+                    debug!("UP order not filled: {:?}", result);
+                }
+                Err(e) => {
+                    warn!("UP order failed: {}", e);
+                    if self.state.record_failure(self.config.max_consecutive_failures) {
+                        self.state.trip_circuit_breaker();
+                        warn!("Circuit breaker tripped after consecutive failures");
+                    }
+                }
+            }
+        }
+
+        // Place DOWN (NO) order if size is significant
+        if down_size >= Decimal::ONE {
+            let down_order = OrderRequest {
+                request_id: format!("dir-{}-down", req_id_base),
+                event_id: event_id.clone(),
+                token_id: market.no_token_id.clone(),
+                outcome: Outcome::No,
+                side: Side::Buy,
+                size: down_size,
+                price: Some(down_price),
+                order_type: OrderType::Gtc, // Good-till-cancelled for maker
+                timeout_ms: None,
+                timestamp: Utc::now(),
+            };
+
+            let down_result = self.executor.place_order(down_order).await;
+            match down_result {
+                Ok(result) if result.is_filled() => {
+                    let cost = result.filled_cost();
+                    total_volume += cost;
+                    debug!("DOWN order filled: {} shares @ {}", result.filled_size(), down_price);
+                }
+                Ok(result) => {
+                    debug!("DOWN order not filled: {:?}", result);
+                }
+                Err(e) => {
+                    warn!("DOWN order failed: {}", e);
+                    if self.state.record_failure(self.config.max_consecutive_failures) {
+                        self.state.trip_circuit_breaker();
+                        warn!("Circuit breaker tripped after consecutive failures");
+                    }
+                }
+            }
+        }
+
+        // Record the trade in confidence sizer
+        if total_volume > Decimal::ZERO {
+            self.confidence_sizer.record_trade(total_volume);
+
+            // Update volume metrics
+            let volume_cents = (total_volume * Decimal::new(100, 0))
+                .try_into()
+                .unwrap_or(0u64);
+            self.state.metrics.add_volume_cents(volume_cents);
+        }
 
         Ok(TradeAction::Execute)
     }
@@ -1142,5 +1392,107 @@ mod tests {
         let json = serde_json::to_string(&decision).unwrap();
         assert!(json.contains("event1"));
         assert!(json.contains("Execute"));
+    }
+
+    // =========================================================================
+    // Maker Price Calculation Tests
+    // =========================================================================
+
+    #[test]
+    fn test_calculate_maker_price_wide_spread() {
+        // Wide spread (>3%): 40% from bid toward ask
+        let mut book = crate::types::OrderBook::new("test".to_string());
+        book.bids.push(PriceLevel::new(dec!(0.40), dec!(100))); // bid
+        book.asks.push(PriceLevel::new(dec!(0.50), dec!(100))); // ask
+        // spread = 0.10, mid = 0.45, spread_ratio = 0.10/0.45 = 22% > 3%
+
+        // Buy: price = bid + spread * 0.40 = 0.40 + 0.10 * 0.40 = 0.44
+        let buy_price = calculate_maker_price(&book, Side::Buy);
+        assert!(buy_price.is_some());
+        assert_eq!(buy_price.unwrap(), dec!(0.44));
+
+        // Sell: price = ask - spread * 0.40 = 0.50 - 0.10 * 0.40 = 0.46
+        let sell_price = calculate_maker_price(&book, Side::Sell);
+        assert!(sell_price.is_some());
+        assert_eq!(sell_price.unwrap(), dec!(0.46));
+    }
+
+    #[test]
+    fn test_calculate_maker_price_medium_spread() {
+        // Medium spread (1-3%): 30% from bid toward ask
+        let mut book = crate::types::OrderBook::new("test".to_string());
+        book.bids.push(PriceLevel::new(dec!(0.49), dec!(100))); // bid
+        book.asks.push(PriceLevel::new(dec!(0.51), dec!(100))); // ask
+        // spread = 0.02, mid = 0.50, spread_ratio = 0.02/0.50 = 4% -- wait that's > 3%
+        // Let me use different values
+        book.bids.clear();
+        book.asks.clear();
+        book.bids.push(PriceLevel::new(dec!(0.495), dec!(100))); // bid
+        book.asks.push(PriceLevel::new(dec!(0.505), dec!(100))); // ask
+        // spread = 0.01, mid = 0.50, spread_ratio = 0.01/0.50 = 2% (between 1-3%)
+
+        // Buy: price = bid + spread * 0.30 = 0.495 + 0.01 * 0.30 = 0.498
+        let buy_price = calculate_maker_price(&book, Side::Buy);
+        assert!(buy_price.is_some());
+        // Rounded to 2 decimal places: 0.50
+        assert_eq!(buy_price.unwrap(), dec!(0.50));
+
+        // Sell: price = ask - spread * 0.30 = 0.505 - 0.01 * 0.30 = 0.502
+        let sell_price = calculate_maker_price(&book, Side::Sell);
+        assert!(sell_price.is_some());
+        // Rounded to 2 decimal places: 0.50
+        assert_eq!(sell_price.unwrap(), dec!(0.50));
+    }
+
+    #[test]
+    fn test_calculate_maker_price_tight_spread() {
+        // Tight spread (<1%): at bid for buy, at ask for sell
+        let mut book = crate::types::OrderBook::new("test".to_string());
+        book.bids.push(PriceLevel::new(dec!(0.498), dec!(100))); // bid
+        book.asks.push(PriceLevel::new(dec!(0.502), dec!(100))); // ask
+        // spread = 0.004, mid = 0.50, spread_ratio = 0.004/0.50 = 0.8% < 1%
+
+        // Buy: price = bid + spread * 0 = bid = 0.498
+        let buy_price = calculate_maker_price(&book, Side::Buy);
+        assert!(buy_price.is_some());
+        // Rounded to 2 decimal places: 0.50
+        assert_eq!(buy_price.unwrap(), dec!(0.50));
+
+        // Sell: price = ask - spread * 0 = ask = 0.502
+        let sell_price = calculate_maker_price(&book, Side::Sell);
+        assert!(sell_price.is_some());
+        // Rounded to 2 decimal places: 0.50
+        assert_eq!(sell_price.unwrap(), dec!(0.50));
+    }
+
+    #[test]
+    fn test_calculate_maker_price_no_bid() {
+        let mut book = crate::types::OrderBook::new("test".to_string());
+        book.asks.push(PriceLevel::new(dec!(0.50), dec!(100)));
+        // No bids
+
+        let price = calculate_maker_price(&book, Side::Buy);
+        assert!(price.is_none());
+    }
+
+    #[test]
+    fn test_calculate_maker_price_no_ask() {
+        let mut book = crate::types::OrderBook::new("test".to_string());
+        book.bids.push(PriceLevel::new(dec!(0.45), dec!(100)));
+        // No asks
+
+        let price = calculate_maker_price(&book, Side::Buy);
+        assert!(price.is_none());
+    }
+
+    #[test]
+    fn test_calculate_maker_price_empty_book() {
+        let book = crate::types::OrderBook::new("test".to_string());
+
+        let price = calculate_maker_price(&book, Side::Buy);
+        assert!(price.is_none());
+
+        let price = calculate_maker_price(&book, Side::Sell);
+        assert!(price.is_none());
     }
 }
