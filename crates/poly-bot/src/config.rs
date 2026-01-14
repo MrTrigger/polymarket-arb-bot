@@ -242,6 +242,13 @@ impl Default for TradingConfig {
 /// Risk management parameters.
 #[derive(Debug, Clone)]
 pub struct RiskConfig {
+    /// Risk management mode: "circuit_breaker", "daily_pnl", or "both".
+    ///
+    /// - `circuit_breaker`: Lock-free atomic checks for consecutive failures (fastest).
+    /// - `daily_pnl`: P&L-based checks (daily loss, consecutive losses, hedge ratio).
+    /// - `both`: Combines both strategies (recommended for production).
+    pub risk_mode: String,
+
     /// Maximum consecutive failures before circuit breaker trips.
     pub max_consecutive_failures: u32,
 
@@ -264,6 +271,7 @@ pub struct RiskConfig {
 impl Default for RiskConfig {
     fn default() -> Self {
         Self {
+            risk_mode: "both".to_string(),
             max_consecutive_failures: 3,
             circuit_breaker_cooldown_secs: 300, // 5 minutes
             max_daily_loss: Decimal::new(500, 0), // $500
@@ -686,6 +694,7 @@ impl Default for SizingToml {
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 struct RiskToml {
+    risk_mode: String,
     max_consecutive_failures: u32,
     circuit_breaker_cooldown_secs: u64,
     max_daily_loss: f64,
@@ -697,6 +706,7 @@ struct RiskToml {
 impl Default for RiskToml {
     fn default() -> Self {
         Self {
+            risk_mode: "both".to_string(),
             max_consecutive_failures: 3,
             circuit_breaker_cooldown_secs: 300,
             max_daily_loss: 500.0,
@@ -843,6 +853,7 @@ impl From<TomlConfig> for BotConfig {
                 },
             },
             risk: RiskConfig {
+                risk_mode: toml.risk.risk_mode,
                 max_consecutive_failures: toml.risk.max_consecutive_failures,
                 circuit_breaker_cooldown_secs: toml.risk.circuit_breaker_cooldown_secs,
                 max_daily_loss: f64_to_decimal(toml.risk.max_daily_loss),

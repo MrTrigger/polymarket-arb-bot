@@ -3091,3 +3091,41 @@ Notes for next task (p4-2):
 - PnlRiskManager ready for RiskMode integration
 - Can be combined with CircuitBreaker via CompositeRiskChecker
 - Both check_trade() and can_trade() available for integration
+
+---
+
+### [2026-01-14 20:30] Task: Phase 4 - Add configurable risk mode (p4-2)
+
+Files created:
+- crates/poly-bot/src/risk/mode.rs (new: 1320 lines)
+
+Files modified:
+- crates/poly-bot/src/risk/mod.rs (added mode module export)
+- crates/poly-bot/src/config.rs (added risk_mode field to RiskConfig)
+- config/bot.toml (added risk_mode config option)
+
+Implementation:
+- Created RiskMode enum with CircuitBreaker, DailyPnl, Both variants
+- Created RiskManager trait with unified interface for risk checks
+- Implemented CircuitBreakerRiskManager (atomic, fast path)
+- Implemented PnlOnlyRiskManager (P&L-based checks)
+- Implemented CompositeRiskManager (combines both, recommended)
+- Added RiskCheckInput/RiskCheckOutput types for unified I/O
+- Added create_risk_manager() factory function
+- Added RiskModeConfig for configuration
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-bot risk::mode: PASSED (47 tests)
+- cargo test -p poly-bot: PASSED (all tests)
+
+Learnings:
+- Used RwLock for PnlRiskManager interior mutability (maintains thread safety)
+- Circuit breaker doesn't track trading P&L losses, only operational failures
+- CompositeRiskManager checks CB first (fast atomic) then P&L (full check)
+- RiskMode::Both is the recommended default for production
+
+Notes for next task:
+- Risk manager is ready for integration with StrategyLoop
+- Can be used via trait object: Box<dyn RiskManager>
+- All managers implement Send + Sync for concurrent access

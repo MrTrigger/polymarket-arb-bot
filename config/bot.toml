@@ -55,6 +55,12 @@ max_total_exposure = 5000.0
 base_order_size = 50.0
 
 [risk]
+# Risk management mode: "circuit_breaker", "daily_pnl", or "both"
+# - circuit_breaker: Lock-free atomic checks for consecutive failures (fastest)
+# - daily_pnl: P&L-based checks (daily loss, consecutive losses, hedge ratio)
+# - both: Combines both strategies (recommended for production)
+risk_mode = "both"
+
 # Circuit breaker settings
 max_consecutive_failures = 3
 circuit_breaker_cooldown_secs = 300  # 5 minutes

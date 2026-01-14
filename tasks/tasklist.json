@@ -169,11 +169,12 @@
       "id": "p4-2",
       "title": "Phase 4: Add configurable risk mode",
       "description": "Add RiskMode enum (CircuitBreaker, DailyPnl, Both). Create RiskChecker trait. Implement CompositeRiskChecker that runs both when mode is Both. Integrate with StrategyLoop pre-trade checks.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p4-1"],
       "files": [
         "crates/poly-bot/src/config.rs",
-        "crates/poly-bot/src/risk/mod.rs"
+        "crates/poly-bot/src/risk/mod.rs",
+        "crates/poly-bot/src/risk/mode.rs"
       ],
       "acceptance": [
         "cargo clippy -- -D warnings passes",
