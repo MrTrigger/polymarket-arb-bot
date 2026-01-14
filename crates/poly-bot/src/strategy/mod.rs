@@ -30,6 +30,7 @@
 pub mod arb;
 pub mod confidence;
 pub mod confidence_sizing;
+pub mod directional;
 pub mod signal;
 pub mod sizing;
 pub mod toxic;
@@ -69,6 +70,9 @@ pub use sizing::{
 };
 pub use toxic::{
     ToxicFlowConfig, ToxicFlowDetector, ToxicFlowWarning, ToxicIndicators, ToxicSeverity,
+};
+pub use directional::{
+    DirectionalConfig, DirectionalDetector, DirectionalOpportunity, DirectionalSkipReason,
 };
 
 /// Errors that can occur in the strategy loop.

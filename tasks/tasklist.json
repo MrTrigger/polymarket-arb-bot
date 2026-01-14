@@ -186,7 +186,7 @@
       "id": "p5-1",
       "title": "Phase 5: Implement DirectionalDetector",
       "description": "Create DirectionalDetector using Signal system. Create DirectionalOpportunity struct (signal, up_ratio, down_ratio, confidence). Implement detect() returning opportunity with correct allocation ratios. Add skip reasons.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p1-1", "p1-2"],
       "files": [
         "crates/poly-bot/src/strategy/directional.rs"
