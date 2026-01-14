@@ -439,6 +439,7 @@ async fn run_clob_connection(
 ) -> Result<(), DataSourceError> {
     let mut reconnect_delay = Duration::from_secs(1);
     let max_reconnect_delay = Duration::from_secs(60);
+    let mut logged_waiting = false;
 
     loop {
         if shutdown.try_recv().is_ok() {
@@ -446,12 +447,42 @@ async fn run_clob_connection(
             return Ok(());
         }
 
+        // Wait for markets before connecting - no point connecting with nothing to subscribe to
+        let token_ids = get_token_ids(&active_markets).await;
+        if token_ids.is_empty() {
+            if !logged_waiting {
+                info!("CLOB connection: waiting for markets to be discovered...");
+                logged_waiting = true;
+            }
+            // Poll for markets every 5 seconds
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(5)) => {
+                    continue;
+                }
+                _ = shutdown.recv() => {
+                    info!("CLOB connection: shutdown while waiting for markets");
+                    return Ok(());
+                }
+            }
+        }
+
+        // Markets available, reset the waiting flag
+        logged_waiting = false;
+
         match run_clob_session(&config, &tx, &active_markets, &mut shutdown).await {
             Ok(()) => {
                 info!("CLOB connection: clean shutdown");
                 return Ok(());
             }
             Err(e) => {
+                // Check if we still have markets - if not, go back to waiting state
+                let current_tokens = get_token_ids(&active_markets).await;
+                if current_tokens.is_empty() {
+                    debug!("CLOB connection closed, no active markets");
+                    reconnect_delay = Duration::from_secs(1);
+                    continue;
+                }
+
                 warn!("CLOB connection error: {}, reconnecting in {:?}", e, reconnect_delay);
 
                 tokio::select! {
