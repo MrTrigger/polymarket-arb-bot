@@ -30,7 +30,10 @@ pub mod state;
 pub mod strategy;
 pub mod types;
 
-pub use config::{BotConfig, ObservabilityConfig};
+pub use config::{
+    ArbitrageEngineConfig, BotConfig, DirectionalEngineConfig, EnginesConfig, MakerEngineConfig,
+    ObservabilityConfig,
+};
 pub use data_source::{
     BookDeltaEvent, BookSnapshotEvent, DataSource, DataSourceError, FillEvent, MarketEvent,
     SpotPriceEvent, WindowCloseEvent, WindowOpenEvent,

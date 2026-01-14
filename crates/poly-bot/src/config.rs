@@ -9,7 +9,9 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use poly_common::ClickHouseConfig;
 use rust_decimal::Decimal;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+
+use crate::types::EngineType;
 
 /// Top-level configuration for poly-bot.
 #[derive(Debug, Clone)]
@@ -46,6 +48,9 @@ pub struct BotConfig {
 
     /// Backtest-specific configuration.
     pub backtest: BacktestConfig,
+
+    /// Engine configuration (arbitrage, directional, maker).
+    pub engines: EnginesConfig,
 }
 
 /// Trading mode determines data source and executor.
@@ -426,6 +431,305 @@ impl Default for BacktestConfig {
     }
 }
 
+// ============================================================================
+// Engine Configuration
+// ============================================================================
+
+/// Configuration for all trading engines.
+///
+/// The bot supports three trading engines that can run in parallel:
+/// 1. **Arbitrage**: Buy both YES+NO when combined cost < $1 (risk-free profit)
+/// 2. **Directional**: Signal-based trading with asymmetric allocations
+/// 3. **Maker Rebates**: Passive limit orders to earn market maker rebates
+///
+/// Engines are evaluated in priority order, with higher-priority engines
+/// taking precedence when conflicts occur (e.g., arb opportunity during directional).
+#[derive(Debug, Clone)]
+pub struct EnginesConfig {
+    /// Arbitrage engine configuration.
+    pub arbitrage: ArbitrageEngineConfig,
+
+    /// Directional trading engine configuration.
+    pub directional: DirectionalEngineConfig,
+
+    /// Maker rebates engine configuration.
+    pub maker: MakerEngineConfig,
+
+    /// Engine priority for conflict resolution.
+    /// Lower index = higher priority. First engine wins on conflicts.
+    /// Default: [Arbitrage, Directional, MakerRebates]
+    pub priority: Vec<EngineType>,
+}
+
+impl Default for EnginesConfig {
+    fn default() -> Self {
+        Self {
+            arbitrage: ArbitrageEngineConfig::default(),
+            directional: DirectionalEngineConfig::default(),
+            maker: MakerEngineConfig::default(),
+            // Arbitrage has highest priority (risk-free), then directional, then maker
+            priority: vec![
+                EngineType::Arbitrage,
+                EngineType::Directional,
+                EngineType::MakerRebates,
+            ],
+        }
+    }
+}
+
+impl EnginesConfig {
+    /// Create a config with only arbitrage enabled (backward compatible).
+    pub fn arbitrage_only() -> Self {
+        Self {
+            arbitrage: ArbitrageEngineConfig::default(),
+            directional: DirectionalEngineConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            maker: MakerEngineConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            priority: vec![EngineType::Arbitrage],
+        }
+    }
+
+    /// Check if any engine is enabled.
+    pub fn any_enabled(&self) -> bool {
+        self.arbitrage.enabled || self.directional.enabled || self.maker.enabled
+    }
+
+    /// Get list of enabled engines in priority order.
+    pub fn enabled_engines(&self) -> Vec<EngineType> {
+        self.priority
+            .iter()
+            .filter(|e| match e {
+                EngineType::Arbitrage => self.arbitrage.enabled,
+                EngineType::Directional => self.directional.enabled,
+                EngineType::MakerRebates => self.maker.enabled,
+            })
+            .copied()
+            .collect()
+    }
+
+    /// Get the priority rank of an engine (0 = highest).
+    /// Returns None if engine is not in priority list.
+    pub fn get_priority(&self, engine: EngineType) -> Option<usize> {
+        self.priority.iter().position(|e| *e == engine)
+    }
+}
+
+/// Configuration for the arbitrage engine.
+///
+/// The arbitrage engine detects risk-free profit opportunities when
+/// YES + NO shares can be bought for less than $1.00 combined.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArbitrageEngineConfig {
+    /// Whether the arbitrage engine is enabled.
+    pub enabled: bool,
+
+    /// Minimum margin (bps) for early phase (>5 min remaining).
+    /// Higher margins required early due to uncertainty.
+    pub min_margin_early_bps: u32,
+
+    /// Minimum margin (bps) for mid phase (2-5 min remaining).
+    pub min_margin_mid_bps: u32,
+
+    /// Minimum margin (bps) for late phase (<2 min remaining).
+    /// Lower margins acceptable as outcome becomes certain.
+    pub min_margin_late_bps: u32,
+
+    /// Minimum confidence score (0-100) to accept opportunity.
+    pub min_confidence: u8,
+
+    /// Time boundary (seconds) between early and mid phase.
+    pub early_threshold_secs: u64,
+
+    /// Time boundary (seconds) between mid and late phase.
+    pub mid_threshold_secs: u64,
+}
+
+impl Default for ArbitrageEngineConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true, // Arbitrage enabled by default (backward compatible)
+            min_margin_early_bps: 250, // 2.5%
+            min_margin_mid_bps: 150,   // 1.5%
+            min_margin_late_bps: 50,   // 0.5%
+            min_confidence: 70,
+            early_threshold_secs: 300, // 5 minutes
+            mid_threshold_secs: 120,   // 2 minutes
+        }
+    }
+}
+
+/// Configuration for the directional trading engine.
+///
+/// The directional engine uses price signals (spot vs strike) to make
+/// asymmetric bets while still buying both sides for guaranteed payout.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DirectionalEngineConfig {
+    /// Whether the directional engine is enabled.
+    pub enabled: bool,
+
+    /// Minimum time remaining (seconds) to consider directional trades.
+    pub min_seconds_remaining: u64,
+
+    /// Maximum combined cost (as ratio of $1.00) to accept trade.
+    /// E.g., 0.995 means combined YES+NO cost must be < $0.995.
+    pub max_combined_cost: Decimal,
+
+    /// Maximum spread (bps) as ratio of price to accept.
+    /// E.g., 1000 = 10% maximum spread.
+    pub max_spread_bps: u32,
+
+    /// Minimum depth (USDC) required on favorable side.
+    pub min_favorable_depth: Decimal,
+
+    // --- Signal Thresholds ---
+    // The following thresholds control when signals are generated.
+    // These are distance from strike as percentage of strike price.
+
+    /// Strong signal threshold for late window (<1 min).
+    /// Default: 0.03% (30 bps)
+    pub strong_threshold_late_bps: u32,
+
+    /// Lean signal threshold for late window (<1 min).
+    /// Default: 0.01% (10 bps)
+    pub lean_threshold_late_bps: u32,
+
+    // --- Allocation Ratios ---
+    // Ratios for UP allocation based on signal strength.
+
+    /// UP allocation for StrongUp signal (as ratio 0-1).
+    /// Default: 0.78 (78% UP, 22% DOWN)
+    pub strong_up_ratio: Decimal,
+
+    /// UP allocation for LeanUp signal (as ratio 0-1).
+    /// Default: 0.60 (60% UP, 40% DOWN)
+    pub lean_up_ratio: Decimal,
+
+    /// UP allocation for Neutral signal (as ratio 0-1).
+    /// Default: 0.50 (50% UP, 50% DOWN)
+    pub neutral_ratio: Decimal,
+}
+
+impl Default for DirectionalEngineConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false, // Disabled by default (opt-in)
+            min_seconds_remaining: 60,
+            max_combined_cost: Decimal::new(995, 3), // 0.995
+            max_spread_bps: 1000, // 10%
+            min_favorable_depth: Decimal::new(100, 0), // $100
+            // Signal thresholds (in bps of strike)
+            strong_threshold_late_bps: 30, // 0.03%
+            lean_threshold_late_bps: 10,   // 0.01%
+            // Allocation ratios
+            strong_up_ratio: Decimal::new(78, 2),  // 0.78
+            lean_up_ratio: Decimal::new(60, 2),    // 0.60
+            neutral_ratio: Decimal::new(50, 2),    // 0.50
+        }
+    }
+}
+
+impl DirectionalEngineConfig {
+    /// Get the DOWN ratio for a given UP ratio.
+    #[inline]
+    pub fn down_ratio_for(&self, up_ratio: Decimal) -> Decimal {
+        Decimal::ONE - up_ratio
+    }
+
+    /// Get allocation ratios for StrongUp signal.
+    #[inline]
+    pub fn strong_up_allocation(&self) -> (Decimal, Decimal) {
+        (self.strong_up_ratio, self.down_ratio_for(self.strong_up_ratio))
+    }
+
+    /// Get allocation ratios for LeanUp signal.
+    #[inline]
+    pub fn lean_up_allocation(&self) -> (Decimal, Decimal) {
+        (self.lean_up_ratio, self.down_ratio_for(self.lean_up_ratio))
+    }
+
+    /// Get allocation ratios for StrongDown signal.
+    /// Inverts the StrongUp ratios.
+    #[inline]
+    pub fn strong_down_allocation(&self) -> (Decimal, Decimal) {
+        let (up, down) = self.strong_up_allocation();
+        (down, up)
+    }
+
+    /// Get allocation ratios for LeanDown signal.
+    /// Inverts the LeanUp ratios.
+    #[inline]
+    pub fn lean_down_allocation(&self) -> (Decimal, Decimal) {
+        let (up, down) = self.lean_up_allocation();
+        (down, up)
+    }
+}
+
+/// Configuration for the maker rebates engine.
+///
+/// The maker engine places passive limit orders to earn rebates from
+/// Polymarket's maker rewards program.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MakerEngineConfig {
+    /// Whether the maker engine is enabled.
+    pub enabled: bool,
+
+    /// Minimum time remaining (seconds) to place maker orders.
+    /// Orders need time to fill before window closes.
+    pub min_seconds_remaining: u64,
+
+    /// Minimum spread (bps) to place maker orders.
+    /// Below this, there's no room for profitable maker placement.
+    pub min_spread_bps: u32,
+
+    /// Maximum spread (bps) for maker strategy.
+    /// Above this, there's too much uncertainty.
+    pub max_spread_bps: u32,
+
+    /// Default order size (USDC) for maker orders.
+    pub default_order_size: Decimal,
+
+    /// Maximum book imbalance ratio (0-1) before skipping.
+    /// E.g., 0.80 means skip if one side is >80% of total.
+    pub max_imbalance_ratio: Decimal,
+
+    /// How far inside spread to place maker orders (bps from BBO).
+    /// E.g., 10 means place 10 bps inside the current bid/ask.
+    pub spread_inside_bps: u32,
+
+    /// Stale order threshold (milliseconds).
+    /// Orders older than this will be refreshed.
+    pub stale_threshold_ms: u64,
+
+    /// Price change threshold (bps) to refresh order.
+    /// If optimal price moved more than this, refresh the order.
+    pub price_refresh_threshold_bps: u32,
+
+    /// Maximum concurrent maker orders per market.
+    pub max_orders_per_market: u32,
+}
+
+impl Default for MakerEngineConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false, // Disabled by default (opt-in)
+            min_seconds_remaining: 120, // 2 minutes
+            min_spread_bps: 50,         // 0.5%
+            max_spread_bps: 1000,       // 10%
+            default_order_size: Decimal::new(50, 0), // $50
+            max_imbalance_ratio: Decimal::new(80, 2), // 0.80
+            spread_inside_bps: 10,       // 0.1% inside spread
+            stale_threshold_ms: 5000,    // 5 seconds
+            price_refresh_threshold_bps: 20, // 0.2%
+            max_orders_per_market: 4,
+        }
+    }
+}
+
 impl Default for BotConfig {
     fn default() -> Self {
         Self {
@@ -440,6 +744,7 @@ impl Default for BotConfig {
             observability: ObservabilityConfig::default(),
             wallet: WalletConfig::default(),
             backtest: BacktestConfig::default(),
+            engines: EnginesConfig::default(),
         }
     }
 }
@@ -589,6 +894,8 @@ struct TomlConfig {
     observability: ObservabilityToml,
     #[serde(default)]
     backtest: BacktestToml,
+    #[serde(default)]
+    engines: EnginesToml,
 }
 
 #[derive(Debug, Deserialize)]
@@ -805,6 +1112,136 @@ impl Default for BacktestToml {
     }
 }
 
+// --- Engine TOML structures ---
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+struct EnginesToml {
+    arbitrage: ArbitrageEngineToml,
+    directional: DirectionalEngineToml,
+    maker: MakerEngineToml,
+    /// Priority order: ["arbitrage", "directional", "maker"]
+    priority: Vec<String>,
+}
+
+impl Default for EnginesToml {
+    fn default() -> Self {
+        Self {
+            arbitrage: ArbitrageEngineToml::default(),
+            directional: DirectionalEngineToml::default(),
+            maker: MakerEngineToml::default(),
+            priority: vec![
+                "arbitrage".to_string(),
+                "directional".to_string(),
+                "maker".to_string(),
+            ],
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+struct ArbitrageEngineToml {
+    enabled: bool,
+    min_margin_early_bps: u32,
+    min_margin_mid_bps: u32,
+    min_margin_late_bps: u32,
+    min_confidence: u8,
+    early_threshold_secs: u64,
+    mid_threshold_secs: u64,
+}
+
+impl Default for ArbitrageEngineToml {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            min_margin_early_bps: 250,
+            min_margin_mid_bps: 150,
+            min_margin_late_bps: 50,
+            min_confidence: 70,
+            early_threshold_secs: 300,
+            mid_threshold_secs: 120,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+struct DirectionalEngineToml {
+    enabled: bool,
+    min_seconds_remaining: u64,
+    max_combined_cost: f64,
+    max_spread_bps: u32,
+    min_favorable_depth: f64,
+    strong_threshold_late_bps: u32,
+    lean_threshold_late_bps: u32,
+    strong_up_ratio: f64,
+    lean_up_ratio: f64,
+    neutral_ratio: f64,
+}
+
+impl Default for DirectionalEngineToml {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_seconds_remaining: 60,
+            max_combined_cost: 0.995,
+            max_spread_bps: 1000,
+            min_favorable_depth: 100.0,
+            strong_threshold_late_bps: 30,
+            lean_threshold_late_bps: 10,
+            strong_up_ratio: 0.78,
+            lean_up_ratio: 0.60,
+            neutral_ratio: 0.50,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+struct MakerEngineToml {
+    enabled: bool,
+    min_seconds_remaining: u64,
+    min_spread_bps: u32,
+    max_spread_bps: u32,
+    default_order_size: f64,
+    max_imbalance_ratio: f64,
+    spread_inside_bps: u32,
+    stale_threshold_ms: u64,
+    price_refresh_threshold_bps: u32,
+    max_orders_per_market: u32,
+}
+
+impl Default for MakerEngineToml {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_seconds_remaining: 120,
+            min_spread_bps: 50,
+            max_spread_bps: 1000,
+            default_order_size: 50.0,
+            max_imbalance_ratio: 0.80,
+            spread_inside_bps: 10,
+            stale_threshold_ms: 5000,
+            price_refresh_threshold_bps: 20,
+            max_orders_per_market: 4,
+        }
+    }
+}
+
+/// Parse engine priority from string list.
+fn parse_priority(priority: &[String]) -> Vec<EngineType> {
+    priority
+        .iter()
+        .filter_map(|s| match s.to_lowercase().as_str() {
+            "arbitrage" | "arb" => Some(EngineType::Arbitrage),
+            "directional" | "dir" => Some(EngineType::Directional),
+            "maker" | "maker_rebates" | "rebates" => Some(EngineType::MakerRebates),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Convert f64 percentage to Decimal ratio (e.g., 2.5 -> 0.025).
 fn pct_to_decimal(pct: f64) -> Decimal {
     Decimal::try_from(pct / 100.0).unwrap_or(Decimal::ZERO)
@@ -890,6 +1327,44 @@ impl From<TomlConfig> for BotConfig {
                 end_date: toml.backtest.end_date,
                 speed: toml.backtest.speed,
                 sweep_enabled: toml.backtest.sweep_enabled,
+            },
+            engines: EnginesConfig {
+                arbitrage: ArbitrageEngineConfig {
+                    enabled: toml.engines.arbitrage.enabled,
+                    min_margin_early_bps: toml.engines.arbitrage.min_margin_early_bps,
+                    min_margin_mid_bps: toml.engines.arbitrage.min_margin_mid_bps,
+                    min_margin_late_bps: toml.engines.arbitrage.min_margin_late_bps,
+                    min_confidence: toml.engines.arbitrage.min_confidence,
+                    early_threshold_secs: toml.engines.arbitrage.early_threshold_secs,
+                    mid_threshold_secs: toml.engines.arbitrage.mid_threshold_secs,
+                },
+                directional: DirectionalEngineConfig {
+                    enabled: toml.engines.directional.enabled,
+                    min_seconds_remaining: toml.engines.directional.min_seconds_remaining,
+                    max_combined_cost: f64_to_decimal(toml.engines.directional.max_combined_cost),
+                    max_spread_bps: toml.engines.directional.max_spread_bps,
+                    min_favorable_depth: f64_to_decimal(
+                        toml.engines.directional.min_favorable_depth,
+                    ),
+                    strong_threshold_late_bps: toml.engines.directional.strong_threshold_late_bps,
+                    lean_threshold_late_bps: toml.engines.directional.lean_threshold_late_bps,
+                    strong_up_ratio: f64_to_decimal(toml.engines.directional.strong_up_ratio),
+                    lean_up_ratio: f64_to_decimal(toml.engines.directional.lean_up_ratio),
+                    neutral_ratio: f64_to_decimal(toml.engines.directional.neutral_ratio),
+                },
+                maker: MakerEngineConfig {
+                    enabled: toml.engines.maker.enabled,
+                    min_seconds_remaining: toml.engines.maker.min_seconds_remaining,
+                    min_spread_bps: toml.engines.maker.min_spread_bps,
+                    max_spread_bps: toml.engines.maker.max_spread_bps,
+                    default_order_size: f64_to_decimal(toml.engines.maker.default_order_size),
+                    max_imbalance_ratio: f64_to_decimal(toml.engines.maker.max_imbalance_ratio),
+                    spread_inside_bps: toml.engines.maker.spread_inside_bps,
+                    stale_threshold_ms: toml.engines.maker.stale_threshold_ms,
+                    price_refresh_threshold_bps: toml.engines.maker.price_refresh_threshold_bps,
+                    max_orders_per_market: toml.engines.maker.max_orders_per_market,
+                },
+                priority: parse_priority(&toml.engines.priority),
             },
         }
     }
@@ -1188,5 +1663,260 @@ mod tests {
 
         // Base order size = $3,750 / 150 = $25.00
         assert_eq!(config.trading.sizing.base_order_size(), dec!(25));
+    }
+
+    // =========================================================================
+    // EnginesConfig tests
+    // =========================================================================
+
+    #[test]
+    fn test_engines_config_default() {
+        let config = EnginesConfig::default();
+
+        // Arbitrage enabled by default
+        assert!(config.arbitrage.enabled);
+        // Directional and maker disabled by default
+        assert!(!config.directional.enabled);
+        assert!(!config.maker.enabled);
+
+        // Default priority order
+        assert_eq!(config.priority.len(), 3);
+        assert_eq!(config.priority[0], EngineType::Arbitrage);
+        assert_eq!(config.priority[1], EngineType::Directional);
+        assert_eq!(config.priority[2], EngineType::MakerRebates);
+    }
+
+    #[test]
+    fn test_engines_config_arbitrage_only() {
+        let config = EnginesConfig::arbitrage_only();
+
+        assert!(config.arbitrage.enabled);
+        assert!(!config.directional.enabled);
+        assert!(!config.maker.enabled);
+        assert_eq!(config.priority.len(), 1);
+        assert_eq!(config.priority[0], EngineType::Arbitrage);
+    }
+
+    #[test]
+    fn test_engines_config_any_enabled() {
+        // All disabled
+        let mut config = EnginesConfig::default();
+        config.arbitrage.enabled = false;
+        config.directional.enabled = false;
+        config.maker.enabled = false;
+        assert!(!config.any_enabled());
+
+        // One enabled
+        config.directional.enabled = true;
+        assert!(config.any_enabled());
+    }
+
+    #[test]
+    fn test_engines_config_enabled_engines() {
+        let mut config = EnginesConfig::default();
+
+        // Default: only arbitrage enabled
+        let enabled = config.enabled_engines();
+        assert_eq!(enabled.len(), 1);
+        assert_eq!(enabled[0], EngineType::Arbitrage);
+
+        // Enable directional
+        config.directional.enabled = true;
+        let enabled = config.enabled_engines();
+        assert_eq!(enabled.len(), 2);
+        assert_eq!(enabled[0], EngineType::Arbitrage);
+        assert_eq!(enabled[1], EngineType::Directional);
+
+        // Enable maker too
+        config.maker.enabled = true;
+        let enabled = config.enabled_engines();
+        assert_eq!(enabled.len(), 3);
+    }
+
+    #[test]
+    fn test_engines_config_get_priority() {
+        let config = EnginesConfig::default();
+
+        assert_eq!(config.get_priority(EngineType::Arbitrage), Some(0));
+        assert_eq!(config.get_priority(EngineType::Directional), Some(1));
+        assert_eq!(config.get_priority(EngineType::MakerRebates), Some(2));
+    }
+
+    #[test]
+    fn test_arbitrage_engine_config_default() {
+        let config = ArbitrageEngineConfig::default();
+
+        assert!(config.enabled);
+        assert_eq!(config.min_margin_early_bps, 250);
+        assert_eq!(config.min_margin_mid_bps, 150);
+        assert_eq!(config.min_margin_late_bps, 50);
+        assert_eq!(config.min_confidence, 70);
+        assert_eq!(config.early_threshold_secs, 300);
+        assert_eq!(config.mid_threshold_secs, 120);
+    }
+
+    #[test]
+    fn test_directional_engine_config_default() {
+        let config = DirectionalEngineConfig::default();
+
+        assert!(!config.enabled);
+        assert_eq!(config.min_seconds_remaining, 60);
+        assert_eq!(config.max_combined_cost, dec!(0.995));
+        assert_eq!(config.max_spread_bps, 1000);
+        assert_eq!(config.min_favorable_depth, dec!(100));
+        assert_eq!(config.strong_up_ratio, dec!(0.78));
+        assert_eq!(config.lean_up_ratio, dec!(0.60));
+        assert_eq!(config.neutral_ratio, dec!(0.50));
+    }
+
+    #[test]
+    fn test_directional_engine_config_allocations() {
+        let config = DirectionalEngineConfig::default();
+
+        // Strong up: 78% UP, 22% DOWN
+        let (up, down) = config.strong_up_allocation();
+        assert_eq!(up, dec!(0.78));
+        assert_eq!(down, dec!(0.22));
+
+        // Strong down: 22% UP, 78% DOWN (inverted)
+        let (up, down) = config.strong_down_allocation();
+        assert_eq!(up, dec!(0.22));
+        assert_eq!(down, dec!(0.78));
+
+        // Lean up: 60% UP, 40% DOWN
+        let (up, down) = config.lean_up_allocation();
+        assert_eq!(up, dec!(0.60));
+        assert_eq!(down, dec!(0.40));
+
+        // Lean down: 40% UP, 60% DOWN (inverted)
+        let (up, down) = config.lean_down_allocation();
+        assert_eq!(up, dec!(0.40));
+        assert_eq!(down, dec!(0.60));
+    }
+
+    #[test]
+    fn test_maker_engine_config_default() {
+        let config = MakerEngineConfig::default();
+
+        assert!(!config.enabled);
+        assert_eq!(config.min_seconds_remaining, 120);
+        assert_eq!(config.min_spread_bps, 50);
+        assert_eq!(config.max_spread_bps, 1000);
+        assert_eq!(config.default_order_size, dec!(50));
+        assert_eq!(config.max_imbalance_ratio, dec!(0.80));
+        assert_eq!(config.spread_inside_bps, 10);
+        assert_eq!(config.stale_threshold_ms, 5000);
+        assert_eq!(config.price_refresh_threshold_bps, 20);
+        assert_eq!(config.max_orders_per_market, 4);
+    }
+
+    #[test]
+    fn test_parse_priority() {
+        // Standard names
+        let priority = parse_priority(&[
+            "arbitrage".to_string(),
+            "directional".to_string(),
+            "maker".to_string(),
+        ]);
+        assert_eq!(priority.len(), 3);
+        assert_eq!(priority[0], EngineType::Arbitrage);
+        assert_eq!(priority[1], EngineType::Directional);
+        assert_eq!(priority[2], EngineType::MakerRebates);
+
+        // Short names
+        let priority = parse_priority(&[
+            "arb".to_string(),
+            "dir".to_string(),
+            "rebates".to_string(),
+        ]);
+        assert_eq!(priority.len(), 3);
+        assert_eq!(priority[0], EngineType::Arbitrage);
+        assert_eq!(priority[1], EngineType::Directional);
+        assert_eq!(priority[2], EngineType::MakerRebates);
+
+        // Mixed case
+        let priority = parse_priority(&["ARB".to_string(), "DIRECTIONAL".to_string()]);
+        assert_eq!(priority.len(), 2);
+
+        // Invalid entries filtered
+        let priority = parse_priority(&[
+            "arbitrage".to_string(),
+            "invalid".to_string(),
+            "directional".to_string(),
+        ]);
+        assert_eq!(priority.len(), 2);
+    }
+
+    #[test]
+    fn test_engines_toml_parsing() {
+        let toml = r#"
+            [general]
+            mode = "paper"
+
+            [engines]
+            priority = ["directional", "arbitrage", "maker"]
+
+            [engines.arbitrage]
+            enabled = true
+            min_margin_early_bps = 300
+            min_margin_mid_bps = 200
+            min_margin_late_bps = 100
+
+            [engines.directional]
+            enabled = true
+            min_seconds_remaining = 120
+            max_spread_bps = 500
+            strong_up_ratio = 0.80
+            lean_up_ratio = 0.65
+
+            [engines.maker]
+            enabled = true
+            min_spread_bps = 100
+            default_order_size = 100.0
+        "#;
+
+        let config = BotConfig::from_toml_str(toml).unwrap();
+
+        // Priority order changed
+        assert_eq!(config.engines.priority[0], EngineType::Directional);
+        assert_eq!(config.engines.priority[1], EngineType::Arbitrage);
+        assert_eq!(config.engines.priority[2], EngineType::MakerRebates);
+
+        // Arbitrage config
+        assert!(config.engines.arbitrage.enabled);
+        assert_eq!(config.engines.arbitrage.min_margin_early_bps, 300);
+        assert_eq!(config.engines.arbitrage.min_margin_mid_bps, 200);
+        assert_eq!(config.engines.arbitrage.min_margin_late_bps, 100);
+
+        // Directional config
+        assert!(config.engines.directional.enabled);
+        assert_eq!(config.engines.directional.min_seconds_remaining, 120);
+        assert_eq!(config.engines.directional.max_spread_bps, 500);
+        assert_eq!(config.engines.directional.strong_up_ratio, dec!(0.80));
+        assert_eq!(config.engines.directional.lean_up_ratio, dec!(0.65));
+
+        // Maker config
+        assert!(config.engines.maker.enabled);
+        assert_eq!(config.engines.maker.min_spread_bps, 100);
+        assert_eq!(config.engines.maker.default_order_size, dec!(100));
+    }
+
+    #[test]
+    fn test_engines_default_toml_parsing() {
+        // Empty TOML should use defaults
+        let toml = r#"
+            [general]
+            mode = "shadow"
+        "#;
+
+        let config = BotConfig::from_toml_str(toml).unwrap();
+
+        // Default: only arbitrage enabled
+        assert!(config.engines.arbitrage.enabled);
+        assert!(!config.engines.directional.enabled);
+        assert!(!config.engines.maker.enabled);
+
+        // Default priority
+        assert_eq!(config.engines.priority[0], EngineType::Arbitrage);
     }
 }

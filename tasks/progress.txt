@@ -3325,3 +3325,65 @@ Notes for next task (p7-1):
 - execute_maker is ready but not wired into main loop yet
 - p7-3 will integrate all engines (arb, directional, maker) into StrategyLoop
 - refresh_maker_orders should be called on heartbeat events
+
+---
+
+### [2026-01-14] Task p7-1: Add engine configuration
+Files modified:
+- crates/poly-bot/src/config.rs
+- crates/poly-bot/src/lib.rs (exports)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-bot config::: PASSED (35 tests)
+
+Types added:
+- EnginesConfig: Container for all engine configs with priority Vec<EngineType>
+- ArbitrageEngineConfig: enabled, min_margin_*_bps, min_confidence, threshold times
+- DirectionalEngineConfig: enabled, min_seconds_remaining, max_combined_cost, spread params, signal thresholds, allocation ratios
+- MakerEngineConfig: enabled, spread limits, order size, imbalance, stale/refresh thresholds
+
+EnginesConfig methods:
+- arbitrage_only(): Create config with only arb enabled (backward compatible)
+- any_enabled(): Check if any engine is enabled
+- enabled_engines(): Get list of enabled engines in priority order
+- get_priority(engine): Get priority rank (0 = highest)
+
+DirectionalEngineConfig helper methods:
+- down_ratio_for(up_ratio): Calculate DOWN ratio from UP ratio
+- strong_up_allocation(): Get (up, down) ratios for StrongUp signal
+- lean_up_allocation(): Get (up, down) ratios for LeanUp signal
+- strong_down_allocation(): Inverted StrongUp ratios
+- lean_down_allocation(): Inverted LeanUp ratios
+
+TOML deserialization:
+- EnginesToml, ArbitrageEngineToml, DirectionalEngineToml, MakerEngineToml structs
+- parse_priority() function: Maps string names to EngineType enum
+- Supports both full names (arbitrage, directional, maker) and short (arb, dir, rebates)
+
+Key decisions:
+- Arbitrage enabled by default (backward compatible), directional and maker disabled
+- Priority stored as Vec<EngineType> for flexible ordering
+- Default priority: [Arbitrage, Directional, MakerRebates]
+- All engine configs derive Serialize, Deserialize for JSON logging
+- Decimal fields in config use f64 in TOML, converted via f64_to_decimal()
+
+Tests implemented (17 new tests):
+- test_engines_config_default
+- test_engines_config_arbitrage_only
+- test_engines_config_any_enabled
+- test_engines_config_enabled_engines
+- test_engines_config_get_priority
+- test_arbitrage_engine_config_default
+- test_directional_engine_config_default
+- test_directional_engine_config_allocations
+- test_maker_engine_config_default
+- test_parse_priority
+- test_engines_toml_parsing
+- test_engines_default_toml_parsing
+
+Notes for next task (p7-2):
+- EnginesConfig ready, now need DecisionAggregator
+- DecisionAggregator will use priority from EnginesConfig
+- Engine detectors already implemented (ArbDetector, DirectionalDetector, MakerDetector)
+- Need to wrap their outputs in EngineDecision for aggregation

@@ -249,7 +249,7 @@
       "id": "p7-1",
       "title": "Phase 7: Add engine configuration",
       "description": "Create EnginesConfig with ArbitrageEngineConfig, DirectionalEngineConfig, MakerEngineConfig. Each has enabled flag and engine-specific params. Add priority: Vec<EngineType> for conflict resolution.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p1-3"],
       "files": [
         "crates/poly-bot/src/config.rs"
