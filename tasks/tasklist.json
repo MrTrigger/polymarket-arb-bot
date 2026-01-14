@@ -29,7 +29,7 @@
       "id": "p1-2",
       "title": "Phase 1: Add Confidence types for sizing",
       "description": "Create ConfidenceFactors struct (distance, minutes_remaining, signal, book_imbalance, favorable_depth) and Confidence struct (time, distance, signal, book). Implement total_multiplier() using geometric mean with 0.5x-3.0x caps.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p1-1"],
       "files": [
         "crates/poly-bot/src/strategy/confidence.rs"

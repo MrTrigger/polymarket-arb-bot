@@ -2566,3 +2566,54 @@ Key decisions:
 Notes for next task:
 - p1-2 (Confidence types) depends on p1-1 (done)
 - Signal system ready for DirectionalDetector in Phase 5
+
+---
+
+### [2026-01-14] Task p1-2: Add Confidence types for sizing
+Files created:
+- crates/poly-bot/src/strategy/confidence.rs
+
+Files modified:
+- crates/poly-bot/src/strategy/mod.rs (added confidence module and exports)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-bot: PASSED (44 confidence tests)
+
+ConfidenceFactors struct:
+- distance_to_strike: Decimal (absolute dollars from strike)
+- minutes_remaining: Decimal
+- signal: Signal (from signal.rs)
+- book_imbalance: Decimal (-1.0 to +1.0)
+- favorable_depth: Decimal (in dollars)
+
+Confidence struct:
+- time: Decimal multiplier (0.6-1.6 range)
+- distance: Decimal multiplier (0.6-1.5 range)
+- signal: Decimal multiplier (0.7-1.4 range)
+- book: Decimal multiplier (0.9-1.44 range)
+- total_multiplier() using geometric mean with 0.5x-3.0x caps
+
+ConfidenceCalculator functions:
+- calculate(factors) -> Confidence
+- time_confidence(minutes, distance) - time × distance interaction
+- distance_confidence(distance) - distance from strike
+- signal_confidence(signal) - Signal strength
+- book_confidence(imbalance, depth) - order book factors
+
+Key decisions:
+- Geometric mean: (time × distance × signal × book)^0.25 × 1.5
+- Multiplier caps at MIN_MULTIPLIER (0.5x) and MAX_MULTIPLIER (3.0x)
+- Time confidence scales down if close to strike (distance modifier)
+- Book confidence combines imbalance and depth factors
+- All math uses Decimal, f64 only for power operation
+
+Tests verified:
+- All spec examples (weak/strong confidence scenarios)
+- All multiplier cap boundaries
+- All component calculation ranges
+- Serialization roundtrip
+
+Notes for next task:
+- p3-2 (ConfidenceSizer) depends on p1-2 (done)
+- Confidence types ready for dynamic order sizing
