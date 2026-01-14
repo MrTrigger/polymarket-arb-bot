@@ -6,7 +6,13 @@
 //! ## Modules
 //!
 //! - `fees`: Fee rate fetching with per-session caching
+//! - `rewards`: Maker rebate rewards fetching and tracking
 
 pub mod fees;
+pub mod rewards;
 
 pub use fees::{FeeRateClient, FeeRateError, FeeRateResponse};
+pub use rewards::{
+    CurrentRewardResponse, RewardsClient, RewardsConfig, RewardsError, TotalUserEarningResponse,
+    UserEarning,
+};

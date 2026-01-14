@@ -2703,3 +2703,58 @@ Key decisions:
 Notes for next task:
 - p2-2 (rewards client) depends on p2-1 (done)
 - Similar pattern: HTTP fetch + caching + response types
+
+---
+
+### [2026-01-14] Task p2-2: Add rewards client
+Files created:
+- crates/poly-bot/src/api/rewards.rs
+
+Files modified:
+- crates/poly-bot/src/api/mod.rs (added rewards module export)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-bot api::rewards: PASSED (19 tests)
+
+RewardsClient features:
+- fetch_current_rewards() -> Vec<CurrentRewardResponse>
+  - Fetches from GET /rewards/markets/current
+  - Returns active reward programs with configs
+- get_reward_config(condition_id) -> Option<RewardsConfig>
+  - Returns cached config or fetches and caches all
+  - In-memory cache per client instance
+- fetch_reward_percentages() -> HashMap<String, Decimal>
+  - Fetches from GET /rewards/user/percentages
+  - Returns user's share of daily rewards per market
+- fetch_user_earnings(date) -> TotalUserEarningResponse
+  - Fetches from GET /rewards/user/total?date=X
+  - Returns total and per-market earnings breakdown
+  - Validates date format (YYYY-MM-DD)
+- prefetch_configs() for cache warming
+- clear_cache() for session boundaries
+- cache_size() and is_cached() for introspection
+
+Types implemented:
+- CurrentRewardResponse: API response for market rewards config
+  - condition_id, rewards_daily_rate, rewards_min_size, rewards_max_spread, active
+  - is_active() checks both flag and non-zero rate
+- RewardsConfig: Simplified config for strategy use
+  - from_response() converter
+  - qualifies(size, spread_bps) checks eligibility
+- UserPercentagesResponse: Wrapper for percentage map
+- UserEarning: Single market earning entry
+- TotalUserEarningResponse: Date's total earnings with breakdown
+- RewardsError: HTTP, ApiError, Json, InvalidDate variants
+
+Key decisions:
+- Following same patterns as FeeRateClient (caching, error handling)
+- RewardsConfig is a simplified struct for strategy use vs full API response
+- qualifies() method makes it easy to check if an order earns rewards
+- Cache populated on first get_reward_config() call (lazy loading)
+- Date validation is simple format check (len=10, two dashes)
+
+Notes for next task (p2-3):
+- MarketSession needs to combine fee rate and reward config
+- Can use FeeRateClient and RewardsClient together
+- Consider adding MarketSession to TrackedMarket or as standalone

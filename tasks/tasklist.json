@@ -75,7 +75,7 @@
       "id": "p2-2",
       "title": "Phase 2: Add rewards client",
       "description": "Implement rewards API client with CurrentRewardResponse, RewardsConfig, UserEarningResponse types. Add fetch_current_rewards(), fetch_reward_percentages(), fetch_user_earnings() methods. Support periodic earnings tracking.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p2-1"],
       "files": [
         "crates/poly-bot/src/api/rewards.rs"
