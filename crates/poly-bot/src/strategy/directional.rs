@@ -552,8 +552,9 @@ mod tests {
     #[test]
     fn test_detect_lean_up_signal() {
         let detector = DirectionalDetector::new();
-        // 0.08% above strike at 5 minutes -> LeanUp
-        let mut state = create_test_market_state(Some(dec!(100080)), dec!(100000), 300);
+        // 0.02% above strike at 5 minutes (3-6 min bracket: strong=0.035%, lean=0.012%)
+        // 0.012% < 0.02% < 0.035% -> LeanUp
+        let mut state = create_test_market_state(Some(dec!(100020)), dec!(100000), 300);
         add_book_levels(&mut state, dec!(0.45), dec!(0.48), dec!(0.45), dec!(0.48));
 
         let result = detector.detect(&state);
@@ -584,8 +585,9 @@ mod tests {
     #[test]
     fn test_detect_lean_down_signal() {
         let detector = DirectionalDetector::new();
-        // 0.08% below strike at 5 minutes -> LeanDown
-        let mut state = create_test_market_state(Some(dec!(99920)), dec!(100000), 300);
+        // 0.02% below strike at 5 minutes (3-6 min bracket: strong=0.035%, lean=0.012%)
+        // 0.012% < 0.02% < 0.035% -> LeanDown
+        let mut state = create_test_market_state(Some(dec!(99980)), dec!(100000), 300);
         add_book_levels(&mut state, dec!(0.45), dec!(0.48), dec!(0.45), dec!(0.48));
 
         let result = detector.detect(&state);
@@ -744,13 +746,13 @@ mod tests {
     fn test_strong_signal_has_higher_confidence() {
         let detector = DirectionalDetector::new();
 
-        // Strong signal (0.3% distance)
-        let mut strong_state = create_test_market_state(Some(dec!(100300)), dec!(100000), 300);
+        // Strong signal (0.1% distance at 5 min, threshold=0.035% strong)
+        let mut strong_state = create_test_market_state(Some(dec!(100100)), dec!(100000), 300);
         add_book_levels(&mut strong_state, dec!(0.45), dec!(0.48), dec!(0.45), dec!(0.48));
         let strong_opp = detector.detect(&strong_state).unwrap();
 
-        // Lean signal (0.08% distance)
-        let mut lean_state = create_test_market_state(Some(dec!(100080)), dec!(100000), 300);
+        // Lean signal (0.02% distance at 5 min, threshold=0.012% lean, 0.035% strong)
+        let mut lean_state = create_test_market_state(Some(dec!(100020)), dec!(100000), 300);
         add_book_levels(&mut lean_state, dec!(0.45), dec!(0.48), dec!(0.45), dec!(0.48));
         let lean_opp = detector.detect(&lean_state).unwrap();
 
@@ -812,13 +814,13 @@ mod tests {
     fn test_all_signal_levels() {
         let detector = DirectionalDetector::new();
 
-        // Test each signal level with appropriate distance at 5 minutes
-        // Thresholds at 5 min: strong=0.15%, lean=0.05%
+        // Test each signal level with appropriate percentage distance at 5 minutes
+        // Thresholds at 3-6 min bracket: strong=0.035%, lean=0.012%
         let test_cases = [
-            (dec!(100200), Signal::StrongUp),   // 0.2% above -> StrongUp
-            (dec!(100070), Signal::LeanUp),     // 0.07% above -> LeanUp
-            (dec!(99800), Signal::StrongDown),  // 0.2% below -> StrongDown
-            (dec!(99930), Signal::LeanDown),    // 0.07% below -> LeanDown
+            (dec!(100050), Signal::StrongUp),   // 0.05% above -> StrongUp
+            (dec!(100020), Signal::LeanUp),     // 0.02% above -> LeanUp
+            (dec!(99950), Signal::StrongDown),  // 0.05% below -> StrongDown
+            (dec!(99980), Signal::LeanDown),    // 0.02% below -> LeanDown
         ];
 
         for (spot, expected_signal) in test_cases {
@@ -840,30 +842,30 @@ mod tests {
     fn test_signal_at_different_time_brackets() {
         let detector = DirectionalDetector::new();
 
-        // Same 0.05% distance, different time remaining
-        let spot = dec!(100050);
+        // Same 0.01% distance, different time remaining
+        let spot = dec!(100010);  // 0.01% above
         let strike = dec!(100000);
 
-        // At 12 min: strong=0.20%, lean=0.08%, 0.05% -> Neutral (skip)
-        let mut state_early = create_test_market_state(Some(spot), strike, 720);
+        // At 15 min (>12 min): strong=0.06%, lean=0.03%, 0.01% -> Neutral (skip)
+        let mut state_early = create_test_market_state(Some(spot), strike, 900);
         add_book_levels(&mut state_early, dec!(0.45), dec!(0.48), dec!(0.45), dec!(0.48));
         assert!(detector.detect(&state_early).is_err());
 
-        // At 3 min: strong=0.10%, lean=0.03%, 0.05% -> LeanUp
-        let mut state_mid = create_test_market_state(Some(spot), strike, 180);
+        // At 2 min (<3 min): strong=0.025%, lean=0.008%, 0.01% -> LeanUp
+        let mut state_mid = create_test_market_state(Some(spot), strike, 120);
         add_book_levels(&mut state_mid, dec!(0.45), dec!(0.48), dec!(0.45), dec!(0.48));
         let mid_result = detector.detect(&state_mid);
         assert!(mid_result.is_ok());
         assert_eq!(mid_result.unwrap().signal, Signal::LeanUp);
 
-        // At 0.5 min: strong=0.03%, lean=0.01%, 0.05% -> StrongUp
-        // But we have min 60 seconds, so use 61 seconds
-        let mut state_late = create_test_market_state(Some(spot), strike, 61);
+        // Use 0.03% distance at different time brackets to show Strong vs Lean
+        let spot2 = dec!(100030);  // 0.03% above
+
+        // At 2 min: strong=0.025%, lean=0.008%, 0.03% -> StrongUp
+        let mut state_late = create_test_market_state(Some(spot2), strike, 120);
         add_book_levels(&mut state_late, dec!(0.45), dec!(0.48), dec!(0.45), dec!(0.48));
         let late_result = detector.detect(&state_late);
         assert!(late_result.is_ok());
-        // At ~1 min, thresholds are: strong=0.05%, lean=0.02%
-        // 0.05% >= 0.05% strong -> StrongUp
         assert_eq!(late_result.unwrap().signal, Signal::StrongUp);
     }
 }

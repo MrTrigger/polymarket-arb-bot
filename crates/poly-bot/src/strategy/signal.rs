@@ -1,7 +1,7 @@
 //! Directional signal detection for binary options markets.
 //!
 //! This module implements signal-based directional trading:
-//! - Calculates distance from spot price to strike
+//! - Calculates distance from spot price to strike as a percentage
 //! - Uses time-based threshold selection for signal strength
 //! - Returns allocation ratios for UP/DOWN positions
 //!
@@ -18,12 +18,14 @@
 //!
 //! ## Time-Based Thresholds
 //!
+//! Thresholds use **percentage distance** from strike price,
+//! making them asset-agnostic (works for BTC, ETH, SOL, etc.).
 //! As time remaining decreases, smaller price differences become significant:
-//! - >10 min: Wide thresholds (less certainty)
-//! - 5-10 min: Medium thresholds
-//! - 2-5 min: Tighter thresholds
-//! - 1-2 min: Tight thresholds
-//! - <1 min: Very tight thresholds (high certainty)
+//! - >12 min: 0.030% lean / 0.060% strong (wide, less certainty)
+//! - 9-12 min: 0.025% lean / 0.050% strong
+//! - 6-9 min: 0.015% lean / 0.040% strong
+//! - 3-6 min: 0.012% lean / 0.035% strong
+//! - <3 min: 0.008% lean / 0.025% strong (tight, high certainty)
 
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -118,29 +120,32 @@ impl SignalThresholds {
 
 /// Get the signal thresholds based on minutes remaining.
 ///
-/// Time brackets and thresholds (distance as percentage of strike):
-/// - >10 min: Strong=0.20%, Lean=0.08% (wide, less certainty)
-/// - 5-10 min: Strong=0.15%, Lean=0.05%
-/// - 2-5 min: Strong=0.10%, Lean=0.03%
-/// - 1-2 min: Strong=0.05%, Lean=0.02%
-/// - <1 min: Strong=0.03%, Lean=0.01% (tight, high certainty)
+/// Time brackets and thresholds (percentage distance from strike):
+/// - >12 min: Strong=0.060%, Lean=0.030% (wide, less certainty)
+/// - 9-12 min: Strong=0.050%, Lean=0.025%
+/// - 6-9 min: Strong=0.040%, Lean=0.015%
+/// - 3-6 min: Strong=0.035%, Lean=0.012%
+/// - <3 min: Strong=0.025%, Lean=0.008% (tight, high certainty)
+///
+/// These percentage-based thresholds work across all assets (BTC, ETH, SOL, etc.)
+/// and have been calibrated via backtesting.
 #[inline]
 pub fn get_thresholds(minutes_remaining: Decimal) -> SignalThresholds {
-    if minutes_remaining > dec!(10) {
-        // Early: >10 min - wide thresholds
-        SignalThresholds::new(dec!(0.0020), dec!(0.0008))
-    } else if minutes_remaining > dec!(5) {
-        // Mid-early: 5-10 min
-        SignalThresholds::new(dec!(0.0015), dec!(0.0005))
-    } else if minutes_remaining > dec!(2) {
-        // Mid: 2-5 min
-        SignalThresholds::new(dec!(0.0010), dec!(0.0003))
-    } else if minutes_remaining > dec!(1) {
-        // Late: 1-2 min
-        SignalThresholds::new(dec!(0.0005), dec!(0.0002))
+    if minutes_remaining > dec!(12) {
+        // Early: >12 min - wide thresholds
+        SignalThresholds::new(dec!(0.0006), dec!(0.0003))
+    } else if minutes_remaining > dec!(9) {
+        // Mid-early: 9-12 min
+        SignalThresholds::new(dec!(0.0005), dec!(0.00025))
+    } else if minutes_remaining > dec!(6) {
+        // Mid: 6-9 min
+        SignalThresholds::new(dec!(0.0004), dec!(0.00015))
+    } else if minutes_remaining > dec!(3) {
+        // Late: 3-6 min
+        SignalThresholds::new(dec!(0.00035), dec!(0.00012))
     } else {
-        // Very late: <1 min - tight thresholds
-        SignalThresholds::new(dec!(0.0003), dec!(0.0001))
+        // Very late: <3 min - tight thresholds
+        SignalThresholds::new(dec!(0.00025), dec!(0.00008))
     }
 }
 
@@ -148,13 +153,13 @@ pub fn get_thresholds(minutes_remaining: Decimal) -> SignalThresholds {
 ///
 /// # Arguments
 ///
-/// * `spot_price` - Current spot price (e.g., BTC price)
+/// * `spot_price` - Current spot price (e.g., BTC, ETH, SOL price)
 /// * `strike_price` - Strike price for the market
 /// * `minutes_remaining` - Minutes remaining until settlement
 ///
 /// # Returns
 ///
-/// The detected `Signal` based on price distance and time-adjusted thresholds.
+/// The detected `Signal` based on percentage distance and time-adjusted thresholds.
 ///
 /// # Example
 ///
@@ -162,12 +167,12 @@ pub fn get_thresholds(minutes_remaining: Decimal) -> SignalThresholds {
 /// use rust_decimal_macros::dec;
 /// use poly_bot::strategy::signal::get_signal;
 ///
-/// let signal = get_signal(dec!(100500), dec!(100000), dec!(3));
-/// // With 0.5% distance and 3 minutes remaining -> likely StrongUp
+/// let signal = get_signal(dec!(95060), dec!(95000), dec!(5));
+/// // With 0.063% distance and 5 minutes remaining -> StrongUp (threshold is 0.035%)
 /// ```
 #[inline]
 pub fn get_signal(spot_price: Decimal, strike_price: Decimal, minutes_remaining: Decimal) -> Signal {
-    // Calculate distance as a ratio of strike price
+    // Calculate percentage distance from strike
     // distance = (spot - strike) / strike
     let distance = if strike_price.is_zero() {
         Decimal::ZERO
@@ -303,70 +308,70 @@ mod tests {
     }
 
     // =========================================================================
-    // Threshold Tests (5 Time Brackets)
+    // Threshold Tests (5 Time Brackets) - Percentage thresholds
     // =========================================================================
 
     #[test]
     fn test_thresholds_early_bracket() {
-        // >10 minutes
-        let thresholds = get_thresholds(dec!(12));
-        assert_eq!(thresholds.strong, dec!(0.0020));
-        assert_eq!(thresholds.lean, dec!(0.0008));
-    }
-
-    #[test]
-    fn test_thresholds_mid_early_bracket() {
-        // 5-10 minutes
-        let thresholds = get_thresholds(dec!(7));
-        assert_eq!(thresholds.strong, dec!(0.0015));
-        assert_eq!(thresholds.lean, dec!(0.0005));
-    }
-
-    #[test]
-    fn test_thresholds_mid_bracket() {
-        // 2-5 minutes
-        let thresholds = get_thresholds(dec!(3));
-        assert_eq!(thresholds.strong, dec!(0.0010));
+        // >12 minutes: 0.060% strong, 0.030% lean
+        let thresholds = get_thresholds(dec!(15));
+        assert_eq!(thresholds.strong, dec!(0.0006));
         assert_eq!(thresholds.lean, dec!(0.0003));
     }
 
     #[test]
-    fn test_thresholds_late_bracket() {
-        // 1-2 minutes
-        let thresholds = get_thresholds(dec!(1.5));
+    fn test_thresholds_mid_early_bracket() {
+        // 9-12 minutes: 0.050% strong, 0.025% lean
+        let thresholds = get_thresholds(dec!(10));
         assert_eq!(thresholds.strong, dec!(0.0005));
-        assert_eq!(thresholds.lean, dec!(0.0002));
+        assert_eq!(thresholds.lean, dec!(0.00025));
+    }
+
+    #[test]
+    fn test_thresholds_mid_bracket() {
+        // 6-9 minutes: 0.040% strong, 0.015% lean
+        let thresholds = get_thresholds(dec!(7));
+        assert_eq!(thresholds.strong, dec!(0.0004));
+        assert_eq!(thresholds.lean, dec!(0.00015));
+    }
+
+    #[test]
+    fn test_thresholds_late_bracket() {
+        // 3-6 minutes: 0.035% strong, 0.012% lean
+        let thresholds = get_thresholds(dec!(4));
+        assert_eq!(thresholds.strong, dec!(0.00035));
+        assert_eq!(thresholds.lean, dec!(0.00012));
     }
 
     #[test]
     fn test_thresholds_very_late_bracket() {
-        // <1 minute
-        let thresholds = get_thresholds(dec!(0.5));
-        assert_eq!(thresholds.strong, dec!(0.0003));
-        assert_eq!(thresholds.lean, dec!(0.0001));
+        // <3 minutes: 0.025% strong, 0.008% lean
+        let thresholds = get_thresholds(dec!(2));
+        assert_eq!(thresholds.strong, dec!(0.00025));
+        assert_eq!(thresholds.lean, dec!(0.00008));
     }
 
     #[test]
     fn test_thresholds_boundary_values() {
-        // At exactly 10 min -> mid-early bracket
-        let at_10 = get_thresholds(dec!(10));
-        assert_eq!(at_10.strong, dec!(0.0015));
+        // At exactly 12 min -> mid-early bracket
+        let at_12 = get_thresholds(dec!(12));
+        assert_eq!(at_12.strong, dec!(0.0005));
 
-        // At exactly 5 min -> mid bracket
-        let at_5 = get_thresholds(dec!(5));
-        assert_eq!(at_5.strong, dec!(0.0010));
+        // At exactly 9 min -> mid bracket
+        let at_9 = get_thresholds(dec!(9));
+        assert_eq!(at_9.strong, dec!(0.0004));
 
-        // At exactly 2 min -> late bracket
-        let at_2 = get_thresholds(dec!(2));
-        assert_eq!(at_2.strong, dec!(0.0005));
+        // At exactly 6 min -> late bracket
+        let at_6 = get_thresholds(dec!(6));
+        assert_eq!(at_6.strong, dec!(0.00035));
 
-        // At exactly 1 min -> very late bracket
-        let at_1 = get_thresholds(dec!(1));
-        assert_eq!(at_1.strong, dec!(0.0003));
+        // At exactly 3 min -> very late bracket
+        let at_3 = get_thresholds(dec!(3));
+        assert_eq!(at_3.strong, dec!(0.00025));
     }
 
     // =========================================================================
-    // Signal Detection Tests
+    // Signal Detection Tests - Percentage distance
     // =========================================================================
 
     #[test]
@@ -377,9 +382,10 @@ mod tests {
 
     #[test]
     fn test_get_signal_strong_up() {
-        // 0.25% above strike with 5 minutes remaining
-        // Thresholds at 5 min: strong=0.15%, lean=0.05%
-        let spot = dec!(100250);
+        // 0.05% above strike with 5 minutes (3-6 min bracket)
+        // Thresholds at 3-6 min: strong=0.035%, lean=0.012%
+        // 0.05% > 0.035% -> StrongUp
+        let spot = dec!(100050);  // 0.05% above
         let strike = dec!(100000);
         let signal = get_signal(spot, strike, dec!(5));
         assert_eq!(signal, Signal::StrongUp);
@@ -387,9 +393,10 @@ mod tests {
 
     #[test]
     fn test_get_signal_lean_up() {
-        // 0.08% above strike with 5 minutes remaining
-        // Thresholds at 5 min: strong=0.15%, lean=0.05%
-        let spot = dec!(100080);
+        // 0.02% above strike with 5 minutes (3-6 min bracket)
+        // Thresholds at 3-6 min: strong=0.035%, lean=0.012%
+        // 0.012% < 0.02% < 0.035% -> LeanUp
+        let spot = dec!(100020);  // 0.02% above
         let strike = dec!(100000);
         let signal = get_signal(spot, strike, dec!(5));
         assert_eq!(signal, Signal::LeanUp);
@@ -397,8 +404,8 @@ mod tests {
 
     #[test]
     fn test_get_signal_strong_down() {
-        // 0.25% below strike with 5 minutes remaining
-        let spot = dec!(99750);
+        // 0.05% below strike with 5 minutes
+        let spot = dec!(99950);  // 0.05% below
         let strike = dec!(100000);
         let signal = get_signal(spot, strike, dec!(5));
         assert_eq!(signal, Signal::StrongDown);
@@ -406,8 +413,8 @@ mod tests {
 
     #[test]
     fn test_get_signal_lean_down() {
-        // 0.08% below strike with 5 minutes remaining
-        let spot = dec!(99920);
+        // 0.02% below strike with 5 minutes
+        let spot = dec!(99980);  // 0.02% below
         let strike = dec!(100000);
         let signal = get_signal(spot, strike, dec!(5));
         assert_eq!(signal, Signal::LeanDown);
@@ -415,10 +422,10 @@ mod tests {
 
     #[test]
     fn test_get_signal_neutral_within_lean_threshold() {
-        // 0.02% above strike with 5 minutes remaining
-        // Thresholds at 5 min: strong=0.15%, lean=0.05%
-        // 0.02% < 0.05% -> Neutral
-        let spot = dec!(100020);
+        // 0.005% above strike with 5 minutes (3-6 min bracket)
+        // Thresholds at 3-6 min: strong=0.035%, lean=0.012%
+        // 0.005% < 0.012% -> Neutral
+        let spot = dec!(100005);  // 0.005% above
         let strike = dec!(100000);
         let signal = get_signal(spot, strike, dec!(5));
         assert_eq!(signal, Signal::Neutral);
@@ -426,38 +433,38 @@ mod tests {
 
     #[test]
     fn test_get_signal_time_sensitivity() {
-        // Same 0.05% distance, different time remaining
-        let spot = dec!(100050);
+        // Same 0.03% distance, different time remaining
+        let spot = dec!(100030);  // 0.03% above
         let strike = dec!(100000);
 
-        // At 12 min: strong=0.20%, lean=0.08%, 0.05% -> Neutral
-        let signal_early = get_signal(spot, strike, dec!(12));
-        assert_eq!(signal_early, Signal::Neutral);
+        // At 15 min: strong=0.06%, lean=0.03%, 0.03% -> LeanUp (at boundary)
+        let signal_early = get_signal(spot, strike, dec!(15));
+        assert_eq!(signal_early, Signal::LeanUp);
 
-        // At 3 min: strong=0.10%, lean=0.03%, 0.05% -> LeanUp
-        let signal_mid = get_signal(spot, strike, dec!(3));
+        // At 5 min: strong=0.035%, lean=0.012%, 0.03% -> LeanUp
+        let signal_mid = get_signal(spot, strike, dec!(5));
         assert_eq!(signal_mid, Signal::LeanUp);
 
-        // At 0.5 min: strong=0.03%, lean=0.01%, 0.05% -> StrongUp
-        let signal_late = get_signal(spot, strike, dec!(0.5));
+        // At 1 min: strong=0.025%, lean=0.008%, 0.03% -> StrongUp
+        let signal_late = get_signal(spot, strike, dec!(1));
         assert_eq!(signal_late, Signal::StrongUp);
     }
 
     #[test]
     fn test_get_signal_zero_strike_price() {
-        // Edge case: zero strike should return Neutral
+        // Edge case: zero strike returns Neutral (division by zero protection)
         let signal = get_signal(dec!(100000), dec!(0), dec!(5));
         assert_eq!(signal, Signal::Neutral);
     }
 
     #[test]
     fn test_get_signal_zero_minutes() {
-        // At 0 minutes, use very late thresholds
-        let spot = dec!(100020);
+        // At 0 minutes, use very late thresholds (0.025%/0.008%)
+        let spot = dec!(100015);  // 0.015% above
         let strike = dec!(100000);
         let signal = get_signal(spot, strike, dec!(0));
-        // 0.02% distance, very late threshold: strong=0.03%, lean=0.01%
-        // 0.02% >= 0.01% lean -> LeanUp
+        // 0.015% distance, very late threshold: strong=0.025%, lean=0.008%
+        // 0.015% >= 0.008% lean but < 0.025% strong -> LeanUp
         assert_eq!(signal, Signal::LeanUp);
     }
 
