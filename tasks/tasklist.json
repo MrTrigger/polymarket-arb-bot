@@ -152,7 +152,7 @@
       "id": "p4-1",
       "title": "Phase 4: Implement PnlRiskManager",
       "description": "Create PnlRiskManager with daily_pnl, consecutive_losses, trading_enabled tracking. Implement check_trade() returning TradeDecision (Approve/Reject/ReduceSize/RebalanceRequired). Add daily loss limit (10%), consecutive loss stop (3), hedge ratio check (20%).",
-      "status": "pending",
+      "status": "completed",
       "depends": ["p1-3"],
       "files": [
         "crates/poly-bot/src/risk/pnl.rs",

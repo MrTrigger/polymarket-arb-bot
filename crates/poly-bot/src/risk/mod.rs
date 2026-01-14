@@ -19,6 +19,7 @@
 pub mod checks;
 pub mod circuit_breaker;
 pub mod leg_risk;
+pub mod pnl;
 
 pub use checks::{
     PreTradeCheck, PreTradeRejection, RiskCheckConfig, RiskCheckResult, RiskChecker,
@@ -31,3 +32,4 @@ pub use leg_risk::{
     ChaseReason, CloseReason, LegRiskAction, LegRiskAssessment, LegRiskConfig, LegRiskManager,
     LegState, LegStatus,
 };
+pub use pnl::{PnlRejectionReason, PnlRiskConfig, PnlRiskManager, PnlRiskStats};

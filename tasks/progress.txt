@@ -3027,3 +3027,67 @@ Notes for next task (p4-1):
 - Sizing strategy system complete
 - PnlRiskManager can use TradeDecision enum from p1-3
 - Risk checking separate from sizing (different concern)
+
+---
+
+### [2026-01-14] Task p4-1: Implement PnlRiskManager
+Files created:
+- crates/poly-bot/src/risk/pnl.rs
+
+Files modified:
+- crates/poly-bot/src/risk/mod.rs (added pnl module export)
+
+Verification:
+- cargo clippy -- -D warnings: PASSED
+- cargo test -p poly-bot risk::pnl: PASSED (48 tests)
+
+PnlRiskConfig features:
+- available_balance: Total trading capital
+- max_daily_loss_ratio: Default 0.10 (10%)
+- max_consecutive_losses: Default 3
+- min_hedge_ratio: Default 0.20 (20%)
+- warning_size_reduction: 50% size reduction when approaching limits
+- warning_threshold: Trigger warning at 75% of daily limit
+- daily_loss_limit(): Calculates absolute limit from balance
+
+PnlRiskManager methods:
+- check_trade(position, proposed_size) -> TradeDecision
+  - Returns Approve, Reject, ReduceSize, or RebalanceRequired
+  - Checks trading enabled, daily loss, consecutive losses, hedge ratio
+- can_trade(): Fast path check (~10ns)
+- record_trade(pnl): Update daily P&L and counters
+- record_trades(pnls): Batch processing
+- reset_daily(): Start of new trading day
+- reset_consecutive_losses(): Manual intervention
+- enable_trading()/disable_trading(): Manual control
+- update_balance(): After deposit/withdrawal
+- stats(): Get PnlRiskStats for logging
+
+TradeDecision integration:
+- Uses TradeDecision enum from types.rs (p1-3)
+- Approve: Trade can proceed
+- Reject { reason }: Trade blocked with message
+- ReduceSize { max_allowed }: Approaching limit, reduce size
+- RebalanceRequired { current_ratio, target_ratio }: Hedge ratio too low
+
+Risk rules implemented:
+1. Daily loss limit: 10% of available_balance
+2. Consecutive losses: Stop after 3 in a row
+3. Hedge ratio: Require rebalance below 20%
+4. Warning zone: Reduce size by 50% when loss >= 75% of limit
+
+Auto-disable behavior:
+- Trading auto-disabled when daily limit hit
+- Trading auto-disabled when 3 consecutive losses
+- Manual reset_consecutive_losses() re-enables if daily limit OK
+
+Key decisions:
+- PnlRiskManager tracks per-session state (not persistent)
+- Uses Position type for hedge ratio check
+- Warning threshold at 75% triggers size reduction (not rejection)
+- Stats struct for observability/logging
+
+Notes for next task (p4-2):
+- PnlRiskManager ready for RiskMode integration
+- Can be combined with CircuitBreaker via CompositeRiskChecker
+- Both check_trade() and can_trade() available for integration
