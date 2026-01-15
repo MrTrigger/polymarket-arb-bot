@@ -140,3 +140,136 @@ CREATE TABLE IF NOT EXISTS anomalies (
 ORDER BY (anomaly_type, timestamp)
 PARTITION BY toYYYYMMDD(timestamp)
 TTL toDate(timestamp) + INTERVAL 90 DAY;
+
+-- ============================================================================
+-- Dashboard Tables (for React dashboard frontend)
+-- ============================================================================
+
+-- Bot sessions (tracks each bot run)
+CREATE TABLE IF NOT EXISTS sessions (
+    session_id UUID,
+    mode LowCardinality(String),           -- 'live', 'paper', 'shadow', 'backtest'
+    start_time DateTime64(3, 'UTC'),
+    end_time Nullable(DateTime64(3, 'UTC')),
+    config_hash String,                     -- SHA256 of config for reproducibility
+    -- Aggregates (updated periodically and on shutdown)
+    total_pnl Decimal(18, 8),
+    total_volume Decimal(18, 8),
+    trades_executed UInt32,
+    trades_failed UInt32,
+    trades_skipped UInt32,
+    opportunities_detected UInt64,
+    events_processed UInt64,
+    markets_traded Array(String),           -- List of event_ids
+    exit_reason LowCardinality(String)      -- 'graceful', 'crash', 'circuit_breaker', 'manual'
+) ENGINE = ReplacingMergeTree(start_time)
+ORDER BY (session_id)
+PARTITION BY toYYYYMM(start_time);
+
+-- Bot trades (all trades executed by the bot)
+CREATE TABLE IF NOT EXISTS bot_trades (
+    trade_id UUID,
+    session_id UUID,
+    decision_id UInt64,
+    event_id String,
+    token_id String,
+    outcome LowCardinality(String),         -- 'YES', 'NO'
+    side LowCardinality(String),            -- 'BUY', 'SELL'
+    order_type LowCardinality(String),      -- 'MARKET', 'LIMIT', 'SHADOW'
+    -- Order details
+    requested_price Decimal(18, 8),
+    requested_size Decimal(18, 8),
+    -- Fill details
+    fill_price Decimal(18, 8),
+    fill_size Decimal(18, 8),
+    slippage_bps Int32,
+    -- Costs
+    fees Decimal(18, 8),
+    total_cost Decimal(18, 8),
+    -- Timing
+    order_time DateTime64(3, 'UTC'),
+    fill_time DateTime64(3, 'UTC'),
+    latency_ms UInt32,
+    -- Context
+    spot_price_at_fill Decimal(18, 8),
+    arb_margin_at_fill Decimal(18, 8),
+    -- Status
+    status LowCardinality(String)           -- 'FILLED', 'PARTIAL', 'CANCELLED', 'FAILED'
+) ENGINE = MergeTree()
+ORDER BY (session_id, fill_time, trade_id)
+PARTITION BY toYYYYMMDD(fill_time)
+TTL toDate(fill_time) + INTERVAL 365 DAY;
+
+-- PnL snapshots (for equity curve visualization)
+CREATE TABLE IF NOT EXISTS pnl_snapshots (
+    session_id UUID,
+    timestamp DateTime64(3, 'UTC'),
+    trigger LowCardinality(String),         -- 'periodic', 'trade', 'settlement'
+    -- P&L
+    realized_pnl Decimal(18, 8),
+    unrealized_pnl Decimal(18, 8),
+    total_pnl Decimal(18, 8),
+    -- Exposure
+    total_exposure Decimal(18, 8),
+    yes_exposure Decimal(18, 8),
+    no_exposure Decimal(18, 8),
+    -- Cumulative
+    cumulative_volume Decimal(18, 8),
+    cumulative_fees Decimal(18, 8),
+    trade_count UInt32,
+    -- Risk
+    max_drawdown Decimal(18, 8),
+    current_drawdown Decimal(18, 8)
+) ENGINE = MergeTree()
+ORDER BY (session_id, timestamp)
+PARTITION BY toYYYYMMDD(timestamp)
+TTL toDate(timestamp) + INTERVAL 180 DAY;
+
+-- Structured logs (searchable logs for debugging)
+CREATE TABLE IF NOT EXISTS structured_logs (
+    session_id UUID,
+    timestamp DateTime64(3, 'UTC'),
+    level LowCardinality(String),           -- 'ERROR', 'WARN', 'INFO', 'DEBUG', 'TRACE'
+    target String,                          -- Module path (e.g., 'poly_bot::strategy::arb')
+    message String,
+    -- Optional context
+    event_id Nullable(String),
+    token_id Nullable(String),
+    trade_id Nullable(UUID),
+    -- Structured fields (JSON for flexibility)
+    fields String                           -- JSON object with additional context
+) ENGINE = MergeTree()
+ORDER BY (session_id, timestamp)
+PARTITION BY toYYYYMMDD(timestamp)
+TTL toDate(timestamp) + INTERVAL 30 DAY;
+
+-- Market sessions (per-market metrics within a session)
+CREATE TABLE IF NOT EXISTS market_sessions (
+    session_id UUID,
+    event_id String,
+    asset LowCardinality(String),
+    strike_price Decimal(18, 8),
+    window_start DateTime64(3, 'UTC'),
+    window_end DateTime64(3, 'UTC'),
+    -- Entry
+    first_trade_time Nullable(DateTime64(3, 'UTC')),
+    -- Position
+    yes_shares Decimal(18, 8),
+    no_shares Decimal(18, 8),
+    yes_cost_basis Decimal(18, 8),
+    no_cost_basis Decimal(18, 8),
+    -- P&L
+    realized_pnl Decimal(18, 8),
+    unrealized_pnl Decimal(18, 8),
+    -- Stats
+    trades_count UInt32,
+    opportunities_count UInt32,
+    skipped_count UInt32,
+    volume Decimal(18, 8),
+    fees Decimal(18, 8),
+    -- Outcome
+    settlement_outcome Nullable(LowCardinality(String)),  -- 'YES', 'NO', null if not settled
+    settlement_pnl Nullable(Decimal(18, 8))
+) ENGINE = ReplacingMergeTree(window_end)
+ORDER BY (session_id, event_id)
+PARTITION BY toYYYYMM(window_start);

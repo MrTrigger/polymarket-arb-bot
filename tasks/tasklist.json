@@ -1,377 +1,492 @@
 {
-  "name": "V3 Three-Engine Strategy",
+  "name": "React Trading Dashboard",
   "type": "feature",
-  "created": "2026-01-14T12:00:00Z",
-  "source": "tasks/spec-v3-strategy.md",
+  "created": "2026-01-15T12:00:00Z",
+  "source": "tasks/prd-react-dashboard.md",
   "config": {
     "backend": "rust",
-    "frontend": "none",
+    "frontend": "bun",
     "infra": "none"
   },
   "tasks": [
     {
-      "id": "p1-1",
-      "title": "Phase 1: Add Signal enum and detection",
-      "description": "Implement directional signal based on BTC price vs strike. Create Signal enum (StrongUp, LeanUp, Neutral, LeanDown, StrongDown) with up_ratio/down_ratio methods. Implement get_signal() and get_thresholds() functions with time-based threshold tightening.",
+      "id": "phase1-schema",
+      "title": "Phase 1: Add new ClickHouse table schemas",
+      "description": "Add 5 new tables to schema.sql: sessions, bot_trades, pnl_snapshots, structured_logs, market_sessions. Follow existing patterns in the file.",
       "status": "completed",
       "depends": [],
-      "files": [
-        "crates/poly-bot/src/strategy/signal.rs",
-        "crates/poly-bot/src/strategy/mod.rs"
-      ],
+      "files": ["crates/poly-common/src/schema.sql"],
       "acceptance": [
-        "cargo clippy -- -D warnings passes",
-        "Unit tests pass for all signal thresholds",
-        "All 5 time brackets tested"
-      ]
+        "schema.sql contains CREATE TABLE for sessions",
+        "schema.sql contains CREATE TABLE for bot_trades",
+        "schema.sql contains CREATE TABLE for pnl_snapshots",
+        "schema.sql contains CREATE TABLE for structured_logs",
+        "schema.sql contains CREATE TABLE for market_sessions"
+      ],
+      "us": ["US-019", "US-020", "US-021", "US-022", "US-023"]
     },
     {
-      "id": "p1-2",
-      "title": "Phase 1: Add Confidence types for sizing",
-      "description": "Create ConfidenceFactors struct (distance, minutes_remaining, signal, book_imbalance, favorable_depth) and Confidence struct (time, distance, signal, book). Implement total_multiplier() using geometric mean with 0.5x-3.0x caps.",
-      "status": "completed",
-      "depends": ["p1-1"],
-      "files": [
-        "crates/poly-bot/src/strategy/confidence.rs"
-      ],
+      "id": "phase1-types",
+      "title": "Phase 1: Create dashboard event types",
+      "description": "Create types for dashboard events: SessionRecord, TradeRecord, PnlSnapshot, LogEntry, MarketSessionUpdate. Use rust_decimal for money, UUID for IDs. Add serde + clickhouse derives.",
+      "status": "pending",
+      "depends": ["phase1-schema"],
+      "files": ["crates/poly-bot/src/dashboard/types.rs"],
       "acceptance": [
-        "cargo clippy -- -D warnings passes",
-        "Confidence calculation matches spec examples",
-        "Unit tests for multiplier caps"
-      ]
+        "cargo clippy -p poly-bot -- -D warnings passes",
+        "All types derive Serialize, Deserialize",
+        "All types derive clickhouse::Row where needed"
+      ],
+      "us": ["US-019", "US-020", "US-021", "US-022", "US-023"]
     },
     {
-      "id": "p1-3",
-      "title": "Phase 1: Add Position and trade decision types",
-      "description": "Add EngineType enum (Arbitrage, Directional, MakerRebates), Position struct with cost/share tracking, and calculate_pnl(). Extend TradeDecision with engine variants. Use Decimal for all financial math.",
-      "status": "completed",
-      "depends": [],
-      "files": [
-        "crates/poly-bot/src/types.rs"
-      ],
+      "id": "phase1-capture",
+      "title": "Phase 1: Implement DashboardCapture channel",
+      "description": "Create fire-and-forget capture system following observability/capture.rs pattern. Bounded channel with try_send(), DashboardEvent enum, CaptureStats for monitoring. Must not block hot path.",
+      "status": "pending",
+      "depends": ["phase1-types"],
+      "files": ["crates/poly-bot/src/dashboard/capture.rs"],
       "acceptance": [
-        "cargo clippy -- -D warnings passes",
-        "cargo check passes",
-        "Types integrate with existing Inventory"
-      ]
+        "cargo clippy -p poly-bot -- -D warnings passes",
+        "cargo test -p poly-bot passes",
+        "try_send() pattern used (no blocking)",
+        "Drops on backpressure"
+      ],
+      "us": ["US-024"]
     },
     {
-      "id": "p2-1",
-      "title": "Phase 2: Add fee rate client",
-      "description": "Create api/ module with fee rate fetching from GET /fee-rate?token_id=X. Add FeeRateResponse struct, implement fetch_fee_rate() with in-memory caching per market session. Handle API errors gracefully.",
-      "status": "completed",
-      "depends": [],
-      "files": [
-        "crates/poly-bot/src/api/mod.rs",
-        "crates/poly-bot/src/api/fees.rs"
-      ],
+      "id": "phase1-processor",
+      "title": "Phase 1: Implement dashboard event processor",
+      "description": "Background processor that receives DashboardEvents and writes to ClickHouse. Batch inserts for efficiency. Graceful shutdown handling.",
+      "status": "pending",
+      "depends": ["phase1-capture"],
+      "files": ["crates/poly-bot/src/dashboard/processor.rs"],
       "acceptance": [
-        "cargo clippy -- -D warnings passes",
-        "Can fetch fee rate for a token",
-        "Cache prevents redundant API calls"
-      ]
+        "cargo clippy -p poly-bot -- -D warnings passes",
+        "cargo test -p poly-bot passes",
+        "Writes to all 5 new tables",
+        "Handles shutdown signal"
+      ],
+      "us": ["US-024"]
     },
     {
-      "id": "p2-2",
-      "title": "Phase 2: Add rewards client",
-      "description": "Implement rewards API client with CurrentRewardResponse, RewardsConfig, UserEarningResponse types. Add fetch_current_rewards(), fetch_reward_percentages(), fetch_user_earnings() methods. Support periodic earnings tracking.",
-      "status": "completed",
-      "depends": ["p2-1"],
+      "id": "phase1-session",
+      "title": "Phase 1: Implement session lifecycle management",
+      "description": "Create/update session records on bot start/stop. Generate session UUID, compute config hash, track exit reason. Integrate with existing mode startup.",
+      "status": "pending",
+      "depends": ["phase1-processor"],
       "files": [
-        "crates/poly-bot/src/api/rewards.rs"
+        "crates/poly-bot/src/dashboard/session.rs",
+        "crates/poly-bot/src/mode/live.rs",
+        "crates/poly-bot/src/mode/paper.rs"
       ],
       "acceptance": [
-        "cargo clippy -- -D warnings passes",
-        "Can fetch current rewards config",
-        "Can fetch user earnings for a date"
-      ]
-    },
-    {
-      "id": "p2-3",
-      "title": "Phase 2: Create MarketSession with cached API data",
-      "description": "Add MarketSession struct containing market_id, tokens, strike, fee_rate_bps, reward_config. Implement MarketSession::new() that fetches and caches API data. Integrate with TrackedMarket or StrategyLoop.",
-      "status": "completed",
-      "depends": ["p2-1", "p2-2"],
-      "files": [
-        "crates/poly-bot/src/types.rs"
+        "cargo clippy -p poly-bot -- -D warnings passes",
+        "cargo test -p poly-bot passes",
+        "Session created on startup",
+        "Session updated on shutdown"
       ],
-      "acceptance": [
-        "cargo clippy -- -D warnings passes",
-        "MarketSession initializes with API data",
-        "Fee rate cached per session"
-      ]
+      "us": ["US-019"]
     },
     {
-      "id": "p3-1",
-      "title": "Phase 3: Add TradingConfig with balance scaling",
-      "description": "Create TradingConfig with available_balance, max_market_allocation (0.20), expected_trades_per_market (200), min_order_size ($1), max_confidence_multiplier (3.0), min_hedge_ratio (0.20). Implement market_budget() and base_order_size() methods.",
-      "status": "completed",
-      "depends": [],
+      "id": "phase1-mod",
+      "title": "Phase 1: Create dashboard module structure",
+      "description": "Create mod.rs exporting all dashboard submodules. Add dashboard feature flag to Cargo.toml. Add DashboardConfig to config.rs.",
+      "status": "pending",
+      "depends": ["phase1-session"],
       "files": [
-        "crates/poly-bot/src/config.rs"
-      ],
-      "acceptance": [
-        "cargo clippy -- -D warnings passes",
-        "market_budget = balance * 0.20",
-        "base_order_size = budget / 200",
-        "Unit tests for $500-$25000 scaling"
-      ]
-    },
-    {
-      "id": "p3-2",
-      "title": "Phase 3: Implement ConfidenceSizer",
-      "description": "Create ConfidenceSizer with TradingConfig, spent, trades tracking. Implement get_order_size(factors) returning OrderSizeResult. Add confidence calculators: time_confidence(), distance_confidence(), signal_confidence(), book_confidence().",
-      "status": "completed",
-      "depends": ["p1-1", "p1-2", "p3-1"],
-      "files": [
-        "crates/poly-bot/src/strategy/confidence_sizing.rs"
-      ],
-      "acceptance": [
-        "cargo clippy -- -D warnings passes",
-        "Sizing matches spec examples",
-        "BudgetExhausted returned when spent >= budget"
-      ]
-    },
-    {
-      "id": "p3-3",
-      "title": "Phase 3: Add configurable sizing mode",
-      "description": "Add SizingMode enum (Limits, Confidence, Hybrid). Create SizingStrategy trait. Implement for existing PositionSizer and new ConfidenceSizer. Create HybridSizer that applies confidence then caps with limits. Add factory function.",
-      "status": "completed",
-      "depends": ["p3-2"],
-      "files": [
+        "crates/poly-bot/src/dashboard/mod.rs",
+        "crates/poly-bot/Cargo.toml",
         "crates/poly-bot/src/config.rs",
-        "crates/poly-bot/src/strategy/sizing.rs"
+        "crates/poly-bot/src/lib.rs"
       ],
       "acceptance": [
-        "cargo clippy -- -D warnings passes",
-        "Can switch modes via TOML config",
-        "Hybrid mode applies both sizing strategies"
-      ]
+        "cargo clippy -p poly-bot -- -D warnings passes",
+        "cargo build -p poly-bot passes",
+        "DashboardConfig in config.rs"
+      ],
+      "us": ["US-024"]
     },
     {
-      "id": "p4-1",
-      "title": "Phase 4: Implement PnlRiskManager",
-      "description": "Create PnlRiskManager with daily_pnl, consecutive_losses, trading_enabled tracking. Implement check_trade() returning TradeDecision (Approve/Reject/ReduceSize/RebalanceRequired). Add daily loss limit (10%), consecutive loss stop (3), hedge ratio check (20%).",
-      "status": "completed",
-      "depends": ["p1-3"],
+      "id": "phase2-state",
+      "title": "Phase 2: Create DashboardState struct",
+      "description": "Aggregate struct containing: MetricsSnapshot, active markets, recent trades, order book summaries, positions, control flags, logs, anomalies. Lock-free snapshot creation from GlobalState DashMaps.",
+      "status": "pending",
+      "depends": ["phase1-mod"],
+      "files": ["crates/poly-bot/src/dashboard/state.rs"],
+      "acceptance": [
+        "cargo clippy -p poly-bot -- -D warnings passes",
+        "cargo test -p poly-bot passes",
+        "Serializes to JSON",
+        "No mutex locks in snapshot()"
+      ],
+      "us": ["US-017"]
+    },
+    {
+      "id": "phase2-ws-server",
+      "title": "Phase 2: Implement WebSocket server",
+      "description": "tokio-tungstenite WebSocket server on configurable port. Broadcasts DashboardState at interval. Handles multiple clients. Sends full snapshot on connect.",
+      "status": "pending",
+      "depends": ["phase2-state"],
+      "files": ["crates/poly-bot/src/dashboard/server.rs"],
+      "acceptance": [
+        "cargo clippy -p poly-bot -- -D warnings passes",
+        "cargo test -p poly-bot passes",
+        "WebSocket accepts connections",
+        "Broadcasts state at configured interval"
+      ],
+      "us": ["US-001", "US-018"]
+    },
+    {
+      "id": "phase2-rest-api",
+      "title": "Phase 2: Implement REST API endpoints",
+      "description": "axum HTTP server with endpoints: GET /api/sessions, /api/sessions/:id/equity, /api/sessions/:id/trades, /api/sessions/:id/logs (paginated), /api/sessions/:id/markets. Query ClickHouse, return JSON.",
+      "status": "pending",
+      "depends": ["phase2-ws-server"],
+      "files": ["crates/poly-bot/src/dashboard/api.rs"],
+      "acceptance": [
+        "cargo clippy -p poly-bot -- -D warnings passes",
+        "cargo test -p poly-bot passes",
+        "All 5 endpoints return JSON",
+        "Pagination works for logs"
+      ],
+      "us": ["US-025"]
+    },
+    {
+      "id": "phase2-integration",
+      "title": "Phase 2: Integrate dashboard with bot startup",
+      "description": "Start dashboard server in bot main(). Wire capture channel to executor for trade events. Add PnL snapshot timer. Wire to tracing for log capture.",
+      "status": "pending",
+      "depends": ["phase2-rest-api"],
       "files": [
-        "crates/poly-bot/src/risk/pnl.rs",
-        "crates/poly-bot/src/risk/mod.rs"
+        "crates/poly-bot/src/main.rs",
+        "crates/poly-bot/src/executor.rs"
       ],
       "acceptance": [
-        "cargo clippy -- -D warnings passes",
-        "Rejects after 10% daily loss",
-        "Disables after 3 consecutive losses",
-        "Requires rebalance below 20% hedge ratio"
-      ]
-    },
-    {
-      "id": "p4-2",
-      "title": "Phase 4: Add configurable risk mode",
-      "description": "Add RiskMode enum (CircuitBreaker, DailyPnl, Both). Create RiskChecker trait. Implement CompositeRiskChecker that runs both when mode is Both. Integrate with StrategyLoop pre-trade checks.",
-      "status": "completed",
-      "depends": ["p4-1"],
-      "files": [
-        "crates/poly-bot/src/config.rs",
-        "crates/poly-bot/src/risk/mod.rs",
-        "crates/poly-bot/src/risk/mode.rs"
+        "cargo clippy -p poly-bot -- -D warnings passes",
+        "cargo test -p poly-bot passes",
+        "Dashboard starts with bot",
+        "Trade events captured"
       ],
-      "acceptance": [
-        "cargo clippy -- -D warnings passes",
-        "Can select risk mode via config",
-        "Both mode runs CB + PnlRiskManager"
-      ]
+      "us": ["US-001", "US-021", "US-022"]
     },
     {
-      "id": "p5-1",
-      "title": "Phase 5: Implement DirectionalDetector",
-      "description": "Create DirectionalDetector using Signal system. Create DirectionalOpportunity struct (signal, up_ratio, down_ratio, confidence). Implement detect() returning opportunity with correct allocation ratios. Add skip reasons.",
-      "status": "completed",
-      "depends": ["p1-1", "p1-2"],
-      "files": [
-        "crates/poly-bot/src/strategy/directional.rs"
-      ],
-      "acceptance": [
-        "cargo clippy -- -D warnings passes",
-        "StrongUp returns 78% UP / 22% DOWN",
-        "Neutral signal skips trading",
-        "Unit tests for each signal level"
-      ]
-    },
-    {
-      "id": "p5-2",
-      "title": "Phase 5: Implement directional execution",
-      "description": "Add execute_directional() to StrategyLoop. Calculate UP/DOWN sizes from signal ratios. Calculate maker prices inside spread. Place orders with post_only: true. Update position tracking and record with sizer.",
-      "status": "completed",
-      "depends": ["p5-1", "p3-2"],
-      "files": [
-        "crates/poly-bot/src/strategy/mod.rs"
-      ],
-      "acceptance": [
-        "cargo clippy -- -D warnings passes",
-        "Places both UP and DOWN orders",
-        "Position updated correctly",
-        "Integration test passes"
-      ]
-    },
-    {
-      "id": "p6-1",
-      "title": "Phase 6: Implement MakerDetector",
-      "description": "Create MakerDetector for passive rebate strategy. Create MakerOpportunity struct (token_id, side, price, size, expected_rebate). Implement spread analysis for optimal maker price. Consider rewards_min_size and rewards_max_spread from API.",
-      "status": "completed",
-      "depends": ["p2-2"],
-      "files": [
-        "crates/poly-bot/src/strategy/maker.rs"
-      ],
-      "acceptance": [
-        "cargo clippy -- -D warnings passes",
-        "Detects maker opportunities",
-        "Respects min_size from reward config"
-      ]
-    },
-    {
-      "id": "p6-2",
-      "title": "Phase 6: Implement maker order management",
-      "description": "Add execute_maker() method. Track active maker orders per market. Implement order refresh logic (cancel stale, place new). Handle partial fills properly.",
-      "status": "completed",
-      "depends": ["p6-1"],
-      "files": [
-        "crates/poly-bot/src/strategy/mod.rs"
-      ],
-      "acceptance": [
-        "cargo clippy -- -D warnings passes",
-        "Maintains maker orders",
-        "Cancels and refreshes stale orders",
-        "Integration test passes"
-      ]
-    },
-    {
-      "id": "p7-1",
-      "title": "Phase 7: Add engine configuration",
-      "description": "Create EnginesConfig with ArbitrageEngineConfig, DirectionalEngineConfig, MakerEngineConfig. Each has enabled flag and engine-specific params. Add priority: Vec<EngineType> for conflict resolution.",
-      "status": "completed",
-      "depends": ["p1-3"],
-      "files": [
-        "crates/poly-bot/src/config.rs"
-      ],
-      "acceptance": [
-        "cargo clippy -- -D warnings passes",
-        "TOML deserialization works",
-        "Default enables only arbitrage"
-      ]
-    },
-    {
-      "id": "p7-2",
-      "title": "Phase 7: Implement DecisionAggregator",
-      "description": "Create EngineDecision wrapper (engine_type, opportunity, sizing). Create DecisionAggregator. Implement aggregate() that picks best decision based on priority config. Handle conflicts (arb overrides directional).",
-      "status": "completed",
-      "depends": ["p7-1"],
-      "files": [
-        "crates/poly-bot/src/strategy/aggregator.rs"
-      ],
-      "acceptance": [
-        "cargo clippy -- -D warnings passes",
-        "Priority ordering works",
-        "Conflict resolution correct"
-      ]
-    },
-    {
-      "id": "p7-3",
-      "title": "Phase 7: Integrate engines into StrategyLoop",
-      "description": "Add engine instances (arb, directional, maker) and aggregator to StrategyLoop. Refactor check_opportunities() to run all enabled engines. Route execution to correct handler. Tag decisions with engine source for observability.",
-      "status": "completed",
-      "depends": ["p5-2", "p6-2", "p7-2"],
-      "files": [
-        "crates/poly-bot/src/strategy/mod.rs"
-      ],
-      "acceptance": [
-        "cargo clippy -- -D warnings passes",
-        "Multi-engine strategy runs",
-        "Observability shows engine source",
-        "Backward compatible with arb-only"
-      ]
-    },
-    {
-      "id": "p8-1",
-      "title": "Phase 8: Implement TradeInterval",
-      "description": "Create TradeInterval struct with min_interval (500ms) and last_trade tracking. Implement can_trade(), record_trade(), time_until_next(). Integrate into StrategyLoop main loop to avoid API rate limits.",
-      "status": "completed",
+      "id": "phase3-scaffold",
+      "title": "Phase 3: Scaffold frontend project",
+      "description": "Create frontend/ directory. Initialize with bun create vite. Add TypeScript, React, TailwindCSS. Configure path aliases. Add shadcn/ui. Install lightweight-charts, zustand, react-query, react-router-dom.",
+      "status": "pending",
       "depends": [],
       "files": [
-        "crates/poly-bot/src/executor/interval.rs",
-        "crates/poly-bot/src/executor/mod.rs"
+        "frontend/package.json",
+        "frontend/vite.config.ts",
+        "frontend/tsconfig.json",
+        "frontend/tailwind.config.js",
+        "frontend/components.json"
       ],
       "acceptance": [
-        "cargo clippy -- -D warnings passes",
-        "Enforces 500ms minimum between trades",
-        "Unit tests pass"
-      ]
+        "bun install succeeds",
+        "bun run dev starts server",
+        "bun run typecheck passes",
+        "bun run build produces dist/"
+      ],
+      "us": ["US-002"]
     },
     {
-      "id": "p8-2",
-      "title": "Phase 8: Add maker price calculation",
-      "description": "Implement get_maker_price(book) that calculates optimal price inside spread. Handle spread >3% (40% from bid), 1-3% (30% from bid), <1% (at bid). Return Decimal price.",
-      "status": "completed",
-      "depends": [],
-      "files": [
-        "crates/poly-bot/src/strategy/pricing.rs"
-      ],
+      "id": "phase3-types",
+      "title": "Phase 3: Create TypeScript types",
+      "description": "Create types.ts matching Rust structs: DashboardSnapshot, MetricsSnapshot, ActiveMarket, Position, Trade, LogEntry, Anomaly, ControlState, EquityPoint.",
+      "status": "pending",
+      "depends": ["phase3-scaffold"],
+      "files": ["frontend/src/lib/types.ts"],
       "acceptance": [
-        "cargo clippy -- -D warnings passes",
-        "Places orders inside spread",
-        "Unit tests for all spread sizes"
-      ]
+        "bun run typecheck passes",
+        "Types match Rust serialization"
+      ],
+      "us": ["US-017"]
     },
     {
-      "id": "p9-1",
-      "title": "Phase 9: Unit tests for all new modules",
-      "description": "Add comprehensive unit tests: Signal detection (all time brackets), Confidence calculation (spec examples), TradingConfig scaling, ConfidenceSizer (budget, multipliers), PnlRiskManager (all rules), DirectionalDetector, DecisionAggregator priority.",
-      "status": "completed",
-      "depends": ["p7-3"],
-      "files": [
-        "crates/poly-bot/src/strategy/signal.rs",
-        "crates/poly-bot/src/strategy/confidence.rs",
-        "crates/poly-bot/src/strategy/confidence_sizing.rs",
-        "crates/poly-bot/src/risk/pnl.rs",
-        "crates/poly-bot/src/strategy/directional.rs",
-        "crates/poly-bot/src/strategy/aggregator.rs"
-      ],
+      "id": "phase3-websocket",
+      "title": "Phase 3: Implement WebSocket hook",
+      "description": "Create useWebSocket hook with: connect to configurable URL, auto-reconnect with exponential backoff, parse JSON, expose connection status, handle errors gracefully.",
+      "status": "pending",
+      "depends": ["phase3-types"],
+      "files": ["frontend/src/hooks/useWebSocket.ts"],
       "acceptance": [
-        "cargo test passes",
-        "All modules have inline tests"
-      ]
+        "bun run typecheck passes",
+        "Connects to ws://localhost:3001",
+        "Reconnects on disconnect"
+      ],
+      "us": ["US-003"]
     },
     {
-      "id": "p9-2",
-      "title": "Phase 9: Integration tests",
-      "description": "Create integration tests: test_directional_strategy.rs, test_multi_engine.rs, test_confidence_sizing.rs, test_pnl_risk.rs. Verify strategy runs correctly in backtest mode.",
-      "status": "completed",
-      "depends": ["p9-1"],
+      "id": "phase3-store",
+      "title": "Phase 3: Create dashboard state store",
+      "description": "Zustand store for dashboard state. Update from WebSocket messages. Selectors for metrics, markets, trades, logs. useDashboardState hook.",
+      "status": "pending",
+      "depends": ["phase3-websocket"],
       "files": [
-        "crates/poly-bot/tests/test_directional_strategy.rs",
-        "crates/poly-bot/tests/test_multi_engine.rs",
-        "crates/poly-bot/tests/test_confidence_sizing.rs",
-        "crates/poly-bot/tests/test_pnl_risk.rs"
+        "frontend/src/hooks/useDashboardState.ts",
+        "frontend/src/lib/store.ts"
       ],
       "acceptance": [
-        "cargo test --test '*' passes",
-        "Backtest mode works with new engines"
-      ]
+        "bun run typecheck passes",
+        "State updates from WebSocket"
+      ],
+      "us": ["US-003"]
     },
     {
-      "id": "p9-3",
-      "title": "Phase 9: Backtest validation",
-      "description": "Run backtest with directional engine enabled. Compare results to spec Section 8 expected economics. Tune thresholds if needed. Document findings and any parameter adjustments.",
-      "status": "completed",
-      "depends": ["p9-2"],
+      "id": "phase3-layout",
+      "title": "Phase 3: Create app layout and routing",
+      "description": "Create App.tsx with React Router. Routes: / (Dashboard), /market/:eventId (MarketDetail). Header with connection status. Dark theme wrapper.",
+      "status": "pending",
+      "depends": ["phase3-store"],
       "files": [
-        "tasks/progress.txt"
+        "frontend/src/App.tsx",
+        "frontend/src/main.tsx",
+        "frontend/src/pages/Dashboard.tsx",
+        "frontend/src/pages/MarketDetail.tsx"
       ],
       "acceptance": [
-        "Backtest completes successfully",
-        "P&L within expected range from spec",
-        "Findings documented in progress.txt"
-      ]
+        "bun run typecheck passes",
+        "Routes work",
+        "Header shows connection status"
+      ],
+      "us": ["US-003", "US-015"]
+    },
+    {
+      "id": "phase4-metrics",
+      "title": "Phase 4: Create MetricsCards component",
+      "description": "Display P&L, volume, trades executed/failed/skipped, win rate, exposure. Use shadcn Card. Color P&L green/red. Update in real-time.",
+      "status": "pending",
+      "depends": ["phase3-layout"],
+      "files": ["frontend/src/components/dashboard/MetricsCards.tsx"],
+      "acceptance": [
+        "bun run typecheck passes",
+        "Shows all metrics",
+        "P&L colored correctly"
+      ],
+      "us": ["US-004"]
+    },
+    {
+      "id": "phase4-equity",
+      "title": "Phase 4: Create EquityCurve chart",
+      "description": "Lightweight Charts line chart for cumulative P&L. Dark theme. Time on X-axis, USDC on Y. Crosshair with values. Auto-scale. Real-time updates.",
+      "status": "pending",
+      "depends": ["phase4-metrics"],
+      "files": ["frontend/src/components/dashboard/EquityCurve.tsx"],
+      "acceptance": [
+        "bun run typecheck passes",
+        "Chart renders",
+        "Updates in real-time"
+      ],
+      "us": ["US-005"]
+    },
+    {
+      "id": "phase4-markets",
+      "title": "Phase 4: Create MarketsGrid component",
+      "description": "Table of active markets. Columns: asset, strike, time remaining, spot price, YES/NO bid/ask, arb spread, position. Clickable rows navigate to /market/:eventId. Highlight arb opportunities.",
+      "status": "pending",
+      "depends": ["phase4-equity"],
+      "files": ["frontend/src/components/dashboard/MarketsGrid.tsx"],
+      "acceptance": [
+        "bun run typecheck passes",
+        "Shows all markets",
+        "Rows clickable",
+        "Arb highlighted"
+      ],
+      "us": ["US-006"]
+    },
+    {
+      "id": "phase4-circuit",
+      "title": "Phase 4: Create CircuitBreakerStatus component",
+      "description": "Status indicator: green=enabled, yellow=disabled, red=tripped. Show failure count. Show cooldown remaining if tripped.",
+      "status": "pending",
+      "depends": ["phase4-markets"],
+      "files": ["frontend/src/components/dashboard/CircuitBreakerStatus.tsx"],
+      "acceptance": [
+        "bun run typecheck passes",
+        "Shows correct status",
+        "Colors correct"
+      ],
+      "us": ["US-007"]
+    },
+    {
+      "id": "phase4-logs",
+      "title": "Phase 4: Create LogWindow component",
+      "description": "Collapsible panel showing last 100 logs. Color by level: ERROR=red, WARN=yellow, INFO=white, DEBUG=gray. Auto-scroll. Filter by level. Text search.",
+      "status": "pending",
+      "depends": ["phase4-circuit"],
+      "files": ["frontend/src/components/dashboard/LogWindow.tsx"],
+      "acceptance": [
+        "bun run typecheck passes",
+        "Shows logs",
+        "Filter works",
+        "Auto-scrolls"
+      ],
+      "us": ["US-012"]
+    },
+    {
+      "id": "phase4-dashboard",
+      "title": "Phase 4: Assemble Dashboard page",
+      "description": "Compose Dashboard.tsx from MetricsCards, EquityCurve, MarketsGrid, CircuitBreakerStatus, LogWindow. Grid layout, desktop-optimized.",
+      "status": "pending",
+      "depends": ["phase4-logs"],
+      "files": ["frontend/src/pages/Dashboard.tsx"],
+      "acceptance": [
+        "bun run typecheck passes",
+        "All components visible",
+        "Layout looks good"
+      ],
+      "us": ["US-004", "US-005", "US-006", "US-007", "US-012"]
+    },
+    {
+      "id": "phase5-price-chart",
+      "title": "Phase 5: Create PriceChart component",
+      "description": "Lightweight Charts for spot price history. Strike price as horizontal line. Trade markers: green triangles=buy, red=sell. Different markers for YES/NO. Window boundaries visible.",
+      "status": "pending",
+      "depends": ["phase4-dashboard"],
+      "files": ["frontend/src/components/market/PriceChart.tsx"],
+      "acceptance": [
+        "bun run typecheck passes",
+        "Chart renders",
+        "Trade markers show",
+        "Strike line visible"
+      ],
+      "us": ["US-008"]
+    },
+    {
+      "id": "phase5-orderbook",
+      "title": "Phase 5: Create OrderBookDisplay component",
+      "description": "Show YES and NO order books side by side. Bid/ask with sizes. Spread for each. Combined arb calculation: YES_ask + NO_ask vs $1.00. Highlight when arb exists.",
+      "status": "pending",
+      "depends": ["phase5-price-chart"],
+      "files": ["frontend/src/components/market/OrderBookDisplay.tsx"],
+      "acceptance": [
+        "bun run typecheck passes",
+        "Both books show",
+        "Arb calculation shown"
+      ],
+      "us": ["US-009"]
+    },
+    {
+      "id": "phase5-position",
+      "title": "Phase 5: Create PositionPanel component",
+      "description": "Show YES/NO shares and cost basis. Imbalance ratio and inventory state badge. Realized and unrealized P&L for this market.",
+      "status": "pending",
+      "depends": ["phase5-orderbook"],
+      "files": ["frontend/src/components/market/PositionPanel.tsx"],
+      "acceptance": [
+        "bun run typecheck passes",
+        "Position shows",
+        "P&L calculated"
+      ],
+      "us": ["US-010"]
+    },
+    {
+      "id": "phase5-trades",
+      "title": "Phase 5: Create TradesTable component",
+      "description": "Table of trades for this market. Columns: time, side, action, price, size, P&L. Sorted by time desc. Color by profit/loss. Virtualized for performance.",
+      "status": "pending",
+      "depends": ["phase5-position"],
+      "files": ["frontend/src/components/market/TradesTable.tsx"],
+      "acceptance": [
+        "bun run typecheck passes",
+        "Trades show",
+        "Colors correct"
+      ],
+      "us": ["US-011"]
+    },
+    {
+      "id": "phase5-market-page",
+      "title": "Phase 5: Assemble MarketDetail page",
+      "description": "Compose MarketDetail.tsx from PriceChart, OrderBookDisplay, PositionPanel, TradesTable. Get eventId from URL params. Fetch market-specific data.",
+      "status": "pending",
+      "depends": ["phase5-trades"],
+      "files": ["frontend/src/pages/MarketDetail.tsx"],
+      "acceptance": [
+        "bun run typecheck passes",
+        "All components visible",
+        "eventId from URL works"
+      ],
+      "us": ["US-008", "US-009", "US-010", "US-011"]
+    },
+    {
+      "id": "phase6-session-metrics",
+      "title": "Phase 6: Create SessionMetrics panel",
+      "description": "Panel showing: session start/duration, events processed, opportunities detected, trade rate, avg trade size, shadow order ratio. Real-time updates.",
+      "status": "pending",
+      "depends": ["phase5-market-page"],
+      "files": ["frontend/src/components/dashboard/SessionMetrics.tsx"],
+      "acceptance": [
+        "bun run typecheck passes",
+        "All stats show",
+        "Updates in real-time"
+      ],
+      "us": ["US-013"]
+    },
+    {
+      "id": "phase6-anomalies",
+      "title": "Phase 6: Create AnomalyAlerts component",
+      "description": "Alert banner when anomaly detected. Type, severity, message. Dismissable. Alert history. Critical anomalies highlighted.",
+      "status": "pending",
+      "depends": ["phase6-session-metrics"],
+      "files": ["frontend/src/components/dashboard/AnomalyAlerts.tsx"],
+      "acceptance": [
+        "bun run typecheck passes",
+        "Alerts show",
+        "Dismissable"
+      ],
+      "us": ["US-014"]
+    },
+    {
+      "id": "phase6-theme",
+      "title": "Phase 6: Finalize dark theme",
+      "description": "Ensure dark theme throughout. Configure Lightweight Charts dark theme. Verify all shadcn components use dark mode. No bright flashes.",
+      "status": "pending",
+      "depends": ["phase6-anomalies"],
+      "files": [
+        "frontend/src/index.css",
+        "frontend/tailwind.config.js"
+      ],
+      "acceptance": [
+        "bun run typecheck passes",
+        "All dark theme",
+        "Charts dark"
+      ],
+      "us": ["US-015"]
+    },
+    {
+      "id": "phase6-build",
+      "title": "Phase 6: Configure production build",
+      "description": "Verify bun run build produces optimized dist/. Assets hashed. Optionally serve from poly-bot with tower-http static files.",
+      "status": "pending",
+      "depends": ["phase6-theme"],
+      "files": [
+        "frontend/vite.config.ts",
+        "crates/poly-bot/src/dashboard/server.rs"
+      ],
+      "acceptance": [
+        "bun run build succeeds",
+        "dist/ contains hashed assets",
+        "poly-bot can serve static files"
+      ],
+      "us": ["US-016"]
+    },
+    {
+      "id": "phase6-final",
+      "title": "Phase 6: Final integration test",
+      "description": "Run poly-bot in paper mode with dashboard. Verify all components work. Test WebSocket reconnection. Test REST API queries. Document any issues.",
+      "status": "pending",
+      "depends": ["phase6-build"],
+      "files": [],
+      "acceptance": [
+        "Dashboard connects and shows data",
+        "All charts render",
+        "Market detail works",
+        "Logs stream",
+        "No console errors"
+      ],
+      "us": ["US-001", "US-002", "US-003"]
     }
   ]
 }
