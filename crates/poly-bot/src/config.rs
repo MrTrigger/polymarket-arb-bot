@@ -712,6 +712,18 @@ pub struct DirectionalEngineConfig {
     /// UP allocation for Neutral signal (as ratio 0-1).
     /// Default: 0.50 (50% UP, 50% DOWN)
     pub neutral_ratio: Decimal,
+
+    // --- Edge Requirement ---
+    // Dynamic edge requirement that decays linearly with time.
+    // At window start: required_confidence = price + max_edge_factor
+    // At window end: required_confidence = price (no edge required)
+
+    /// Maximum edge factor at start of window (as ratio 0-1).
+    /// This decays linearly to 0 at window end.
+    /// Example: 0.20 means 20% edge required at window start.
+    /// Formula: min_edge = max_edge_factor * (time_remaining / window_duration)
+    /// Required confidence = favorable_price + min_edge
+    pub max_edge_factor: Decimal,
 }
 
 impl Default for DirectionalEngineConfig {
@@ -729,6 +741,8 @@ impl Default for DirectionalEngineConfig {
             strong_up_ratio: Decimal::new(78, 2),  // 0.78
             lean_up_ratio: Decimal::new(60, 2),    // 0.60
             neutral_ratio: Decimal::new(50, 2),    // 0.50
+            // Edge requirement
+            max_edge_factor: Decimal::new(20, 2),  // 0.20 = 20% edge at window start
         }
     }
 }
@@ -1330,6 +1344,7 @@ struct DirectionalEngineToml {
     strong_up_ratio: f64,
     lean_up_ratio: f64,
     neutral_ratio: f64,
+    max_edge_factor: f64,
 }
 
 impl Default for DirectionalEngineToml {
@@ -1486,7 +1501,10 @@ impl From<TomlConfig> for BotConfig {
                 api_port: toml.dashboard.api_port,
                 broadcast_interval_ms: toml.dashboard.broadcast_interval_ms,
                 pnl_snapshot_interval_secs: toml.dashboard.pnl_snapshot_interval_secs,
-                static_dir: toml.dashboard.static_dir.clone(),
+                // Environment variable overrides config file
+                static_dir: std::env::var("POLY_DASHBOARD_STATIC_DIR")
+                    .ok()
+                    .or_else(|| toml.dashboard.static_dir.clone()),
             },
             wallet: WalletConfig::default(), // Always from env vars
             backtest: BacktestConfig {

@@ -320,15 +320,15 @@ pub struct OrderBookSummary {
 
 impl From<LiveOrderBook> for OrderBookSummary {
     fn from(book: LiveOrderBook) -> Self {
-        let spread_bps = book.spread_bps();
         Self {
-            token_id: book.token_id,
+            spread_bps: book.spread_bps(),
             best_bid: book.best_bid,
             best_bid_size: book.best_bid_size,
             best_ask: book.best_ask,
             best_ask_size: book.best_ask_size,
-            spread_bps,
             last_update_ms: book.last_update_ms,
+            // Move String field last to avoid partial move issues
+            token_id: book.token_id,
         }
     }
 }
@@ -381,7 +381,6 @@ impl From<InventoryPosition> for PositionState {
         let imbalance_ratio = inv.imbalance_ratio();
 
         Self {
-            event_id: inv.event_id,
             yes_shares: inv.yes_shares,
             no_shares: inv.no_shares,
             yes_cost_basis: inv.yes_cost_basis,
@@ -390,6 +389,8 @@ impl From<InventoryPosition> for PositionState {
             total_exposure,
             imbalance_ratio,
             inventory_state: state_str.to_string(),
+            // Move String field last to avoid partial move issues
+            event_id: inv.event_id,
         }
     }
 }

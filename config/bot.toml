@@ -180,3 +180,37 @@ min_seconds_remaining = 120    # Minimum time remaining
 min_spread_bps = 100           # Minimum spread to participate (1%)
 max_spread_bps = 1000          # Maximum spread (10%)
 default_order_size = 50.0      # Default order size in USDC
+
+# ============================================================================
+# Dashboard Configuration
+# ============================================================================
+
+[dashboard]
+# Enable/disable the dashboard (WebSocket server + REST API)
+enabled = true
+
+# WebSocket server port (real-time state broadcast)
+websocket_port = 3001
+
+# REST API server port (historical queries)
+api_port = 3002
+
+# State broadcast interval in milliseconds
+broadcast_interval_ms = 500
+
+# P&L snapshot interval for equity curve (seconds)
+pnl_snapshot_interval_secs = 10
+
+# Capture channel settings (fire-and-forget)
+channel_capacity = 10000
+log_drops = true
+drop_log_threshold = 100
+
+# ClickHouse batch settings
+batch_size = 100
+flush_interval_secs = 5
+max_buffer_size = 10000
+
+# Static file serving (set to frontend/dist for production)
+# Leave empty to disable static file serving
+# static_dir = "frontend/dist"
