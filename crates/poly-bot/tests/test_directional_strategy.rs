@@ -69,7 +69,8 @@ fn add_book_levels(
 #[test]
 fn test_signal_strong_up_far_above_strike() {
     // BTC at $100,100, strike at $100,000 = 0.1% above
-    // With >12 minutes remaining, 0.06% strong threshold -> StrongUp
+    // Time brackets: >30 min: strong=0.03%, 10-30 min: strong=0.021%, 3-10 min: strong=0.015%
+    // At 15 min (10-30 bracket), 0.1% > 0.021% -> StrongUp
     let signal = get_signal(dec!(100100), dec!(100000), dec!(15));
     assert_eq!(signal, Signal::StrongUp);
     assert!(signal.is_directional());
@@ -78,9 +79,10 @@ fn test_signal_strong_up_far_above_strike() {
 
 #[test]
 fn test_signal_lean_up_slightly_above_strike() {
-    // BTC at $100,040, strike at $100,000 = 0.04% above
-    // With >12 minutes remaining, 0.03% lean, 0.06% strong threshold -> LeanUp
-    let signal = get_signal(dec!(100040), dec!(100000), dec!(15));
+    // BTC at $100,016, strike at $100,000 = 0.016% above
+    // At 15 min (10-30 bracket): strong=0.021%, lean=0.014%
+    // 0.014% < 0.016% < 0.021% -> LeanUp
+    let signal = get_signal(dec!(100016), dec!(100000), dec!(15));
     assert_eq!(signal, Signal::LeanUp);
     assert!(signal.is_directional());
     assert!(!signal.is_strong());
@@ -88,9 +90,9 @@ fn test_signal_lean_up_slightly_above_strike() {
 
 #[test]
 fn test_signal_neutral_at_strike() {
-    // BTC at $100,020, strike at $100,000 = 0.02% above
-    // With >12 minutes remaining, 0.03% lean threshold -> Neutral (below threshold)
-    let signal = get_signal(dec!(100020), dec!(100000), dec!(15));
+    // BTC at $100,010, strike at $100,000 = 0.01% above
+    // At 15 min (10-30 bracket): lean=0.014%, 0.01% < 0.014% -> Neutral
+    let signal = get_signal(dec!(100010), dec!(100000), dec!(15));
     assert_eq!(signal, Signal::Neutral);
     assert!(!signal.is_directional());
 }
@@ -98,7 +100,7 @@ fn test_signal_neutral_at_strike() {
 #[test]
 fn test_signal_strong_down_far_below_strike() {
     // BTC at $99,900, strike at $100,000 = 0.1% below
-    // With >12 min, 0.06% strong threshold -> StrongDown
+    // At 15 min (10-30 bracket): strong=0.021%, 0.1% > 0.021% -> StrongDown
     let signal = get_signal(dec!(99900), dec!(100000), dec!(15));
     assert_eq!(signal, Signal::StrongDown);
     assert!(signal.is_directional());
@@ -108,40 +110,39 @@ fn test_signal_strong_down_far_below_strike() {
 #[test]
 fn test_signal_thresholds_tighten_with_time() {
     // Verify thresholds decrease as time remaining decreases
-    // New time brackets: >12, 9-12, 6-9, 3-6, <3 min (percentage-based)
-    let early = get_thresholds(dec!(15));  // >12 min: 0.060%/0.030%
-    let mid = get_thresholds(dec!(10));    // 9-12 min: 0.050%/0.025%
-    let mid2 = get_thresholds(dec!(7));    // 6-9 min: 0.040%/0.015%
-    let late = get_thresholds(dec!(4));    // 3-6 min: 0.035%/0.012%
-    let very_late = get_thresholds(dec!(2)); // <3 min: 0.025%/0.008%
+    // Time brackets: >30 min, 10-30 min, 3-10 min, <3 min
+    let early = get_thresholds(dec!(35));     // >30 min: 0.030%/0.020%
+    let mid = get_thresholds(dec!(15));       // 10-30 min: 0.021%/0.014%
+    let late = get_thresholds(dec!(5));       // 3-10 min: 0.015%/0.010%
+    let very_late = get_thresholds(dec!(2));  // <3 min: 0.009%/0.006%
 
     // Strong thresholds should decrease
-    assert!(early.strong > mid.strong);
-    assert!(mid.strong > mid2.strong);
-    assert!(mid2.strong > late.strong);
-    assert!(late.strong > very_late.strong);
+    assert!(early.strong > mid.strong, "early {} > mid {}", early.strong, mid.strong);
+    assert!(mid.strong > late.strong, "mid {} > late {}", mid.strong, late.strong);
+    assert!(late.strong > very_late.strong, "late {} > very_late {}", late.strong, very_late.strong);
 
     // Lean thresholds should also decrease
-    assert!(early.lean > mid.lean);
-    assert!(mid2.lean > late.lean);
-    assert!(late.lean > very_late.lean);
+    assert!(early.lean > mid.lean, "early lean {} > mid lean {}", early.lean, mid.lean);
+    assert!(mid.lean > late.lean, "mid lean {} > late lean {}", mid.lean, late.lean);
+    assert!(late.lean > very_late.lean, "late lean {} > very_late lean {}", late.lean, very_late.lean);
 }
 
 #[test]
 fn test_signal_late_window_detects_smaller_moves() {
-    // Same 0.01% move should be Neutral early but directional late
-    let spot = dec!(100010);  // 0.01% above strike
+    // Same 0.008% move should be Neutral early but directional late
+    let spot = dec!(100008);  // 0.008% above strike
     let strike = dec!(100000);
 
-    // Early (>12 min): 0.01% < 0.03% lean threshold -> Neutral
-    let early_signal = get_signal(spot, strike, dec!(15));
+    // Early (35 min, >30 bracket): lean=0.02%, 0.008% < 0.02% -> Neutral
+    let early_signal = get_signal(spot, strike, dec!(35));
     assert_eq!(early_signal, Signal::Neutral);
 
-    // Very late (<3 min): 0.01% > 0.008% lean threshold -> directional
+    // Very late (2 min, <3 bracket): lean=0.006%, 0.008% > 0.006% -> directional
     let late_signal = get_signal(spot, strike, dec!(2));
-    // At <3 min, lean threshold is 0.008%, strong threshold is 0.025%
-    // 0.01% is between lean and strong, so should be LeanUp
-    assert!(late_signal.is_directional());
+    // At <3 min, lean=0.006%, strong=0.009%
+    // 0.006% < 0.008% < 0.009% -> LeanUp
+    assert!(late_signal.is_directional(), "Expected directional, got {:?}", late_signal);
+    assert_eq!(late_signal, Signal::LeanUp);
 }
 
 // ============================================================================
@@ -150,18 +151,20 @@ fn test_signal_late_window_detects_smaller_moves() {
 
 #[test]
 fn test_signal_allocation_ratios_strong_up() {
+    // Optimized: Strong = 82/18
     let signal = Signal::StrongUp;
-    assert_eq!(signal.up_ratio(), dec!(0.78));
-    assert_eq!(signal.down_ratio(), dec!(0.22));
+    assert_eq!(signal.up_ratio(), dec!(0.82));
+    assert_eq!(signal.down_ratio(), dec!(0.18));
     // Ratios should sum to 1.0
     assert_eq!(signal.up_ratio() + signal.down_ratio(), Decimal::ONE);
 }
 
 #[test]
 fn test_signal_allocation_ratios_lean_up() {
+    // Optimized: Lean = 65/35
     let signal = Signal::LeanUp;
-    assert_eq!(signal.up_ratio(), dec!(0.60));
-    assert_eq!(signal.down_ratio(), dec!(0.40));
+    assert_eq!(signal.up_ratio(), dec!(0.65));
+    assert_eq!(signal.down_ratio(), dec!(0.35));
     assert_eq!(signal.up_ratio() + signal.down_ratio(), Decimal::ONE);
 }
 
@@ -175,17 +178,19 @@ fn test_signal_allocation_ratios_neutral() {
 
 #[test]
 fn test_signal_allocation_ratios_lean_down() {
+    // Optimized: Lean = 35/65
     let signal = Signal::LeanDown;
-    assert_eq!(signal.up_ratio(), dec!(0.40));
-    assert_eq!(signal.down_ratio(), dec!(0.60));
+    assert_eq!(signal.up_ratio(), dec!(0.35));
+    assert_eq!(signal.down_ratio(), dec!(0.65));
     assert_eq!(signal.up_ratio() + signal.down_ratio(), Decimal::ONE);
 }
 
 #[test]
 fn test_signal_allocation_ratios_strong_down() {
+    // Optimized: Strong = 18/82
     let signal = Signal::StrongDown;
-    assert_eq!(signal.up_ratio(), dec!(0.22));
-    assert_eq!(signal.down_ratio(), dec!(0.78));
+    assert_eq!(signal.up_ratio(), dec!(0.18));
+    assert_eq!(signal.down_ratio(), dec!(0.82));
     assert_eq!(signal.up_ratio() + signal.down_ratio(), Decimal::ONE);
 }
 
@@ -206,8 +211,8 @@ fn test_detector_detects_strong_up_opportunity() {
 
     let opp = result.unwrap();
     assert_eq!(opp.signal, Signal::StrongUp);
-    assert_eq!(opp.up_ratio, dec!(0.78));
-    assert_eq!(opp.down_ratio, dec!(0.22));
+    assert_eq!(opp.up_ratio, dec!(0.82));  // Optimized
+    assert_eq!(opp.down_ratio, dec!(0.18));
 }
 
 #[test]
@@ -223,8 +228,8 @@ fn test_detector_detects_strong_down_opportunity() {
 
     let opp = result.unwrap();
     assert_eq!(opp.signal, Signal::StrongDown);
-    assert_eq!(opp.up_ratio, dec!(0.22));
-    assert_eq!(opp.down_ratio, dec!(0.78));
+    assert_eq!(opp.up_ratio, dec!(0.18));  // Optimized
+    assert_eq!(opp.down_ratio, dec!(0.82));
 }
 
 #[test]
@@ -474,18 +479,20 @@ fn test_opportunity_expected_profit() {
 fn test_opportunity_is_strong_check() {
     let detector = DirectionalDetector::new();
 
-    // Strong signal (0.1% above strike, at 10 min = 9-12 bracket, 0.05% strong threshold)
+    // Strong signal (0.1% above strike, at 10 min = 3-10 bracket, 0.015% strong threshold)
+    // 0.1% > 0.015% -> StrongUp
     // Use tight spreads (< 10%)
     let mut strong_state = create_market_state(Some(dec!(100100)), dec!(100000), 600);
     add_book_levels(&mut strong_state, dec!(0.48), dec!(0.50), dec!(0.46), dec!(0.48), dec!(1000));
     let strong_opp = detector.detect(&strong_state).unwrap();
-    assert!(strong_opp.is_strong());
+    assert!(strong_opp.is_strong(), "Expected StrongUp, got {:?}", strong_opp.signal);
 
-    // Lean signal (0.035% above strike, at 10 min, 0.025% lean < 0.035% < 0.05% strong)
-    let mut lean_state = create_market_state(Some(dec!(100035)), dec!(100000), 600);
+    // Lean signal (0.012% above strike, at 10 min = 3-10 bracket)
+    // 0.01% < 0.012% < 0.015% -> LeanUp
+    let mut lean_state = create_market_state(Some(dec!(100012)), dec!(100000), 600);
     add_book_levels(&mut lean_state, dec!(0.48), dec!(0.50), dec!(0.46), dec!(0.48), dec!(1000));
     let lean_opp = detector.detect(&lean_state).unwrap();
-    assert!(!lean_opp.is_strong());
+    assert!(!lean_opp.is_strong(), "Expected LeanUp, got {:?}", lean_opp.signal);
 }
 
 // ============================================================================

@@ -21,6 +21,7 @@ rust_decimal_macros = { workspace = true }
 
 # Time
 chrono = { workspace = true }
+time = { workspace = true }
 
 # Concurrency
 dashmap = { workspace = true }

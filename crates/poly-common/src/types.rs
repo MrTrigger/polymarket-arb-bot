@@ -38,6 +38,28 @@ impl CryptoAsset {
             CryptoAsset::Xrp => "XRP",
         }
     }
+
+    /// Estimated 15-minute ATR (Average True Range) in USD.
+    ///
+    /// These are rough estimates based on typical volatility.
+    /// Used to normalize distance confidence across assets with different
+    /// price levels and volatility characteristics.
+    ///
+    /// Values are calibrated so that ~0.5-1.0 ATR represents a meaningful
+    /// directional move within a 15-minute window.
+    pub fn estimated_atr_15m(&self) -> rust_decimal::Decimal {
+        use rust_decimal_macros::dec;
+        match self {
+            // BTC ~$96k: typical 15-min range ~$100-150 (0.10-0.15%)
+            CryptoAsset::Btc => dec!(120),
+            // ETH ~$3.3k: typical 15-min range ~$6-12 (0.18-0.35%)
+            CryptoAsset::Eth => dec!(8),
+            // SOL ~$145: typical 15-min range ~$1-2 (0.7-1.4%)
+            CryptoAsset::Sol => dec!(1.5),
+            // XRP ~$0.60: typical 15-min range ~$0.01-0.02 (1.5-3%)
+            CryptoAsset::Xrp => dec!(0.015),
+        }
+    }
 }
 
 impl std::fmt::Display for CryptoAsset {
@@ -50,6 +72,8 @@ impl std::fmt::Display for CryptoAsset {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum WindowDuration {
+    /// 5-minute markets.
+    FiveMin,
     /// 15-minute markets (original target).
     #[default]
     FifteenMin,
@@ -61,6 +85,7 @@ impl WindowDuration {
     /// Returns the duration in minutes.
     pub fn minutes(&self) -> u32 {
         match self {
+            WindowDuration::FiveMin => 5,
             WindowDuration::FifteenMin => 15,
             WindowDuration::OneHour => 60,
         }
@@ -74,6 +99,7 @@ impl WindowDuration {
     /// Keywords to match in market titles.
     pub fn keywords(&self) -> &'static [&'static str] {
         match self {
+            WindowDuration::FiveMin => &["5 min", "5-min", "5min", "5 minute"],
             WindowDuration::FifteenMin => &["15 min", "15-min", "15min", "15 minute"],
             WindowDuration::OneHour => &["1 hour", "1h ", "1-hour", "one hour"],
         }
@@ -82,15 +108,27 @@ impl WindowDuration {
     /// Pattern to match in market slugs (more reliable than titles).
     pub fn slug_patterns(&self) -> &'static [&'static str] {
         match self {
-            WindowDuration::FifteenMin => &["15min", "15-min"],
+            WindowDuration::FiveMin => &["5m-", "-5m-", "updown-5m"],
+            WindowDuration::FifteenMin => &["15min", "15-min", "15m-"],
             // 1-hour markets use time patterns like "9am-et", "10am-et", "1pm-et"
             WindowDuration::OneHour => &["am-et", "pm-et"],
+        }
+    }
+
+    /// Returns the Polymarket tag_slug for API queries.
+    /// These are required because markets are hidden from general listings.
+    pub fn tag_slug(&self) -> Option<&'static str> {
+        match self {
+            WindowDuration::FiveMin => Some("5M"),
+            WindowDuration::FifteenMin => Some("15M"),
+            WindowDuration::OneHour => None, // 1h markets don't have a dedicated tag
         }
     }
 
     /// Returns the display name.
     pub fn as_str(&self) -> &'static str {
         match self {
+            WindowDuration::FiveMin => "5m",
             WindowDuration::FifteenMin => "15min",
             WindowDuration::OneHour => "1h",
         }
@@ -108,6 +146,7 @@ impl std::str::FromStr for WindowDuration {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
+            "5min" | "5m" | "5" | "fivemin" => Ok(WindowDuration::FiveMin),
             "15min" | "15m" | "15" | "fifteenmin" => Ok(WindowDuration::FifteenMin),
             "1h" | "1hour" | "60" | "60min" | "onehour" | "hour" => Ok(WindowDuration::OneHour),
             _ => Err(format!("Unknown window duration: {}", s)),

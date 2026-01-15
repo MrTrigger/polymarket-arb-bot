@@ -79,16 +79,17 @@ ORDER BY (token_id, timestamp, trade_id)
 PARTITION BY toYYYYMM(timestamp);
 
 -- Trading decisions (observability)
+-- Note: Uses Float64 for price fields because clickhouse-rs doesn't support rust_decimal
 CREATE TABLE IF NOT EXISTS decisions (
     decision_id UInt64,
     event_id String,
     timestamp DateTime64(3, 'UTC'),
     decision_type LowCardinality(String),
-    yes_ask Decimal(18, 8),
-    no_ask Decimal(18, 8),
-    combined_cost Decimal(18, 8),
-    arb_margin Decimal(18, 8),
-    spot_price Decimal(18, 8),
+    yes_ask Float64,
+    no_ask Float64,
+    combined_cost Float64,
+    arb_margin Float64,
+    spot_price Float64,
     time_remaining_secs UInt32,
     action LowCardinality(String),
     reason String,

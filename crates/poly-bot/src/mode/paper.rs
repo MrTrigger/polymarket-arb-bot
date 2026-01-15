@@ -209,8 +209,9 @@ impl PaperMode {
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         let data_source = LiveDataSource::new(self.config.data_source.clone());
 
-        // Get handle to active markets before moving data_source
+        // Get handles before moving data_source
         let active_markets = data_source.active_markets_handle();
+        let event_sender = data_source.event_sender();
 
         // Spawn market discovery task
         let discovery_shutdown = self.shutdown_tx.subscribe();
@@ -218,6 +219,7 @@ impl PaperMode {
         let _discovery_handle = tokio::spawn(run_market_discovery(
             discovery_config,
             active_markets,
+            event_sender,
             discovery_shutdown,
         ));
 
@@ -459,11 +461,16 @@ impl PaperMode {
 ///
 /// Periodically queries the Gamma API for new 15-minute markets
 /// and adds them to the active markets state for CLOB subscription.
+/// Also sends WindowOpenEvent to the strategy for each discovered market.
 async fn run_market_discovery(
     config: DiscoveryConfig,
     active_markets: crate::data_source::live::ActiveMarketsState,
+    event_sender: crate::data_source::live::EventSender,
     mut shutdown: broadcast::Receiver<()>,
 ) {
+    use crate::data_source::{MarketEvent, WindowOpenEvent};
+    use chrono::Utc;
+
     info!(
         "Starting market discovery for {:?}",
         config.assets.iter().map(|a| a.as_str()).collect::<Vec<_>>()
@@ -490,11 +497,33 @@ async fn run_market_discovery(
                             strike_price: market.strike_price,
                             window_end: market.window_end,
                         };
+
+                        // Generate Polymarket URL for easy tracking
+                        let url = format!(
+                            "https://polymarket.com/event/{}",
+                            market.event_id
+                        );
                         info!(
-                            "Adding market {} ({} strike={}) to active markets",
-                            market.event_id, market.asset, market.strike_price
+                            "Adding market {} ({} strike={}) to active markets\n    URL: {}",
+                            market.event_id, market.asset, market.strike_price, url
                         );
                         active.insert(market.event_id.clone(), active_market);
+
+                        // Send WindowOpenEvent to strategy
+                        let window_event = MarketEvent::WindowOpen(WindowOpenEvent {
+                            event_id: market.event_id.clone(),
+                            asset: market.asset,
+                            yes_token_id: market.yes_token_id.clone(),
+                            no_token_id: market.no_token_id.clone(),
+                            strike_price: market.strike_price,
+                            window_start: market.window_start,
+                            window_end: market.window_end,
+                            timestamp: Utc::now(),
+                        });
+
+                        if let Err(e) = event_sender.send(window_event).await {
+                            warn!("Failed to send WindowOpen event: {}", e);
+                        }
                     }
                 }
             }

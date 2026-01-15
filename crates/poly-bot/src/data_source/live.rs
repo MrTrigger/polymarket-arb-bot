@@ -85,11 +85,15 @@ pub struct ActiveMarket {
 /// Shared state for active markets.
 pub type ActiveMarketsState = Arc<RwLock<HashMap<String, ActiveMarket>>>;
 
+/// Event sender for injecting events into the data source.
+pub type EventSender = mpsc::Sender<MarketEvent>;
+
 /// Live data source that connects to real WebSocket feeds.
 pub struct LiveDataSource {
     #[allow(dead_code)]
     config: LiveDataSourceConfig,
     event_rx: mpsc::Receiver<MarketEvent>,
+    event_tx: EventSender,
     shutdown_tx: broadcast::Sender<()>,
     active_markets: ActiveMarketsState,
     is_running: bool,
@@ -124,6 +128,9 @@ impl LiveDataSource {
             }
         });
 
+        // Keep a sender for external event injection (must clone before moving to heartbeat)
+        let external_event_tx = event_tx.clone();
+
         // Spawn heartbeat task
         let heartbeat_shutdown = shutdown_tx.subscribe();
         let heartbeat_tx = event_tx;
@@ -135,6 +142,7 @@ impl LiveDataSource {
         Self {
             config,
             event_rx,
+            event_tx: external_event_tx,
             shutdown_tx,
             active_markets,
             is_running: true,
@@ -165,6 +173,11 @@ impl LiveDataSource {
     /// even after the data source has been moved into a strategy loop.
     pub fn active_markets_handle(&self) -> ActiveMarketsState {
         Arc::clone(&self.active_markets)
+    }
+
+    /// Get an event sender for injecting events (e.g., WindowOpen from discovery).
+    pub fn event_sender(&self) -> EventSender {
+        self.event_tx.clone()
     }
 }
 

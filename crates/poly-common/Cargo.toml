@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 # Financial math - NEVER use f64 for prices
 rust_decimal = { workspace = true }
+rust_decimal_macros = "1.36"
 
 # Time
 chrono = { workspace = true }

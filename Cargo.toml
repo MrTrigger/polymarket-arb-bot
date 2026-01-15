@@ -28,12 +28,13 @@ rust_decimal_macros = "1.36"
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }
+time = { version = "0.3", features = ["serde"] }
 
 # Concurrency
 dashmap = "6.1"
 
 # Database
-clickhouse = { version = "0.13", features = ["inserter"] }
+clickhouse = { version = "0.13", features = ["inserter", "time"] }
 
 # Error handling
 thiserror = "2.0"

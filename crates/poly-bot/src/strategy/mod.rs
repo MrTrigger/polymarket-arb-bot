@@ -29,10 +29,12 @@
 
 pub mod aggregator;
 pub mod arb;
+pub mod atr;
 pub mod confidence;
 pub mod confidence_sizing;
 pub mod directional;
 pub mod maker;
+pub mod position;
 pub mod pricing;
 pub mod signal;
 pub mod sizing;
@@ -350,10 +352,13 @@ struct TrackedMarket {
     no_toxic_warning: Option<ToxicFlowWarning>,
     /// Active maker orders for this market (keyed by order_id).
     active_maker_orders: HashMap<String, ActiveMakerOrder>,
+    /// Phase-based position manager for this market.
+    /// Controls when/how much to trade based on confidence and budget.
+    position_manager: position::PositionManager,
 }
 
 impl TrackedMarket {
-    fn new(event: &WindowOpenEvent) -> Self {
+    fn new(event: &WindowOpenEvent, market_budget: Decimal) -> Self {
         let state = MarketState::new(
             event.event_id.clone(),
             event.asset,
@@ -362,6 +367,8 @@ impl TrackedMarket {
             event.strike_price,
             (event.window_end - Utc::now()).num_seconds(),
         );
+        // Use asset-specific ATR for proper volatility normalization
+        let atr = event.asset.estimated_atr_15m();
         Self {
             event_id: event.event_id.clone(),
             asset: event.asset,
@@ -374,7 +381,34 @@ impl TrackedMarket {
             yes_toxic_warning: None,
             no_toxic_warning: None,
             active_maker_orders: HashMap::new(),
+            position_manager: position::PositionManager::with_budget_and_atr(market_budget, atr),
         }
+    }
+
+    /// Check if we should trade using phase-based position management.
+    ///
+    /// This implements the spec's intelligent capital allocation:
+    /// 1. **Reserve capital for later phases** when signals are clearer
+    /// 2. **Gate trades by confidence threshold** - stricter early, looser late
+    /// 3. **Scale position size by confidence** - bigger when more certain
+    /// 4. **Enforce position limits** - never go all-in on one side
+    fn should_trade(&self, distance_dollars: Decimal, seconds_remaining: i64) -> position::TradeDecision {
+        self.position_manager.should_trade(distance_dollars, seconds_remaining)
+    }
+
+    /// Record a completed trade in the position manager.
+    fn record_trade(&mut self, size: Decimal, up_amount: Decimal, down_amount: Decimal, seconds_remaining: i64) {
+        self.position_manager.record_trade(size, up_amount, down_amount, seconds_remaining);
+    }
+
+    /// Check if we have any position in this market.
+    fn has_position(&self) -> bool {
+        self.inventory.total_exposure() > Decimal::ZERO
+    }
+
+    /// Get the position manager's budget remaining.
+    fn budget_remaining(&self) -> Decimal {
+        self.position_manager.budget_remaining()
     }
 
     /// Update seconds remaining.
@@ -483,6 +517,10 @@ pub struct StrategyLoop<D: DataSource, E: Executor> {
     obs_sender: Option<mpsc::Sender<TradeDecision>>,
     /// Multi-engine observability channel sender (optional).
     multi_obs_sender: Option<mpsc::Sender<MultiEngineDecision>>,
+    /// Last status log time for periodic logging.
+    last_status_log: std::time::Instant,
+    /// Dynamic ATR tracker for volatility-adjusted position sizing.
+    atr_tracker: atr::AtrTracker,
 }
 
 impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
@@ -534,6 +572,8 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             decision_counter: 0,
             obs_sender: None,
             multi_obs_sender: None,
+            last_status_log: std::time::Instant::now(),
+            atr_tracker: atr::AtrTracker::default(),
         }
     }
 
@@ -565,6 +605,33 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             EngineType::Directional => self.engines_config.directional.enabled,
             EngineType::MakerRebates => self.engines_config.maker.enabled,
         }
+    }
+
+    /// Warm up the ATR tracker with historical prices.
+    ///
+    /// Call this before running the strategy loop to ensure accurate ATR
+    /// from the first trade. Pass prices from the last 5-10 minutes.
+    ///
+    /// # Arguments
+    /// * `asset` - The asset to warm up
+    /// * `prices` - Historical prices in chronological order (oldest first)
+    pub fn warmup_atr(&mut self, asset: CryptoAsset, prices: &[Decimal]) {
+        if prices.is_empty() {
+            return;
+        }
+        info!(
+            "Warming up ATR for {} with {} historical prices",
+            asset,
+            prices.len()
+        );
+        self.atr_tracker.warmup(asset, prices);
+        let atr = self.atr_tracker.get_atr(asset);
+        info!("ATR for {} warmed up to ${:.2}", asset, atr);
+    }
+
+    /// Check if ATR is warmed up for all tracked assets.
+    pub fn is_atr_warmed_up(&self) -> bool {
+        self.atr_tracker.is_warmed_up_all()
     }
 
     /// Run the strategy loop until shutdown or error.
@@ -644,6 +711,9 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
         // Update local cache
         self.spot_prices.insert(event.asset, event.price);
 
+        // Record price for dynamic ATR calculation
+        self.atr_tracker.record_price(event.asset, event.price);
+
         // Update global state
         self.state.market_data.update_spot_price(
             &event.asset.to_string(),
@@ -655,7 +725,72 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
         for market in self.markets.values_mut() {
             if market.asset == event.asset {
                 market.state.spot_price = Some(event.price);
+
+                // For Up/Down markets, if strike is still 0, set it from first spot price
+                if market.state.strike_price.is_zero() {
+                    info!(
+                        "Setting strike price for Up/Down market {} from spot={}",
+                        market.event_id, event.price
+                    );
+                    market.state.strike_price = event.price;
+                }
             }
+        }
+    }
+
+    /// Log periodic market status for debugging.
+    fn log_market_status(&self) {
+        // Find the closest market to expiry
+        let mut closest_market: Option<(&String, &TrackedMarket)> = None;
+        for (event_id, market) in &self.markets {
+            if market.is_expired() {
+                continue;
+            }
+            match &closest_market {
+                None => closest_market = Some((event_id, market)),
+                Some((_, existing)) => {
+                    if market.state.seconds_remaining < existing.state.seconds_remaining {
+                        closest_market = Some((event_id, market));
+                    }
+                }
+            }
+        }
+
+        if let Some((event_id, market)) = closest_market {
+            let state = &market.state;
+            let mins = Decimal::from(state.seconds_remaining) / dec!(60);
+            let thresholds = get_thresholds(mins);
+
+            if let Some(spot) = state.spot_price {
+                let distance = if !state.strike_price.is_zero() {
+                    (spot - state.strike_price) / state.strike_price * dec!(100)
+                } else {
+                    Decimal::ZERO
+                };
+                let has_book = state.yes_book.best_ask().is_some() && state.no_book.best_ask().is_some();
+                let dynamic_atr = self.atr_tracker.get_atr(market.asset);
+
+                info!(
+                    "📊 Status {} {}: spot={} strike={} dist={:.4}% time={}min atr=${:.2} thresholds=[lean={:.4}% strong={:.4}%] book={}",
+                    event_id,
+                    market.asset,
+                    spot,
+                    state.strike_price,
+                    distance,
+                    mins.round(),
+                    dynamic_atr,
+                    thresholds.lean * dec!(100),
+                    thresholds.strong * dec!(100),
+                    if has_book { "ready" } else { "waiting" }
+                );
+            } else {
+                info!(
+                    "📊 Status {} {}: NO SPOT PRICE strike={} time={}min",
+                    event_id, market.asset, state.strike_price, mins.round()
+                );
+            }
+        } else {
+            info!("📊 Status: No active markets");
         }
     }
 
@@ -805,12 +940,33 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
     }
 
     /// Handle new market window.
-    fn handle_window_open(&mut self, event: WindowOpenEvent) {
-        info!("Window open: {} {} strike={}",
-            event.event_id, event.asset, event.strike_price);
+    fn handle_window_open(&mut self, mut event: WindowOpenEvent) {
+        // For "Up or Down" relative markets, strike_price is 0 from discovery.
+        // Set strike from current spot price (the opening price).
+        if event.strike_price.is_zero() {
+            if let Some(&spot) = self.spot_prices.get(&event.asset) {
+                info!(
+                    "Window open: {} {} (Up/Down market, setting strike from spot={})",
+                    event.event_id, event.asset, spot
+                );
+                event.strike_price = spot;
+            } else {
+                warn!(
+                    "Window open: {} {} has no strike price and no spot price available. \
+                     Market will not trade until spot price is received.",
+                    event.event_id, event.asset
+                );
+            }
+        } else {
+            info!("Window open: {} {} strike={}",
+                event.event_id, event.asset, event.strike_price);
+        }
 
-        // Create tracked market
-        let market = TrackedMarket::new(&event);
+        // Calculate budget per market from sizing config
+        let market_budget = self.config.sizing_config.max_position_per_market;
+
+        // Create tracked market with phase-based position management
+        let market = TrackedMarket::new(&event, market_budget);
 
         // Update token mapping
         self.token_to_event.insert(event.yes_token_id.clone(), event.event_id.clone());
@@ -867,6 +1023,12 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             return Ok(());
         }
 
+        // Periodic status log (every 15 seconds)
+        if self.last_status_log.elapsed() > std::time::Duration::from_secs(15) {
+            self.last_status_log = std::time::Instant::now();
+            self.log_market_status();
+        }
+
         // Calculate total exposure once
         let total_exposure = self.state.market_data.total_exposure();
 
@@ -918,7 +1080,11 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             let directional_opportunity = if self.engines_config.directional.enabled {
                 match self.directional_detector.detect(market_state) {
                     Ok(opp) => {
-                        trace!("Directional detected for {}: signal={:?}", event_id, opp.signal);
+                        // Only log at debug level to avoid spam - meaningful logging happens later
+                        trace!(
+                            "Directional {} {}: signal={:?} dist={:.4}%",
+                            event_id, asset, opp.signal, opp.distance * dec!(100)
+                        );
                         Some(opp)
                     }
                     Err(reason) => {
@@ -996,6 +1162,18 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                 Some(EngineDecision::Arbitrage(opp)) => {
                     // Calculate position size for arb
                     let market = self.markets.get(&event_id).unwrap();
+
+                    // For arb: check if we already have a position.
+                    // Arb locks in profit regardless of outcome, so we shouldn't
+                    // keep adding once we're already positioned.
+                    if market.has_position() {
+                        trace!(
+                            "Already have arb position for {}, skipping",
+                            event_id
+                        );
+                        continue; // Silent skip - already have position
+                    }
+
                     let sizing = self.sizer.calculate_size(
                         opp,
                         Some(&market.inventory),
@@ -1051,19 +1229,65 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                     action
                 }
                 Some(EngineDecision::Directional(opp)) => {
-                    // Calculate size using confidence-based sizing
-                    let market = self.markets.get(&event_id).unwrap();
-                    let factors = ConfidenceFactors {
-                        distance_to_strike: opp.distance * market.state.strike_price,
-                        minutes_remaining: opp.minutes_remaining,
-                        signal: opp.signal,
-                        book_imbalance: opp.yes_imbalance,
-                        favorable_depth: market.state.yes_book.ask_depth()
-                            .min(market.state.no_book.ask_depth()),
-                    };
-                    let order_result = self.confidence_sizer.get_order_size(&factors);
-                    let total_size = order_result.size;
+                    // Update position manager with dynamic ATR before making decision
+                    let dynamic_atr = self.atr_tracker.get_atr(asset);
+                    if let Some(market) = self.markets.get_mut(&event_id) {
+                        market.position_manager.set_atr(dynamic_atr);
+                    }
 
+                    // Use phase-based position management for trade decisions
+                    let market = self.markets.get(&event_id).unwrap();
+
+                    // Calculate distance in dollars for position manager
+                    let distance_dollars = opp.distance * market.strike_price;
+                    let seconds_remaining = market.state.seconds_remaining;
+
+                    // Debug: log confidence calculation for position manager
+                    let mins = Decimal::from(seconds_remaining) / dec!(60);
+                    let phase = position::Phase::from_seconds(seconds_remaining);
+                    let pm_conf = market.position_manager.calculate_confidence(distance_dollars, mins);
+                    let atr = market.position_manager.atr();
+                    let atr_mult = if atr > Decimal::ZERO { distance_dollars.abs() / atr } else { Decimal::ZERO };
+
+                    // Check if we should trade based on phase, confidence, and budget
+                    let trade_decision = market.should_trade(distance_dollars, seconds_remaining);
+
+                    let (total_size, pm_confidence, phase) = match trade_decision {
+                        position::TradeDecision::Skip(reason) => {
+                            // Log skips with confidence details (debug level for low confidence to reduce spam)
+                            if matches!(reason, position::SkipReason::LowConfidence) {
+                                debug!(
+                                    "⏭️ {} {} LowConf: signal={:?} dist=${:.2} atr_mult={:.2} conf={:.2} need={:.2} phase={}",
+                                    event_id, asset, opp.signal, distance_dollars, atr_mult, pm_conf, phase.min_confidence(), phase
+                                );
+                            } else {
+                                info!(
+                                    "⏭️ Position manager skip {} {}: {:?} (signal={:?} dist={:.4}%)",
+                                    event_id, asset, reason, opp.signal, opp.distance * dec!(100)
+                                );
+                            }
+                            // Only record decision for meaningful skips, not low confidence
+                            if !matches!(reason, position::SkipReason::LowConfidence) {
+                                self.record_multi_decision(
+                                    &event_id,
+                                    asset,
+                                    EngineType::Directional,
+                                    aggregated.clone(),
+                                    None,
+                                    toxic_warning.clone(),
+                                    TradeAction::SkipSizing,
+                                    event_latency_us,
+                                );
+                                self.state.metrics.inc_skipped();
+                            }
+                            continue;
+                        }
+                        position::TradeDecision::Trade { size, confidence, phase } => {
+                            (size, confidence, phase)
+                        }
+                    };
+
+                    // Verify size is meaningful
                     if total_size < Decimal::ONE {
                         debug!("Directional size too small for {}: {}", event_id, total_size);
                         self.record_multi_decision(
@@ -1081,8 +1305,8 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                     }
 
                     // Execute directional trade
-                    info!("Executing directional: {} signal={:?} size={} engine=Directional",
-                        event_id, opp.signal, total_size);
+                    info!("Executing directional: {} signal={:?} size={:.2} phase={} conf={:.2} engine=Directional",
+                        event_id, opp.signal, total_size, phase, pm_confidence);
 
                     let action = self.execute_directional(opp, total_size).await?;
 
@@ -1182,11 +1406,19 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             opportunity.no_ask,
         );
 
+        // Track fills for inventory update
+        let mut yes_filled_size = Decimal::ZERO;
+        let mut yes_filled_cost = Decimal::ZERO;
+        let mut no_filled_size = Decimal::ZERO;
+        let mut no_filled_cost = Decimal::ZERO;
+
         // Submit YES order
         let yes_result = self.executor.place_order(yes_order).await;
         match &yes_result {
             Ok(result) if result.is_filled() => {
-                debug!("YES order filled: {} shares", result.filled_size());
+                yes_filled_size = result.filled_size();
+                yes_filled_cost = result.filled_cost();
+                debug!("YES order filled: {} shares, cost={}", yes_filled_size, yes_filled_cost);
             }
             Ok(result) => {
                 debug!("YES order not filled: {:?}", result);
@@ -1205,7 +1437,9 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
         let no_result = self.executor.place_order(no_order).await;
         match &no_result {
             Ok(result) if result.is_filled() => {
-                debug!("NO order filled: {} shares", result.filled_size());
+                no_filled_size = result.filled_size();
+                no_filled_cost = result.filled_cost();
+                debug!("NO order filled: {} shares, cost={}", no_filled_size, no_filled_cost);
             }
             Ok(result) => {
                 debug!("NO order not filled: {:?}", result);
@@ -1216,6 +1450,38 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                     self.state.trip_circuit_breaker();
                     warn!("Circuit breaker tripped after consecutive failures");
                 }
+            }
+        }
+
+        // CRITICAL: Update inventory immediately after fills to prevent over-trading.
+        // This ensures subsequent orderbook updates see the correct position.
+        if yes_filled_size > Decimal::ZERO || no_filled_size > Decimal::ZERO {
+            if let Some(market) = self.markets.get_mut(&opportunity.event_id) {
+                if yes_filled_size > Decimal::ZERO {
+                    market.inventory.record_fill(Outcome::Yes, yes_filled_size, yes_filled_cost);
+                }
+                if no_filled_size > Decimal::ZERO {
+                    market.inventory.record_fill(Outcome::No, no_filled_size, no_filled_cost);
+                }
+
+                // Update global state inventory for sizing calculations
+                let pos = crate::state::InventoryPosition {
+                    event_id: opportunity.event_id.clone(),
+                    yes_shares: market.inventory.yes_shares,
+                    no_shares: market.inventory.no_shares,
+                    yes_cost_basis: market.inventory.yes_cost_basis,
+                    no_cost_basis: market.inventory.no_cost_basis,
+                    realized_pnl: market.inventory.realized_pnl,
+                };
+                self.state.market_data.update_inventory(&opportunity.event_id, pos);
+
+                debug!(
+                    "Inventory updated for {}: YES={} NO={} total_exposure={}",
+                    opportunity.event_id,
+                    market.inventory.yes_shares,
+                    market.inventory.no_shares,
+                    market.inventory.total_exposure()
+                );
             }
         }
 
@@ -1247,10 +1513,10 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
         opportunity: &DirectionalOpportunity,
         total_size: Decimal,
     ) -> Result<TradeAction, StrategyError> {
-        let event_id = &opportunity.event_id;
+        let event_id = opportunity.event_id.clone();
 
         // Get the tracked market for order book access
-        let market = match self.markets.get(event_id) {
+        let market = match self.markets.get(&event_id) {
             Some(m) => m,
             None => {
                 warn!("No tracked market for directional: {}", event_id);
@@ -1282,6 +1548,10 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             }
         };
 
+        // Extract token IDs before we need to borrow self.markets mutably
+        let yes_token_id = market.yes_token_id.clone();
+        let no_token_id = market.no_token_id.clone();
+
         info!(
             "Directional trade: {} signal={:?} distance={:.4}% conf={:.2}x up_size={} down_size={} up_price={} down_price={}",
             event_id,
@@ -1298,15 +1568,19 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
         let req_id_base = self.decision_counter;
         self.decision_counter += 1;
 
-        // Track total volume for metrics
+        // Track total volume for metrics and fills for inventory
         let mut total_volume = Decimal::ZERO;
+        let mut up_filled_size = Decimal::ZERO;
+        let mut up_filled_cost = Decimal::ZERO;
+        let mut down_filled_size = Decimal::ZERO;
+        let mut down_filled_cost = Decimal::ZERO;
 
         // Place UP (YES) order if size is significant
         if up_size >= Decimal::ONE {
             let up_order = OrderRequest {
                 request_id: format!("dir-{}-up", req_id_base),
                 event_id: event_id.clone(),
-                token_id: market.yes_token_id.clone(),
+                token_id: yes_token_id.clone(),
                 outcome: Outcome::Yes,
                 side: Side::Buy,
                 size: up_size,
@@ -1319,9 +1593,10 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             let up_result = self.executor.place_order(up_order).await;
             match up_result {
                 Ok(result) if result.is_filled() => {
-                    let cost = result.filled_cost();
-                    total_volume += cost;
-                    debug!("UP order filled: {} shares @ {}", result.filled_size(), up_price);
+                    up_filled_size = result.filled_size();
+                    up_filled_cost = result.filled_cost();
+                    total_volume += up_filled_cost;
+                    debug!("UP order filled: {} shares, cost={}", up_filled_size, up_filled_cost);
                 }
                 Ok(result) => {
                     debug!("UP order not filled: {:?}", result);
@@ -1341,7 +1616,7 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             let down_order = OrderRequest {
                 request_id: format!("dir-{}-down", req_id_base),
                 event_id: event_id.clone(),
-                token_id: market.no_token_id.clone(),
+                token_id: no_token_id.clone(),
                 outcome: Outcome::No,
                 side: Side::Buy,
                 size: down_size,
@@ -1354,9 +1629,10 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             let down_result = self.executor.place_order(down_order).await;
             match down_result {
                 Ok(result) if result.is_filled() => {
-                    let cost = result.filled_cost();
-                    total_volume += cost;
-                    debug!("DOWN order filled: {} shares @ {}", result.filled_size(), down_price);
+                    down_filled_size = result.filled_size();
+                    down_filled_cost = result.filled_cost();
+                    total_volume += down_filled_cost;
+                    debug!("DOWN order filled: {} shares, cost={}", down_filled_size, down_filled_cost);
                 }
                 Ok(result) => {
                     debug!("DOWN order not filled: {:?}", result);
@@ -1368,6 +1644,42 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                         warn!("Circuit breaker tripped after consecutive failures");
                     }
                 }
+            }
+        }
+
+        // CRITICAL: Update inventory immediately after fills to prevent over-trading.
+        // This ensures subsequent orderbook updates see the correct position.
+        if up_filled_size > Decimal::ZERO || down_filled_size > Decimal::ZERO {
+            if let Some(market) = self.markets.get_mut(&event_id) {
+                if up_filled_size > Decimal::ZERO {
+                    market.inventory.record_fill(Outcome::Yes, up_filled_size, up_filled_cost);
+                }
+                if down_filled_size > Decimal::ZERO {
+                    market.inventory.record_fill(Outcome::No, down_filled_size, down_filled_cost);
+                }
+
+                // Update global state inventory for sizing calculations
+                let pos = crate::state::InventoryPosition {
+                    event_id: event_id.clone(),
+                    yes_shares: market.inventory.yes_shares,
+                    no_shares: market.inventory.no_shares,
+                    yes_cost_basis: market.inventory.yes_cost_basis,
+                    no_cost_basis: market.inventory.no_cost_basis,
+                    realized_pnl: market.inventory.realized_pnl,
+                };
+                self.state.market_data.update_inventory(&event_id, pos);
+
+                // Record trade in position manager to update phase budgets
+                let seconds_remaining = market.state.seconds_remaining;
+                market.record_trade(total_volume, up_filled_cost, down_filled_cost, seconds_remaining);
+
+                debug!(
+                    "Inventory updated for {}: YES={} NO={} total_exposure={}",
+                    event_id,
+                    market.inventory.yes_shares,
+                    market.inventory.no_shares,
+                    market.inventory.total_exposure()
+                );
             }
         }
 
@@ -2398,7 +2710,7 @@ mod tests {
             timestamp: Utc::now(),
         };
 
-        let market = TrackedMarket::new(&event);
+        let market = TrackedMarket::new(&event, dec!(100));
         assert!(market.active_maker_orders.is_empty());
     }
 }

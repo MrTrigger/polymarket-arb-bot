@@ -1,0 +1,819 @@
+{
+  "window_mins": 60.0,
+  "baseline": {
+    "markets": 177,
+    "trades": 3428,
+    "capital": 171400.0,
+    "pnl": 17950.0,
+    "roi": 10.472578763127188
+  },
+  "pm_default": {
+    "markets": 180,
+    "trades": 3152,
+    "capital": 60672.729230443205,
+    "pnl": 19694.589552478392,
+    "roi": 32.460365311202146
+  },
+  "top_configs": [
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.65,
+        "base_lean": 30,
+        "base_conviction": 40,
+        "early_conf": 0.85,
+        "final_conf": 0.45
+      },
+      "trades": 2702,
+      "markets": 169,
+      "capital": 57028.402373879166,
+      "pnl": 24327.748950637808,
+      "roi": 42.65900487820907,
+      "win_rate": 56.213017751479285
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.65,
+        "base_lean": 30,
+        "base_conviction": 40,
+        "early_conf": 0.8,
+        "final_conf": 0.45
+      },
+      "trades": 2739,
+      "markets": 169,
+      "capital": 57544.23698276421,
+      "pnl": 24488.763389778254,
+      "roi": 42.55641342001491,
+      "win_rate": 56.213017751479285
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.65,
+        "base_lean": 30,
+        "base_conviction": 40,
+        "early_conf": 0.85,
+        "final_conf": 0.4
+      },
+      "trades": 2770,
+      "markets": 180,
+      "capital": 58026.076815224216,
+      "pnl": 24490.688751338246,
+      "roi": 42.20634944755159,
+      "win_rate": 52.77777777777778
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.65,
+        "base_lean": 30,
+        "base_conviction": 40,
+        "early_conf": 0.75,
+        "final_conf": 0.45
+      },
+      "trades": 2992,
+      "markets": 169,
+      "capital": 59117.59371717599,
+      "pnl": 24695.88137489857,
+      "roi": 41.77416539151769,
+      "win_rate": 56.213017751479285
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.65,
+        "base_lean": 30,
+        "base_conviction": 40,
+        "early_conf": 0.75,
+        "final_conf": 0.4
+      },
+      "trades": 3023,
+      "markets": 180,
+      "capital": 59599.433549635985,
+      "pnl": 24697.80673645855,
+      "roi": 41.43966689866198,
+      "win_rate": 52.77777777777778
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.65,
+        "base_lean": 30,
+        "base_conviction": 40,
+        "early_conf": 0.8,
+        "final_conf": 0.35
+      },
+      "trades": 3023,
+      "markets": 180,
+      "capital": 59599.433549635985,
+      "pnl": 24697.80673645855,
+      "roi": 41.43966689866198,
+      "win_rate": 52.77777777777778
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.65,
+        "base_lean": 30,
+        "base_conviction": 40,
+        "early_conf": 0.8,
+        "final_conf": 0.4
+      },
+      "trades": 3023,
+      "markets": 180,
+      "capital": 59599.433549635985,
+      "pnl": 24697.80673645855,
+      "roi": 41.43966689866198,
+      "win_rate": 52.77777777777778
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.65,
+        "base_lean": 30,
+        "base_conviction": 40,
+        "early_conf": 0.85,
+        "final_conf": 0.35
+      },
+      "trades": 3023,
+      "markets": 180,
+      "capital": 59599.433549635985,
+      "pnl": 24697.80673645855,
+      "roi": 41.43966689866198,
+      "win_rate": 52.77777777777778
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.65,
+        "base_lean": 30,
+        "base_conviction": 40,
+        "early_conf": 0.75,
+        "final_conf": 0.35
+      },
+      "trades": 3114,
+      "markets": 180,
+      "capital": 60387.14611632973,
+      "pnl": 24940.104365216925,
+      "roi": 41.30035275582048,
+      "win_rate": 52.77777777777778
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.65,
+        "base_lean": 20,
+        "base_conviction": 40,
+        "early_conf": 0.85,
+        "final_conf": 0.45
+      },
+      "trades": 2919,
+      "markets": 169,
+      "capital": 60946.28831294216,
+      "pnl": 25068.253667898633,
+      "roi": 41.1317150917873,
+      "win_rate": 60.35502958579882
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.61,
+        "base_lean": 30,
+        "base_conviction": 40,
+        "early_conf": 0.85,
+        "final_conf": 0.45
+      },
+      "trades": 2702,
+      "markets": 169,
+      "capital": 57028.402373879166,
+      "pnl": 23456.40591745849,
+      "roi": 41.13109422858789,
+      "win_rate": 56.213017751479285
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.61,
+        "base_lean": 30,
+        "base_conviction": 40,
+        "early_conf": 0.8,
+        "final_conf": 0.45
+      },
+      "trades": 2739,
+      "markets": 169,
+      "capital": 57544.23698276421,
+      "pnl": 23613.43040546566,
+      "roi": 41.03526546461709,
+      "win_rate": 56.213017751479285
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.65,
+        "base_lean": 20,
+        "base_conviction": 40,
+        "early_conf": 0.8,
+        "final_conf": 0.45
+      },
+      "trades": 2957,
+      "markets": 169,
+      "capital": 61540.049003799,
+      "pnl": 25236.362095783756,
+      "roi": 41.00803054970895,
+      "win_rate": 60.35502958579882
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.65,
+        "base_lean": 40,
+        "base_conviction": 60,
+        "early_conf": 0.85,
+        "final_conf": 0.45
+      },
+      "trades": 2467,
+      "markets": 169,
+      "capital": 52942.53060903149,
+      "pnl": 21707.469799059276,
+      "roi": 41.00194975446865,
+      "win_rate": 55.62130177514793
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.65,
+        "base_lean": 40,
+        "base_conviction": 60,
+        "early_conf": 0.8,
+        "final_conf": 0.45
+      },
+      "trades": 2504,
+      "markets": 169,
+      "capital": 53441.84676775033,
+      "pnl": 21862.186065417267,
+      "roi": 40.9083656117402,
+      "win_rate": 55.62130177514793
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.61,
+        "base_lean": 30,
+        "base_conviction": 40,
+        "early_conf": 0.85,
+        "final_conf": 0.4
+      },
+      "trades": 2770,
+      "markets": 180,
+      "capital": 58026.076815224216,
+      "pnl": 23610.657108494634,
+      "roi": 40.68973538169642,
+      "win_rate": 52.77777777777778
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.65,
+        "base_lean": 20,
+        "base_conviction": 40,
+        "early_conf": 0.85,
+        "final_conf": 0.4
+      },
+      "trades": 2993,
+      "markets": 180,
+      "capital": 62085.83258198194,
+      "pnl": 25249.20115142867,
+      "roi": 40.6682170494985,
+      "win_rate": 56.666666666666664
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.65,
+        "base_lean": 40,
+        "base_conviction": 60,
+        "early_conf": 0.85,
+        "final_conf": 0.4
+      },
+      "trades": 2532,
+      "markets": 180,
+      "capital": 53890.66816260744,
+      "pnl": 21873.440801118624,
+      "roi": 40.58855001596681,
+      "win_rate": 52.22222222222223
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.65,
+        "base_lean": 40,
+        "base_conviction": 60,
+        "early_conf": 0.75,
+        "final_conf": 0.45
+      },
+      "trades": 2739,
+      "markets": 169,
+      "capital": 54848.83566066443,
+      "pnl": 22140.852514211736,
+      "roi": 40.367041975496925,
+      "win_rate": 55.62130177514793
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.61,
+        "base_lean": 30,
+        "base_conviction": 40,
+        "early_conf": 0.75,
+        "final_conf": 0.45
+      },
+      "trades": 2992,
+      "markets": 169,
+      "capital": 59117.59371717599,
+      "pnl": 23827.842160957676,
+      "roi": 40.30583902814494,
+      "win_rate": 56.213017751479285
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.65,
+        "base_lean": 40,
+        "base_conviction": 60,
+        "early_conf": 0.75,
+        "final_conf": 0.4
+      },
+      "trades": 2767,
+      "markets": 180,
+      "capital": 55297.65705552153,
+      "pnl": 22152.107249913086,
+      "roi": 40.05975737393593,
+      "win_rate": 52.22222222222223
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.65,
+        "base_lean": 40,
+        "base_conviction": 60,
+        "early_conf": 0.8,
+        "final_conf": 0.35
+      },
+      "trades": 2767,
+      "markets": 180,
+      "capital": 55297.65705552153,
+      "pnl": 22152.107249913086,
+      "roi": 40.05975737393593,
+      "win_rate": 52.22222222222223
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.65,
+        "base_lean": 40,
+        "base_conviction": 60,
+        "early_conf": 0.8,
+        "final_conf": 0.4
+      },
+      "trades": 2767,
+      "markets": 180,
+      "capital": 55297.65705552153,
+      "pnl": 22152.107249913086,
+      "roi": 40.05975737393593,
+      "win_rate": 52.22222222222223
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.65,
+        "base_lean": 40,
+        "base_conviction": 60,
+        "early_conf": 0.85,
+        "final_conf": 0.35
+      },
+      "trades": 2767,
+      "markets": 180,
+      "capital": 55297.65705552153,
+      "pnl": 22152.107249913086,
+      "roi": 40.05975737393593,
+      "win_rate": 52.22222222222223
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.58,
+        "base_lean": 30,
+        "base_conviction": 40,
+        "early_conf": 0.85,
+        "final_conf": 0.45
+      },
+      "trades": 2702,
+      "markets": 169,
+      "capital": 57028.402373879166,
+      "pnl": 22802.898642574015,
+      "roi": 39.985161241372026,
+      "win_rate": 56.213017751479285
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.61,
+        "base_lean": 30,
+        "base_conviction": 40,
+        "early_conf": 0.75,
+        "final_conf": 0.4
+      },
+      "trades": 3023,
+      "markets": 180,
+      "capital": 59599.433549635985,
+      "pnl": 23825.06886398665,
+      "roi": 39.97532769190583,
+      "win_rate": 52.77777777777778
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.61,
+        "base_lean": 30,
+        "base_conviction": 40,
+        "early_conf": 0.8,
+        "final_conf": 0.35
+      },
+      "trades": 3023,
+      "markets": 180,
+      "capital": 59599.433549635985,
+      "pnl": 23825.06886398665,
+      "roi": 39.97532769190583,
+      "win_rate": 52.77777777777778
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.61,
+        "base_lean": 30,
+        "base_conviction": 40,
+        "early_conf": 0.8,
+        "final_conf": 0.4
+      },
+      "trades": 3023,
+      "markets": 180,
+      "capital": 59599.433549635985,
+      "pnl": 23825.06886398665,
+      "roi": 39.97532769190583,
+      "win_rate": 52.77777777777778
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.61,
+        "base_lean": 30,
+        "base_conviction": 40,
+        "early_conf": 0.85,
+        "final_conf": 0.35
+      },
+      "trades": 3023,
+      "markets": 180,
+      "capital": 59599.433549635985,
+      "pnl": 23825.06886398665,
+      "roi": 39.97532769190583,
+      "win_rate": 52.77777777777778
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.65,
+        "base_lean": 40,
+        "base_conviction": 60,
+        "early_conf": 0.75,
+        "final_conf": 0.35
+      },
+      "trades": 2856,
+      "markets": 180,
+      "capital": 56066.14656790352,
+      "pnl": 22378.262378421383,
+      "roi": 39.91403680885817,
+      "win_rate": 52.22222222222223
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.58,
+        "base_lean": 30,
+        "base_conviction": 40,
+        "early_conf": 0.8,
+        "final_conf": 0.45
+      },
+      "trades": 2739,
+      "markets": 169,
+      "capital": 57544.23698276421,
+      "pnl": 22956.930667231216,
+      "roi": 39.89440449806873,
+      "win_rate": 56.213017751479285
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.65,
+        "base_lean": 20,
+        "base_conviction": 40,
+        "early_conf": 0.75,
+        "final_conf": 0.45
+      },
+      "trades": 3310,
+      "markets": 169,
+      "capital": 63845.10028152017,
+      "pnl": 25461.570227718177,
+      "roi": 39.880225914670504,
+      "win_rate": 60.35502958579882
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.61,
+        "base_lean": 30,
+        "base_conviction": 40,
+        "early_conf": 0.75,
+        "final_conf": 0.35
+      },
+      "trades": 3114,
+      "markets": 180,
+      "capital": 60387.14611632973,
+      "pnl": 24068.440192204147,
+      "roi": 39.85689296500075,
+      "win_rate": 52.77777777777778
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.65,
+        "base_lean": 30,
+        "base_conviction": 60,
+        "early_conf": 0.85,
+        "final_conf": 0.45
+      },
+      "trades": 2702,
+      "markets": 169,
+      "capital": 57028.402373879166,
+      "pnl": 22717.362164149683,
+      "roi": 39.83517198187365,
+      "win_rate": 56.213017751479285
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.65,
+        "base_lean": 30,
+        "base_conviction": 60,
+        "early_conf": 0.8,
+        "final_conf": 0.45
+      },
+      "trades": 2739,
+      "markets": 169,
+      "capital": 57544.23698276421,
+      "pnl": 22875.99674841065,
+      "roi": 39.75375806140678,
+      "win_rate": 56.213017751479285
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.65,
+        "base_lean": 20,
+        "base_conviction": 40,
+        "early_conf": 0.75,
+        "final_conf": 0.4
+      },
+      "trades": 3346,
+      "markets": 180,
+      "capital": 64390.88385970309,
+      "pnl": 25474.409283363093,
+      "roi": 39.56213637145834,
+      "win_rate": 56.666666666666664
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.65,
+        "base_lean": 20,
+        "base_conviction": 40,
+        "early_conf": 0.8,
+        "final_conf": 0.35
+      },
+      "trades": 3346,
+      "markets": 180,
+      "capital": 64390.88385970309,
+      "pnl": 25474.409283363093,
+      "roi": 39.56213637145834,
+      "win_rate": 56.666666666666664
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.65,
+        "base_lean": 20,
+        "base_conviction": 40,
+        "early_conf": 0.8,
+        "final_conf": 0.4
+      },
+      "trades": 3346,
+      "markets": 180,
+      "capital": 64390.88385970309,
+      "pnl": 25474.409283363093,
+      "roi": 39.56213637145834,
+      "win_rate": 56.666666666666664
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.65,
+        "base_lean": 20,
+        "base_conviction": 40,
+        "early_conf": 0.85,
+        "final_conf": 0.35
+      },
+      "trades": 3346,
+      "markets": 180,
+      "capital": 64390.88385970309,
+      "pnl": 25474.409283363093,
+      "roi": 39.56213637145834,
+      "win_rate": 56.666666666666664
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.58,
+        "base_lean": 30,
+        "base_conviction": 40,
+        "early_conf": 0.85,
+        "final_conf": 0.4
+      },
+      "trades": 2770,
+      "markets": 180,
+      "capital": 58026.076815224216,
+      "pnl": 22950.633376361933,
+      "roi": 39.552274832305066,
+      "win_rate": 52.77777777777778
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.65,
+        "base_lean": 40,
+        "base_conviction": 80,
+        "early_conf": 0.85,
+        "final_conf": 0.45
+      },
+      "trades": 2467,
+      "markets": 169,
+      "capital": 52942.53060903149,
+      "pnl": 20912.86304036046,
+      "roi": 39.501064266831484,
+      "win_rate": 55.62130177514793
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.65,
+        "base_lean": 30,
+        "base_conviction": 60,
+        "early_conf": 0.85,
+        "final_conf": 0.4
+      },
+      "trades": 2770,
+      "markets": 180,
+      "capital": 58026.076815224216,
+      "pnl": 22873.10289391413,
+      "roi": 39.41866165922309,
+      "win_rate": 52.77777777777778
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.65,
+        "base_lean": 40,
+        "base_conviction": 80,
+        "early_conf": 0.8,
+        "final_conf": 0.45
+      },
+      "trades": 2504,
+      "markets": 169,
+      "capital": 53441.84676775033,
+      "pnl": 21056.09556067913,
+      "roi": 39.400014846390945,
+      "win_rate": 55.62130177514793
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.65,
+        "base_lean": 20,
+        "base_conviction": 40,
+        "early_conf": 0.75,
+        "final_conf": 0.35
+      },
+      "trades": 3444,
+      "markets": 180,
+      "capital": 65252.47949738348,
+      "pnl": 25687.873129351316,
+      "roi": 39.36689199738587,
+      "win_rate": 56.666666666666664
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.61,
+        "base_lean": 20,
+        "base_conviction": 40,
+        "early_conf": 0.85,
+        "final_conf": 0.45
+      },
+      "trades": 2919,
+      "markets": 169,
+      "capital": 60946.28831294216,
+      "pnl": 23982.088135467056,
+      "roi": 39.349546624276336,
+      "win_rate": 60.35502958579882
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.61,
+        "base_lean": 20,
+        "base_conviction": 40,
+        "early_conf": 0.8,
+        "final_conf": 0.45
+      },
+      "trades": 2957,
+      "markets": 169,
+      "capital": 61540.049003799,
+      "pnl": 24143.926670640536,
+      "roi": 39.2328687764777,
+      "win_rate": 60.35502958579882
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.58,
+        "base_lean": 30,
+        "base_conviction": 40,
+        "early_conf": 0.75,
+        "final_conf": 0.45
+      },
+      "trades": 2992,
+      "markets": 169,
+      "capital": 59117.59371717599,
+      "pnl": 23176.812750502,
+      "roi": 39.20459425561535,
+      "win_rate": 56.213017751479285
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.61,
+        "base_lean": 40,
+        "base_conviction": 60,
+        "early_conf": 0.85,
+        "final_conf": 0.45
+      },
+      "trades": 2467,
+      "markets": 169,
+      "capital": 52942.53060903149,
+      "pnl": 20747.517982192097,
+      "roi": 39.188753811954676,
+      "win_rate": 55.62130177514793
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.61,
+        "base_lean": 40,
+        "base_conviction": 60,
+        "early_conf": 0.8,
+        "final_conf": 0.45
+      },
+      "trades": 2504,
+      "markets": 169,
+      "capital": 53441.84676775033,
+      "pnl": 20899.24985866948,
+      "roi": 39.10652629482334,
+      "win_rate": 55.62130177514793
+    },
+    {
+      "config": {
+        "strong_ratio": 0.82,
+        "lean_ratio": 0.65,
+        "base_lean": 30,
+        "base_conviction": 60,
+        "early_conf": 0.75,
+        "final_conf": 0.45
+      },
+      "trades": 2992,
+      "markets": 169,
+      "capital": 59117.59371717599,
+      "pnl": 23113.65972050301,
+      "roi": 39.0977681383327,
+      "win_rate": 56.213017751479285
+    }
+  ]
+}

@@ -9,6 +9,7 @@ use chrono::{DateTime, Utc};
 use poly_common::{CryptoAsset, WindowDuration};
 use reqwest::Client;
 use rust_decimal::Decimal;
+use serde::Deserialize;
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
@@ -19,6 +20,9 @@ const GAMMA_API_URL: &str = "https://gamma-api.polymarket.com";
 
 /// Keywords to identify up/down markets in titles.
 const UP_DOWN_KEYWORDS: &[&str] = &["up or down", "higher or lower", "above or below"];
+
+/// Binance REST API base URL.
+const BINANCE_API_URL: &str = "https://api.binance.com";
 
 /// Errors that can occur during market discovery.
 #[derive(Debug, Error)]
@@ -31,6 +35,25 @@ pub enum DiscoveryError {
 
     #[error("Invalid market data: {0}")]
     InvalidData(String),
+}
+
+/// Binance kline (candlestick) response.
+/// Each kline is an array: [open_time, open, high, low, close, volume, ...]
+#[derive(Debug, Deserialize)]
+struct BinanceKline(Vec<serde_json::Value>);
+
+impl BinanceKline {
+    /// Get the close price from the kline.
+    fn close_price(&self) -> Option<Decimal> {
+        // Index 4 is the close price (as string)
+        self.0.get(4)?.as_str()?.parse().ok()
+    }
+
+    /// Get the open price from the kline.
+    fn open_price(&self) -> Option<Decimal> {
+        // Index 1 is the open price (as string)
+        self.0.get(1)?.as_str()?.parse().ok()
+    }
 }
 
 /// A discovered market ready for trading/tracking.
@@ -136,8 +159,64 @@ impl MarketDiscovery {
         })
     }
 
+    /// Fetch historical spot price from Binance at a specific time.
+    ///
+    /// This is used to get the strike price for "Up or Down" markets
+    /// when we discover them after the window has already started.
+    ///
+    /// Returns the close price of the 1-minute candle that contains the given timestamp.
+    pub async fn fetch_historical_spot_price(
+        &self,
+        asset: CryptoAsset,
+        at_time: DateTime<Utc>,
+    ) -> Result<Option<Decimal>, DiscoveryError> {
+        let symbol = asset.binance_symbol().to_uppercase();
+        let start_time = at_time.timestamp_millis();
+        // Get the 1-minute candle that contains this timestamp
+        let end_time = start_time + 60_000; // +1 minute
+
+        let url = format!(
+            "{}/api/v3/klines?symbol={}&interval=1m&startTime={}&endTime={}&limit=1",
+            BINANCE_API_URL, symbol, start_time, end_time
+        );
+
+        debug!("Fetching historical price for {} at {}: {}", asset, at_time, url);
+
+        let response = self.http.get(&url).send().await?;
+
+        if !response.status().is_success() {
+            warn!(
+                "Failed to fetch historical price for {}: HTTP {}",
+                asset,
+                response.status()
+            );
+            return Ok(None);
+        }
+
+        let klines: Vec<BinanceKline> = response.json().await?;
+
+        if let Some(kline) = klines.first() {
+            // Use open price since it's closest to the actual timestamp
+            let price = kline.open_price();
+            if let Some(p) = price {
+                info!(
+                    "Historical price for {} at {}: ${}",
+                    asset, at_time, p
+                );
+            }
+            Ok(price)
+        } else {
+            warn!("No kline data returned for {} at {}", asset, at_time);
+            Ok(None)
+        }
+    }
+
     /// Discover active 15-minute markets.
     /// Returns newly discovered markets (not seen before).
+    ///
+    /// For "Up or Down" markets that are already in progress, this will
+    /// fetch the historical spot price from Binance to determine the correct
+    /// strike price.
     pub async fn discover(&mut self) -> Result<Vec<DiscoveredMarket>, DiscoveryError> {
         info!("Starting market discovery for {:?}", self.config.assets);
 
@@ -158,7 +237,27 @@ impl MarketDiscovery {
             }
 
             // Check if this is a 15-minute crypto market
-            if let Some(market) = self.parse_crypto_market(&event)? {
+            if let Some(mut market) = self.parse_crypto_market(&event)? {
+                // For "Up or Down" markets with no strike in title:
+                // If the market is already in progress, fetch historical price
+                if market.strike_price.is_zero() && market.is_active() {
+                    if let Ok(Some(historical_price)) = self
+                        .fetch_historical_spot_price(market.asset, market.window_start)
+                        .await
+                    {
+                        info!(
+                            "Setting strike price for {} from historical data: ${}",
+                            market.event_id, historical_price
+                        );
+                        market.strike_price = historical_price;
+                    } else {
+                        warn!(
+                            "Could not fetch historical price for {}, strike will be set from first spot price",
+                            market.event_id
+                        );
+                    }
+                }
+
                 info!(
                     "Discovered new market: {} {} strike={} (ends {})",
                     market.asset, market.event_id, market.strike_price, market.window_end
@@ -172,12 +271,31 @@ impl MarketDiscovery {
     }
 
     /// Discover all active markets (including previously seen).
+    ///
+    /// For "Up or Down" markets that are already in progress, this will
+    /// fetch the historical spot price from Binance to determine the correct
+    /// strike price.
     pub async fn discover_all(&mut self) -> Result<Vec<DiscoveredMarket>, DiscoveryError> {
         let events = self.fetch_active_events().await?;
         let mut markets = Vec::new();
 
         for event in events {
-            if let Some(market) = self.parse_crypto_market(&event)? {
+            if let Some(mut market) = self.parse_crypto_market(&event)? {
+                // For "Up or Down" markets with no strike in title:
+                // If the market is already in progress, fetch historical price
+                if market.strike_price.is_zero() && market.is_active() {
+                    if let Ok(Some(historical_price)) = self
+                        .fetch_historical_spot_price(market.asset, market.window_start)
+                        .await
+                    {
+                        debug!(
+                            "Setting strike price for {} from historical data: ${}",
+                            market.event_id, historical_price
+                        );
+                        market.strike_price = historical_price;
+                    }
+                }
+
                 // Track in known markets
                 if let Some(id) = &event.id {
                     self.known_markets.insert(id.clone());
@@ -191,10 +309,18 @@ impl MarketDiscovery {
 
     /// Fetch active events from Gamma API.
     async fn fetch_active_events(&self) -> Result<Vec<GammaEvent>, DiscoveryError> {
-        let url = format!(
-            "{}/events?active=true&closed=false&limit=100",
-            GAMMA_API_URL
-        );
+        // Use tag_slug for 5M/15M markets since they're hidden from general listings
+        let url = if let Some(tag) = self.config.window_duration.tag_slug() {
+            format!(
+                "{}/events?tag_slug={}&closed=false&limit=100",
+                GAMMA_API_URL, tag
+            )
+        } else {
+            format!(
+                "{}/events?active=true&closed=false&limit=100",
+                GAMMA_API_URL
+            )
+        };
 
         let response = self.http.get(&url).send().await?;
 
@@ -419,11 +545,19 @@ impl MarketDiscovery {
 
     /// Parse strike price from market title.
     /// Example: "Will BTC be above $100,000 at 12:15 UTC?"
+    ///
+    /// For "Up or Down" markets (relative markets), the title doesn't contain
+    /// a strike price - the strike is the spot price at window open.
+    /// Returns 0 for such markets, which signals that strike should be
+    /// set from spot price when the window opens.
     fn parse_strike_price(&self, title: &str) -> Decimal {
-        // Look for dollar amounts
+        // Look for dollar amounts - only patterns that clearly indicate prices
         let re_patterns = [
+            // $100,000 or $3,500.50 (dollar sign required)
             r"\$([0-9,]+(?:\.[0-9]+)?)",
-            r"(\d+(?:,\d{3})*(?:\.\d+)?)\s*(?:usd|usdt|usdc)?",
+            // 3500 USD/USDT/USDC (currency suffix REQUIRED, not optional)
+            // This prevents matching random numbers like "14" from "January 14"
+            r"(?i)(\d+(?:,\d{3})*(?:\.\d+)?)\s*(?:usd|usdt|usdc)",
         ];
 
         for pattern in &re_patterns {
@@ -438,7 +572,8 @@ impl MarketDiscovery {
             }
         }
 
-        // Default to zero if we can't parse
+        // Default to zero if we can't parse.
+        // For "Up or Down" markets, strike will be set from spot price at window open.
         Decimal::ZERO
     }
 
@@ -536,6 +671,7 @@ mod tests {
     fn test_parse_strike_price() {
         let discovery = test_discovery();
 
+        // Fixed strike markets
         assert_eq!(
             discovery.parse_strike_price("Will BTC be above $100,000 at 12:15 UTC?"),
             Decimal::from(100000)
@@ -544,7 +680,22 @@ mod tests {
             discovery.parse_strike_price("ETH above $3,500.50"),
             Decimal::new(350050, 2)
         );
+
+        // No price in title
         assert_eq!(discovery.parse_strike_price("no price here"), Decimal::ZERO);
+
+        // "Up or Down" markets - should return 0, NOT the date number
+        // This is the critical test - "14" from "January 14" should NOT be parsed as a price
+        assert_eq!(
+            discovery.parse_strike_price("Bitcoin Up or Down - January 14, 5:00PM-5:15PM ET"),
+            Decimal::ZERO
+        );
+
+        // Numbers with explicit currency suffix should work
+        assert_eq!(
+            discovery.parse_strike_price("ETH at 3500 USD"),
+            Decimal::from(3500)
+        );
     }
 
     #[test]

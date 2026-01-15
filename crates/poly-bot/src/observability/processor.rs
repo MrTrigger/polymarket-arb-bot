@@ -29,7 +29,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
 use clickhouse::Row;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -44,31 +43,29 @@ use super::types::{ActionType, Counterfactual, DecisionSnapshot, ObservabilityEv
 /// Decision record for ClickHouse storage.
 ///
 /// Matches the `decisions` table schema.
+/// Uses f64 for decimal fields because clickhouse crate doesn't support rust_decimal.
+/// Uses i64 for timestamp (milliseconds since epoch) for DateTime64(3) compatibility.
 #[derive(Debug, Clone, Serialize, Deserialize, Row)]
 pub struct DecisionRecord {
     /// Unique decision ID.
     pub decision_id: u64,
     /// Event ID string.
     pub event_id: String,
-    /// Decision timestamp.
-    pub timestamp: DateTime<Utc>,
+    /// Decision timestamp (milliseconds since Unix epoch for DateTime64(3)).
+    #[serde(with = "clickhouse::serde::time::datetime64::millis")]
+    pub timestamp: time::OffsetDateTime,
     /// Decision type (Execute, Skip*, etc.).
     pub decision_type: String,
-    /// YES ask price.
-    #[serde(with = "rust_decimal::serde::str")]
-    pub yes_ask: Decimal,
-    /// NO ask price.
-    #[serde(with = "rust_decimal::serde::str")]
-    pub no_ask: Decimal,
+    /// YES ask price (as f64 for ClickHouse compatibility).
+    pub yes_ask: f64,
+    /// NO ask price (as f64 for ClickHouse compatibility).
+    pub no_ask: f64,
     /// Combined cost (YES + NO).
-    #[serde(with = "rust_decimal::serde::str")]
-    pub combined_cost: Decimal,
+    pub combined_cost: f64,
     /// Arbitrage margin.
-    #[serde(with = "rust_decimal::serde::str")]
-    pub arb_margin: Decimal,
+    pub arb_margin: f64,
     /// Spot price at decision time.
-    #[serde(with = "rust_decimal::serde::str")]
-    pub spot_price: Decimal,
+    pub spot_price: f64,
     /// Seconds remaining in window.
     pub time_remaining_secs: u32,
     /// Action taken (execute, skip).
@@ -86,19 +83,25 @@ impl DecisionRecord {
         event_id: String,
         spot_price: Option<Decimal>,
     ) -> Self {
+        use rust_decimal::prelude::ToPrimitive;
         let action_type = ActionType::from(snapshot.action);
+
+        // Convert milliseconds to OffsetDateTime
+        let timestamp = time::OffsetDateTime::from_unix_timestamp_nanos(
+            snapshot.timestamp_ms as i128 * 1_000_000
+        ).unwrap_or_else(|_| time::OffsetDateTime::now_utc());
 
         Self {
             decision_id: snapshot.decision_id,
             event_id,
-            timestamp: DateTime::from_timestamp_millis(snapshot.timestamp_ms)
-                .unwrap_or_else(Utc::now),
+            timestamp,
             decision_type: format!("{:?}", action_type),
-            yes_ask: Decimal::new(snapshot.yes_ask_bps as i64, 4),
-            no_ask: Decimal::new(snapshot.no_ask_bps as i64, 4),
-            combined_cost: Decimal::new(snapshot.combined_cost_bps as i64, 4),
-            arb_margin: Decimal::new(snapshot.margin_bps as i64, 4),
-            spot_price: spot_price.unwrap_or(Decimal::ZERO),
+            // Convert from basis points to decimal (e.g., 4500 bps -> 0.45)
+            yes_ask: snapshot.yes_ask_bps as f64 / 10000.0,
+            no_ask: snapshot.no_ask_bps as f64 / 10000.0,
+            combined_cost: snapshot.combined_cost_bps as f64 / 10000.0,
+            arb_margin: snapshot.margin_bps as f64 / 10000.0,
+            spot_price: spot_price.map(|d| d.to_f64().unwrap_or(0.0)).unwrap_or(0.0),
             time_remaining_secs: snapshot.seconds_remaining as u32,
             action: if action_type == ActionType::Execute {
                 "execute".to_string()
@@ -541,19 +544,24 @@ impl ObservabilityProcessor {
 
     /// Process a counterfactual (converts to decision record for storage).
     async fn process_counterfactual(&self, cf: &Counterfactual) -> Option<DecisionRecord> {
+        use rust_decimal::prelude::ToPrimitive;
         // For now, store counterfactuals as decision records with special type
         self.stats.processed.fetch_add(1, Ordering::Relaxed);
+
+        // Convert chrono DateTime to time OffsetDateTime
+        let timestamp = time::OffsetDateTime::from_unix_timestamp(cf.settlement_time.timestamp())
+            .unwrap_or_else(|_| time::OffsetDateTime::now_utc());
 
         Some(DecisionRecord {
             decision_id: cf.decision_id,
             event_id: cf.event_id.clone(),
-            timestamp: cf.settlement_time,
+            timestamp,
             decision_type: format!("Counterfactual_{:?}", cf.original_action),
-            yes_ask: Decimal::ZERO, // Not available in counterfactual
-            no_ask: Decimal::ZERO,
-            combined_cost: cf.hypothetical_cost,
-            arb_margin: cf.decision_margin,
-            spot_price: Decimal::ZERO,
+            yes_ask: 0.0, // Not available in counterfactual
+            no_ask: 0.0,
+            combined_cost: cf.hypothetical_cost.to_f64().unwrap_or(0.0),
+            arb_margin: cf.decision_margin.to_f64().unwrap_or(0.0),
+            spot_price: 0.0,
             time_remaining_secs: cf.decision_seconds_remaining as u32,
             action: if cf.was_correct { "correct" } else { "incorrect" }.to_string(),
             reason: cf.assessment_reason.clone(),
@@ -575,16 +583,21 @@ impl ObservabilityProcessor {
 
         self.stats.processed.fetch_add(1, Ordering::Relaxed);
 
+        // Convert milliseconds to time OffsetDateTime
+        let timestamp = time::OffsetDateTime::from_unix_timestamp_nanos(
+            timestamp_ms as i128 * 1_000_000
+        ).unwrap_or_else(|_| time::OffsetDateTime::now_utc());
+
         Some(DecisionRecord {
             decision_id: 0, // Anomalies don't have decision IDs
             event_id,
-            timestamp: DateTime::from_timestamp_millis(timestamp_ms).unwrap_or_else(Utc::now),
+            timestamp,
             decision_type: format!("Anomaly_{}", anomaly_type),
-            yes_ask: Decimal::ZERO,
-            no_ask: Decimal::ZERO,
-            combined_cost: Decimal::ZERO,
-            arb_margin: Decimal::ZERO,
-            spot_price: Decimal::ZERO,
+            yes_ask: 0.0,
+            no_ask: 0.0,
+            combined_cost: 0.0,
+            arb_margin: 0.0,
+            spot_price: 0.0,
             time_remaining_secs: 0,
             action: "anomaly".to_string(),
             reason: anomaly_type.to_string(),
@@ -715,10 +728,10 @@ mod tests {
 
         assert_eq!(record.decision_id, 42);
         assert_eq!(record.event_id, "event1");
-        assert_eq!(record.yes_ask, dec!(0.45));
-        assert_eq!(record.no_ask, dec!(0.52));
-        assert_eq!(record.arb_margin, dec!(0.03));
-        assert_eq!(record.spot_price, dec!(100000));
+        assert!((record.yes_ask - 0.45).abs() < 0.0001);
+        assert!((record.no_ask - 0.52).abs() < 0.0001);
+        assert!((record.arb_margin - 0.03).abs() < 0.0001);
+        assert!((record.spot_price - 100000.0).abs() < 0.01);
         assert_eq!(record.time_remaining_secs, 120);
         assert_eq!(record.action, "execute");
         assert_eq!(record.confidence, 75.0);
@@ -861,7 +874,7 @@ mod tests {
 
         assert_eq!(record.decision_id, 1);
         assert_eq!(record.event_id, "event123");
-        assert_eq!(record.spot_price, dec!(50000));
+        assert!((record.spot_price - 50000.0).abs() < 0.01);
     }
 
     #[tokio::test]
@@ -958,13 +971,13 @@ mod tests {
             Self {
                 decision_id: 0,
                 event_id: String::new(),
-                timestamp: Utc::now(),
+                timestamp: time::OffsetDateTime::now_utc(),
                 decision_type: String::new(),
-                yes_ask: Decimal::ZERO,
-                no_ask: Decimal::ZERO,
-                combined_cost: Decimal::ZERO,
-                arb_margin: Decimal::ZERO,
-                spot_price: Decimal::ZERO,
+                yes_ask: 0.0,
+                no_ask: 0.0,
+                combined_cost: 0.0,
+                arb_margin: 0.0,
+                spot_price: 0.0,
                 time_remaining_secs: 0,
                 action: String::new(),
                 reason: String::new(),

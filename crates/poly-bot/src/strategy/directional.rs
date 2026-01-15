@@ -537,6 +537,8 @@ mod tests {
     fn test_detect_strong_up_signal() {
         let detector = DirectionalDetector::new();
         // 0.25% above strike at 5 minutes -> StrongUp
+        // 5 minutes is in 3-10 min bracket: strong=0.021%, lean=0.011%
+        // 0.25% > 0.021% -> StrongUp with optimized 82/18 ratio
         let mut state = create_test_market_state(Some(dec!(100250)), dec!(100000), 300);
         add_book_levels(&mut state, dec!(0.45), dec!(0.48), dec!(0.45), dec!(0.48));
 
@@ -545,16 +547,16 @@ mod tests {
 
         let opp = result.unwrap();
         assert_eq!(opp.signal, Signal::StrongUp);
-        assert_eq!(opp.up_ratio, dec!(0.78));
-        assert_eq!(opp.down_ratio, dec!(0.22));
+        assert_eq!(opp.up_ratio, dec!(0.82));  // Optimized
+        assert_eq!(opp.down_ratio, dec!(0.18));
     }
 
     #[test]
     fn test_detect_lean_up_signal() {
         let detector = DirectionalDetector::new();
-        // 0.02% above strike at 5 minutes (3-6 min bracket: strong=0.035%, lean=0.012%)
-        // 0.012% < 0.02% < 0.035% -> LeanUp
-        let mut state = create_test_market_state(Some(dec!(100020)), dec!(100000), 300);
+        // 5 minutes is in 3-10 min bracket: strong=0.021%, lean=0.011%
+        // 0.015% is between lean (0.011%) and strong (0.021%) -> LeanUp
+        let mut state = create_test_market_state(Some(dec!(100015)), dec!(100000), 300);
         add_book_levels(&mut state, dec!(0.45), dec!(0.48), dec!(0.45), dec!(0.48));
 
         let result = detector.detect(&state);
@@ -562,14 +564,16 @@ mod tests {
 
         let opp = result.unwrap();
         assert_eq!(opp.signal, Signal::LeanUp);
-        assert_eq!(opp.up_ratio, dec!(0.60));
-        assert_eq!(opp.down_ratio, dec!(0.40));
+        assert_eq!(opp.up_ratio, dec!(0.65));  // Optimized
+        assert_eq!(opp.down_ratio, dec!(0.35));
     }
 
     #[test]
     fn test_detect_strong_down_signal() {
         let detector = DirectionalDetector::new();
         // 0.25% below strike at 5 minutes -> StrongDown
+        // 5 minutes is in 3-10 min bracket: strong=0.021%, lean=0.011%
+        // 0.25% > 0.021% -> StrongDown with optimized 18/82 ratio
         let mut state = create_test_market_state(Some(dec!(99750)), dec!(100000), 300);
         add_book_levels(&mut state, dec!(0.45), dec!(0.48), dec!(0.45), dec!(0.48));
 
@@ -578,16 +582,16 @@ mod tests {
 
         let opp = result.unwrap();
         assert_eq!(opp.signal, Signal::StrongDown);
-        assert_eq!(opp.up_ratio, dec!(0.22));
-        assert_eq!(opp.down_ratio, dec!(0.78));
+        assert_eq!(opp.up_ratio, dec!(0.18));  // Optimized
+        assert_eq!(opp.down_ratio, dec!(0.82));
     }
 
     #[test]
     fn test_detect_lean_down_signal() {
         let detector = DirectionalDetector::new();
-        // 0.02% below strike at 5 minutes (3-6 min bracket: strong=0.035%, lean=0.012%)
-        // 0.012% < 0.02% < 0.035% -> LeanDown
-        let mut state = create_test_market_state(Some(dec!(99980)), dec!(100000), 300);
+        // 5 minutes is in 3-10 min bracket: strong=0.021%, lean=0.011%
+        // 0.015% is between lean (0.011%) and strong (0.021%) -> LeanDown
+        let mut state = create_test_market_state(Some(dec!(99985)), dec!(100000), 300);
         add_book_levels(&mut state, dec!(0.45), dec!(0.48), dec!(0.45), dec!(0.48));
 
         let result = detector.detect(&state);
@@ -595,39 +599,41 @@ mod tests {
 
         let opp = result.unwrap();
         assert_eq!(opp.signal, Signal::LeanDown);
-        assert_eq!(opp.up_ratio, dec!(0.40));
-        assert_eq!(opp.down_ratio, dec!(0.60));
+        assert_eq!(opp.up_ratio, dec!(0.35));  // Optimized
+        assert_eq!(opp.down_ratio, dec!(0.65));
     }
 
     // =========================================================================
-    // Signal Ratio Tests (Per Spec)
+    // Signal Ratio Tests (Optimized)
     // =========================================================================
 
     #[test]
-    fn test_strong_up_returns_78_22_ratio() {
+    fn test_strong_up_returns_spec_ratio() {
         let detector = DirectionalDetector::new();
         // 0.3% above strike at 5 minutes -> StrongUp
+        // Optimized: Strong signals use 82/18 ratio
         let mut state = create_test_market_state(Some(dec!(100300)), dec!(100000), 300);
         add_book_levels(&mut state, dec!(0.45), dec!(0.48), dec!(0.45), dec!(0.48));
 
         let opp = detector.detect(&state).unwrap();
         assert_eq!(opp.signal, Signal::StrongUp);
-        assert_eq!(opp.up_ratio, dec!(0.78));
-        assert_eq!(opp.down_ratio, dec!(0.22));
+        assert_eq!(opp.up_ratio, dec!(0.82));  // Optimized
+        assert_eq!(opp.down_ratio, dec!(0.18));
         assert_eq!(opp.up_ratio + opp.down_ratio, Decimal::ONE);
     }
 
     #[test]
-    fn test_strong_down_returns_22_78_ratio() {
+    fn test_strong_down_returns_spec_ratio() {
         let detector = DirectionalDetector::new();
         // 0.3% below strike at 5 minutes -> StrongDown
+        // Optimized: Strong signals use 18/82 ratio
         let mut state = create_test_market_state(Some(dec!(99700)), dec!(100000), 300);
         add_book_levels(&mut state, dec!(0.45), dec!(0.48), dec!(0.45), dec!(0.48));
 
         let opp = detector.detect(&state).unwrap();
         assert_eq!(opp.signal, Signal::StrongDown);
-        assert_eq!(opp.up_ratio, dec!(0.22));
-        assert_eq!(opp.down_ratio, dec!(0.78));
+        assert_eq!(opp.up_ratio, dec!(0.18));  // Optimized
+        assert_eq!(opp.down_ratio, dec!(0.82));
         assert_eq!(opp.up_ratio + opp.down_ratio, Decimal::ONE);
     }
 
@@ -746,18 +752,24 @@ mod tests {
     fn test_strong_signal_has_higher_confidence() {
         let detector = DirectionalDetector::new();
 
-        // Strong signal (0.1% distance at 5 min, threshold=0.035% strong)
+        // Strong signal: 0.1% distance at 5 min (3-10 min bracket: strong=0.015%, lean=0.01%)
+        // 0.1% > 0.015% -> StrongUp
         let mut strong_state = create_test_market_state(Some(dec!(100100)), dec!(100000), 300);
         add_book_levels(&mut strong_state, dec!(0.45), dec!(0.48), dec!(0.45), dec!(0.48));
         let strong_opp = detector.detect(&strong_state).unwrap();
+        assert_eq!(strong_opp.signal, Signal::StrongUp);
 
-        // Lean signal (0.02% distance at 5 min, threshold=0.012% lean, 0.035% strong)
-        let mut lean_state = create_test_market_state(Some(dec!(100020)), dec!(100000), 300);
+        // Lean signal: 0.012% distance at 5 min (3-10 min bracket: strong=0.015%, lean=0.01%)
+        // 0.01% < 0.012% < 0.015% -> LeanUp
+        let mut lean_state = create_test_market_state(Some(dec!(100012)), dec!(100000), 300);
         add_book_levels(&mut lean_state, dec!(0.45), dec!(0.48), dec!(0.45), dec!(0.48));
         let lean_opp = detector.detect(&lean_state).unwrap();
+        assert_eq!(lean_opp.signal, Signal::LeanUp);
 
-        // Strong signal should have higher signal confidence
-        assert!(strong_opp.confidence.signal > lean_opp.confidence.signal);
+        // Strong signal should have higher signal confidence component
+        assert!(strong_opp.confidence.signal > lean_opp.confidence.signal,
+            "Strong confidence {} should > Lean confidence {}",
+            strong_opp.confidence.signal, lean_opp.confidence.signal);
     }
 
     // =========================================================================
@@ -815,12 +827,12 @@ mod tests {
         let detector = DirectionalDetector::new();
 
         // Test each signal level with appropriate percentage distance at 5 minutes
-        // Thresholds at 3-6 min bracket: strong=0.035%, lean=0.012%
+        // Thresholds at 3-10 min bracket: strong=0.015%, lean=0.01%
         let test_cases = [
-            (dec!(100050), Signal::StrongUp),   // 0.05% above -> StrongUp
-            (dec!(100020), Signal::LeanUp),     // 0.02% above -> LeanUp
-            (dec!(99950), Signal::StrongDown),  // 0.05% below -> StrongDown
-            (dec!(99980), Signal::LeanDown),    // 0.02% below -> LeanDown
+            (dec!(100050), Signal::StrongUp),   // 0.05% above > 0.015% -> StrongUp
+            (dec!(100012), Signal::LeanUp),     // 0.012% above (0.01% < 0.012% < 0.015%) -> LeanUp
+            (dec!(99950), Signal::StrongDown),  // 0.05% below > 0.015% -> StrongDown
+            (dec!(99988), Signal::LeanDown),    // 0.012% below (0.01% < 0.012% < 0.015%) -> LeanDown
         ];
 
         for (spot, expected_signal) in test_cases {
@@ -842,30 +854,30 @@ mod tests {
     fn test_signal_at_different_time_brackets() {
         let detector = DirectionalDetector::new();
 
-        // Same 0.01% distance, different time remaining
-        let spot = dec!(100010);  // 0.01% above
+        // Same 0.008% distance, different time remaining
+        let spot = dec!(100008);  // 0.008% above
         let strike = dec!(100000);
 
-        // At 15 min (>12 min): strong=0.06%, lean=0.03%, 0.01% -> Neutral (skip)
-        let mut state_early = create_test_market_state(Some(spot), strike, 900);
+        // At 35 min (>30 min): strong=0.03%, lean=0.02%, 0.008% -> Neutral (skip)
+        let mut state_early = create_test_market_state(Some(spot), strike, 2100);
         add_book_levels(&mut state_early, dec!(0.45), dec!(0.48), dec!(0.45), dec!(0.48));
-        assert!(detector.detect(&state_early).is_err());
+        assert!(detector.detect(&state_early).is_err(), "Expected skip at 35 min with 0.008% distance");
 
-        // At 2 min (<3 min): strong=0.025%, lean=0.008%, 0.01% -> LeanUp
-        let mut state_mid = create_test_market_state(Some(spot), strike, 120);
-        add_book_levels(&mut state_mid, dec!(0.45), dec!(0.48), dec!(0.45), dec!(0.48));
-        let mid_result = detector.detect(&state_mid);
-        assert!(mid_result.is_ok());
-        assert_eq!(mid_result.unwrap().signal, Signal::LeanUp);
-
-        // Use 0.03% distance at different time brackets to show Strong vs Lean
-        let spot2 = dec!(100030);  // 0.03% above
-
-        // At 2 min: strong=0.025%, lean=0.008%, 0.03% -> StrongUp
-        let mut state_late = create_test_market_state(Some(spot2), strike, 120);
+        // At 2 min (<3 min): strong=0.009%, lean=0.006%, 0.008% -> LeanUp
+        let mut state_late = create_test_market_state(Some(spot), strike, 120);
         add_book_levels(&mut state_late, dec!(0.45), dec!(0.48), dec!(0.45), dec!(0.48));
         let late_result = detector.detect(&state_late);
-        assert!(late_result.is_ok());
-        assert_eq!(late_result.unwrap().signal, Signal::StrongUp);
+        assert!(late_result.is_ok(), "Expected LeanUp at 2 min with 0.008% distance");
+        assert_eq!(late_result.unwrap().signal, Signal::LeanUp);
+
+        // Use 0.02% distance to show Strong vs Lean across time
+        let spot2 = dec!(100020);  // 0.02% above
+
+        // At 2 min: strong=0.009%, lean=0.006%, 0.02% -> StrongUp
+        let mut state_very_late = create_test_market_state(Some(spot2), strike, 120);
+        add_book_levels(&mut state_very_late, dec!(0.45), dec!(0.48), dec!(0.45), dec!(0.48));
+        let very_late_result = detector.detect(&state_very_late);
+        assert!(very_late_result.is_ok());
+        assert_eq!(very_late_result.unwrap().signal, Signal::StrongUp);
     }
 }
