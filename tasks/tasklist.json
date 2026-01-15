@@ -92,7 +92,7 @@
       "id": "phase1-mod",
       "title": "Phase 1: Create dashboard module structure",
       "description": "Create mod.rs exporting all dashboard submodules. Add dashboard feature flag to Cargo.toml. Add DashboardConfig to config.rs.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["phase1-session"],
       "files": [
         "crates/poly-bot/src/dashboard/mod.rs",

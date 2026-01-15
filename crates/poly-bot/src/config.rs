@@ -46,6 +46,9 @@ pub struct BotConfig {
     /// Observability configuration.
     pub observability: ObservabilityConfig,
 
+    /// Dashboard configuration (React trading dashboard).
+    pub dashboard: DashboardConfig,
+
     /// Wallet configuration (for live trading).
     pub wallet: WalletConfig,
 
@@ -374,6 +377,94 @@ pub struct ObservabilityConfig {
 
     /// Webhook URL for alerts (optional).
     pub alert_webhook_url: Option<String>,
+}
+
+/// Dashboard configuration for the React trading dashboard.
+///
+/// Controls the capture channel, background processor, and WebSocket server
+/// for real-time dashboard updates.
+#[derive(Debug, Clone)]
+pub struct DashboardConfig {
+    /// Enable dashboard capture and streaming.
+    pub enabled: bool,
+
+    /// Channel capacity for fire-and-forget capture.
+    /// Events are dropped when channel is full.
+    pub channel_capacity: usize,
+
+    /// Whether to log dropped events.
+    pub log_drops: bool,
+
+    /// Minimum drop count before logging (to avoid spam).
+    pub drop_log_threshold: u64,
+
+    /// Batch size for ClickHouse writes.
+    pub batch_size: usize,
+
+    /// Flush interval in seconds.
+    pub flush_interval_secs: u64,
+
+    /// Maximum buffer size before dropping oldest events.
+    pub max_buffer_size: usize,
+
+    /// WebSocket server port for real-time streaming.
+    pub websocket_port: u16,
+
+    /// REST API port for historical queries.
+    pub api_port: u16,
+
+    /// State broadcast interval in milliseconds.
+    pub broadcast_interval_ms: u64,
+
+    /// P&L snapshot interval in seconds.
+    pub pnl_snapshot_interval_secs: u64,
+}
+
+impl Default for DashboardConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            channel_capacity: 1024,
+            log_drops: true,
+            drop_log_threshold: 100,
+            batch_size: 100,
+            flush_interval_secs: 5,
+            max_buffer_size: 10000,
+            websocket_port: 3001,
+            api_port: 3002,
+            broadcast_interval_ms: 500,
+            pnl_snapshot_interval_secs: 60,
+        }
+    }
+}
+
+impl DashboardConfig {
+    /// Create a disabled dashboard config.
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            ..Default::default()
+        }
+    }
+
+    /// Convert to capture config.
+    pub fn capture_config(&self) -> crate::dashboard::DashboardCaptureConfig {
+        crate::dashboard::DashboardCaptureConfig {
+            enabled: self.enabled,
+            channel_capacity: self.channel_capacity,
+            log_drops: self.log_drops,
+            drop_log_threshold: self.drop_log_threshold,
+        }
+    }
+
+    /// Convert to processor config.
+    pub fn processor_config(&self) -> crate::dashboard::DashboardProcessorConfig {
+        crate::dashboard::DashboardProcessorConfig {
+            batch_size: self.batch_size,
+            flush_interval: Duration::from_secs(self.flush_interval_secs),
+            max_buffer_size: self.max_buffer_size,
+        }
+    }
 }
 
 impl Default for ObservabilityConfig {
@@ -746,6 +837,7 @@ impl Default for BotConfig {
             shadow: ShadowConfig::default(),
             execution: ExecutionConfig::default(),
             observability: ObservabilityConfig::default(),
+            dashboard: DashboardConfig::default(),
             wallet: WalletConfig::default(),
             backtest: BacktestConfig::default(),
             engines: EnginesConfig::default(),
@@ -905,6 +997,8 @@ struct TomlConfig {
     execution: ExecutionToml,
     #[serde(default)]
     observability: ObservabilityToml,
+    #[serde(default)]
+    dashboard: DashboardToml,
     #[serde(default)]
     backtest: BacktestToml,
     #[serde(default)]
@@ -1104,6 +1198,40 @@ impl Default for ObservabilityToml {
             batch_size: 1000,
             flush_interval_secs: 5,
             alerts_enabled: false,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+struct DashboardToml {
+    enabled: bool,
+    channel_capacity: usize,
+    log_drops: bool,
+    drop_log_threshold: u64,
+    batch_size: usize,
+    flush_interval_secs: u64,
+    max_buffer_size: usize,
+    websocket_port: u16,
+    api_port: u16,
+    broadcast_interval_ms: u64,
+    pnl_snapshot_interval_secs: u64,
+}
+
+impl Default for DashboardToml {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            channel_capacity: 1024,
+            log_drops: true,
+            drop_log_threshold: 100,
+            batch_size: 100,
+            flush_interval_secs: 5,
+            max_buffer_size: 10000,
+            websocket_port: 3001,
+            api_port: 3002,
+            broadcast_interval_ms: 500,
+            pnl_snapshot_interval_secs: 60,
         }
     }
 }
@@ -1337,6 +1465,19 @@ impl From<TomlConfig> for BotConfig {
                 flush_interval_secs: toml.observability.flush_interval_secs,
                 alerts_enabled: toml.observability.alerts_enabled,
                 alert_webhook_url: None, // Set via env var
+            },
+            dashboard: DashboardConfig {
+                enabled: toml.dashboard.enabled,
+                channel_capacity: toml.dashboard.channel_capacity,
+                log_drops: toml.dashboard.log_drops,
+                drop_log_threshold: toml.dashboard.drop_log_threshold,
+                batch_size: toml.dashboard.batch_size,
+                flush_interval_secs: toml.dashboard.flush_interval_secs,
+                max_buffer_size: toml.dashboard.max_buffer_size,
+                websocket_port: toml.dashboard.websocket_port,
+                api_port: toml.dashboard.api_port,
+                broadcast_interval_ms: toml.dashboard.broadcast_interval_ms,
+                pnl_snapshot_interval_secs: toml.dashboard.pnl_snapshot_interval_secs,
             },
             wallet: WalletConfig::default(), // Always from env vars
             backtest: BacktestConfig {

@@ -267,3 +267,50 @@ Notes for next task (phase1-mod):
 - Consider adding session manager to shadow/backtest modes in future
 
 ---
+
+### [2026-01-15] Task: phase1-mod - Create dashboard module structure
+
+Files changed:
+- crates/poly-bot/src/config.rs (added DashboardConfig)
+- crates/poly-bot/src/lib.rs (exported DashboardConfig)
+
+Changes:
+- Added `DashboardConfig` struct to config.rs with all dashboard settings:
+  - enabled: bool (enable/disable dashboard)
+  - channel_capacity: usize (capture channel size)
+  - log_drops: bool (log dropped events)
+  - drop_log_threshold: u64 (drop log threshold)
+  - batch_size: usize (ClickHouse batch size)
+  - flush_interval_secs: u64 (ClickHouse flush interval)
+  - max_buffer_size: usize (processor buffer limit)
+  - websocket_port: u16 (WS server port, default 3001)
+  - api_port: u16 (REST API port, default 3002)
+  - broadcast_interval_ms: u64 (state broadcast interval)
+  - pnl_snapshot_interval_secs: u64 (P&L capture interval)
+- Added `DashboardConfig::disabled()` constructor
+- Added `capture_config()` method to convert to DashboardCaptureConfig
+- Added `processor_config()` method to convert to DashboardProcessorConfig
+- Added `dashboard` field to `BotConfig` struct
+- Added `DashboardToml` for TOML parsing
+- Updated `From<TomlConfig>` to parse dashboard section
+- Exported `DashboardConfig` from lib.rs
+
+Verification:
+- cargo clippy -p poly-bot -- -D warnings: PASSED
+- cargo build -p poly-bot: PASSED
+- cargo test -p poly-bot: PASSED (999 unit tests + 14 doc tests)
+- DashboardConfig in config.rs: CONFIRMED
+
+Learnings:
+- DashboardConfig consolidates capture + processor settings in one place
+- Helper methods (capture_config, processor_config) convert to specific configs
+- TOML section is [dashboard] with same field names
+- Feature flag not needed - DashboardConfig.enabled controls activation
+
+Notes for next task (phase2-state):
+- DashboardConfig is now available via BotConfig
+- Phase 2 begins the backend server implementation
+- DashboardState will aggregate data from GlobalState DashMaps
+- Must be lock-free for snapshot creation
+
+---
