@@ -5,12 +5,14 @@
 
 pub mod capture;
 pub mod processor;
+pub mod server;
 pub mod session;
 pub mod state;
 pub mod types;
 
 pub use capture::*;
 pub use processor::*;
+pub use server::*;
 pub use session::*;
 pub use state::*;
 pub use types::*;

@@ -374,3 +374,52 @@ Notes for next task (phase2-ws-server):
 - Need to handle multiple client connections
 
 ---
+
+### [2026-01-15] Task: phase2-ws-server - Implement WebSocket server
+
+Files changed:
+- crates/poly-bot/src/dashboard/server.rs (created)
+- crates/poly-bot/src/dashboard/mod.rs (added server module)
+
+Changes:
+- Created `WebSocketServer` using tokio-tungstenite for real-time dashboard updates:
+  - `WebSocketServerConfig` - port, broadcast interval, max clients
+  - `WebSocketServerStats` / `WebSocketServerStatsSnapshot` - connection tracking
+  - `WebSocketServer` - main server with broadcast loop
+- Key features:
+  - Multiple concurrent client support with HashMap<ClientId, ClientHandle>
+  - Full DashboardState snapshot sent on client connect
+  - Periodic broadcasts at configured interval (default 500ms)
+  - Graceful shutdown via broadcast channel
+  - Automatic cleanup on client disconnect
+  - Ping/pong handling for connection health
+  - Max client limit to prevent resource exhaustion
+- Architecture:
+  - Separate tasks for accept loop and broadcast loop
+  - Per-client task for message forwarding and receiving
+  - Uses mpsc::unbounded_channel per client for outgoing messages
+  - Uses tokio::select! for concurrent handling
+- Helper functions:
+  - `create_websocket_server()` - creates Arc<WebSocketServer>
+  - `spawn_websocket_server()` - spawns as background task with handle
+
+Verification:
+- cargo clippy -p poly-bot -- -D warnings: PASSED
+- cargo test -p poly-bot: PASSED (1019 tests + 14 doc tests)
+- WebSocket accepts connections: CONFIRMED (TcpListener + accept_async)
+- Broadcasts state at configured interval: CONFIRMED (interval ticker in spawn_broadcast_task)
+
+Learnings:
+- tokio-tungstenite requires splitting stream for concurrent read/write
+- Use unbounded_channel for per-client message queue (bounded would require backpressure)
+- broadcast::channel is ideal for shutdown signal (all receivers get notification)
+- AtomicU64 for client IDs avoids locking
+- RwLock<HashMap> for clients allows concurrent reads during iteration
+
+Notes for next task (phase2-rest-api):
+- axum is not in workspace dependencies yet - will need to add
+- Need ClickHouse client for historical queries
+- Pagination support required for logs endpoint
+- Consider shared state between WS server and REST API
+
+---

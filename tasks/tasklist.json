@@ -126,7 +126,7 @@
       "id": "phase2-ws-server",
       "title": "Phase 2: Implement WebSocket server",
       "description": "tokio-tungstenite WebSocket server on configurable port. Broadcasts DashboardState at interval. Handles multiple clients. Sends full snapshot on connect.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["phase2-state"],
       "files": ["crates/poly-bot/src/dashboard/server.rs"],
       "acceptance": [
