@@ -1136,3 +1136,56 @@ Notes for next task (phase5-position):
 - Consider adding visual indicators for different inventory states
 
 ---
+
+### [2026-01-15] Task: phase5-position - Create PositionPanel component
+
+Files changed:
+- frontend/src/components/market/PositionPanel.tsx (created)
+- frontend/src/components/market/index.ts (added export)
+- frontend/src/pages/MarketDetail.tsx (replaced placeholder with component)
+
+Changes:
+- Created PositionPanel component using shadcn Card with comprehensive position display:
+  - YES/NO shares displayed in separate cards with cost basis
+  - Color-coded shares: green for YES, red for NO
+  - Imbalance ratio visualization with horizontal bar chart
+  - Inventory state badge with color and icon per state:
+    - Balanced (green, Scale icon)
+    - Skewed (yellow, TrendingUp icon)
+    - Exposed (orange, AlertTriangle icon)
+    - Crisis (red, ShieldAlert icon)
+  - Realized P&L with TrendingUp/Down icon and green/red coloring
+  - Unrealized P&L calculation from current market bid prices
+  - Total exposure display
+  - Description text for current inventory state
+- Added PositionPanelSkeleton for loading state
+- Integrated into MarketDetail page replacing inline placeholder
+- Removed unused formatPercent import from MarketDetail
+
+Key features:
+- `INVENTORY_STATE_CONFIG` constant maps state to color, icon, description
+- `unrealizedPnl` useMemo calculates from market best bids
+- `imbalanceViz` useMemo converts ratio to YES/NO percentage for bar visualization
+- Empty state shows CircleDot icon with "No position" message
+
+Verification:
+- bun run typecheck: PASSED
+- bun run build: PASSED (489.14 kB JS bundle)
+- Position shows: CONFIRMED (shares, cost basis, exposure)
+- P&L calculated: CONFIRMED (realized from position, unrealized from market bids)
+
+Learnings:
+- TypeScript type Position | undefined doesn't auto-coerce to Position | null (use ?? null)
+- Imbalance ratio from Rust is 0-1 where 0.5 = balanced, calculate YES% = ratio, NO% = 1-ratio
+- Unrealized P&L calculated as (shares * current_bid) - cost_basis
+- Inventory state descriptions help users understand risk levels
+- Colored border on P&L section based on inventory state provides visual urgency
+
+Notes for next task (phase5-trades):
+- Create TradesTable component for trades in this market
+- Columns: time, side, outcome, price, size, P&L
+- Sort by time descending (most recent first)
+- Color rows by profit/loss on trade
+- Consider virtualization for long lists (react-virtual or similar)
+
+---

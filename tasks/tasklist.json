@@ -374,7 +374,7 @@
       "id": "phase5-position",
       "title": "Phase 5: Create PositionPanel component",
       "description": "Show YES/NO shares and cost basis. Imbalance ratio and inventory state badge. Realized and unrealized P&L for this market.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["phase5-orderbook"],
       "files": ["frontend/src/components/market/PositionPanel.tsx"],
       "acceptance": [

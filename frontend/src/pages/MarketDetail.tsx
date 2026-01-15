@@ -1,8 +1,8 @@
 import { useParams, Link } from "react-router-dom";
 import { ArrowLeft } from "lucide-react";
 import { useDashboardState } from "@/hooks";
-import { formatUsd, formatPercent, formatTimeRemaining } from "@/lib/types";
-import { PriceChart, OrderBookDisplay } from "@/components/market";
+import { formatUsd, formatTimeRemaining } from "@/lib/types";
+import { PriceChart, OrderBookDisplay, PositionPanel } from "@/components/market";
 
 /**
  * Market detail page showing price chart, order book, position, and trades.
@@ -95,78 +95,7 @@ export function MarketDetail() {
         <OrderBookDisplay market={market} />
 
         {/* Position panel */}
-        <div className="rounded-lg border border-border bg-card p-4">
-          <h3 className="mb-2 font-semibold">Position</h3>
-          {position ? (
-            <div className="space-y-3">
-              <div className="grid grid-cols-2 gap-4 text-sm">
-                <div>
-                  <div className="text-muted-foreground">YES Shares</div>
-                  <div className="font-medium">{position.yes_shares}</div>
-                </div>
-                <div>
-                  <div className="text-muted-foreground">NO Shares</div>
-                  <div className="font-medium">{position.no_shares}</div>
-                </div>
-                <div>
-                  <div className="text-muted-foreground">YES Cost Basis</div>
-                  <div className="font-medium">
-                    {formatUsd(position.yes_cost_basis)}
-                  </div>
-                </div>
-                <div>
-                  <div className="text-muted-foreground">NO Cost Basis</div>
-                  <div className="font-medium">
-                    {formatUsd(position.no_cost_basis)}
-                  </div>
-                </div>
-              </div>
-              <div className="border-t border-border pt-3">
-                <div className="grid grid-cols-3 gap-4 text-sm">
-                  <div>
-                    <div className="text-muted-foreground">Realized P&L</div>
-                    <div
-                      className={`font-medium ${parseFloat(position.realized_pnl) >= 0 ? "text-green-500" : "text-red-500"}`}
-                    >
-                      {formatUsd(position.realized_pnl)}
-                    </div>
-                  </div>
-                  <div>
-                    <div className="text-muted-foreground">Exposure</div>
-                    <div className="font-medium">
-                      {formatUsd(position.total_exposure)}
-                    </div>
-                  </div>
-                  <div>
-                    <div className="text-muted-foreground">Imbalance</div>
-                    <div className="font-medium">
-                      {formatPercent(position.imbalance_ratio)}
-                    </div>
-                  </div>
-                </div>
-              </div>
-              <div className="border-t border-border pt-3">
-                <span
-                  className={`rounded-full px-2 py-0.5 text-xs ${
-                    position.inventory_state === "balanced"
-                      ? "bg-green-500/10 text-green-500"
-                      : position.inventory_state === "skewed"
-                        ? "bg-yellow-500/10 text-yellow-500"
-                        : position.inventory_state === "exposed"
-                          ? "bg-orange-500/10 text-orange-500"
-                          : "bg-red-500/10 text-red-500"
-                  }`}
-                >
-                  {position.inventory_state}
-                </span>
-              </div>
-            </div>
-          ) : (
-            <div className="flex h-32 items-center justify-center text-muted-foreground">
-              No position in this market
-            </div>
-          )}
-        </div>
+        <PositionPanel position={position ?? null} market={market} />
 
         {/* Trades table */}
         <div className="rounded-lg border border-border bg-card p-4">
