@@ -83,6 +83,8 @@ export function useWebSocket(config: WebSocketConfig = {}): UseWebSocketReturn {
   const reconnectDelayRef = useRef(mergedConfig.reconnectDelay);
   const shouldReconnectRef = useRef(true);
   const mountedRef = useRef(true);
+  // Ref to hold the connect function to break circular dependency
+  const connectInternalRef = useRef<(() => void) | null>(null);
 
   /**
    * Clean up reconnect timeout.
@@ -112,7 +114,8 @@ export function useWebSocket(config: WebSocketConfig = {}): UseWebSocketReturn {
           delay * mergedConfig.backoffMultiplier,
           mergedConfig.maxReconnectDelay
         );
-        connectInternal();
+        // Use ref to call connect function to avoid circular dependency
+        connectInternalRef.current?.();
       }
     }, delay);
   }, [clearReconnectTimeout, mergedConfig.backoffMultiplier, mergedConfig.maxReconnectDelay]);
@@ -193,6 +196,11 @@ export function useWebSocket(config: WebSocketConfig = {}): UseWebSocketReturn {
     }
   }, [mergedConfig.url, mergedConfig.reconnectDelay, scheduleReconnect]);
 
+  // Keep the ref updated with the latest connectInternal function
+  useEffect(() => {
+    connectInternalRef.current = connectInternal;
+  }, [connectInternal]);
+
   /**
    * Public connect function - enables auto-reconnect and connects.
    */
@@ -216,12 +224,27 @@ export function useWebSocket(config: WebSocketConfig = {}): UseWebSocketReturn {
     setStatus("disconnected");
   }, [clearReconnectTimeout]);
 
-  // Auto-connect on mount
+  // Auto-connect on mount - use setTimeout to avoid sync setState in effect
   useEffect(() => {
     mountedRef.current = true;
 
     if (mergedConfig.autoConnect) {
-      connect();
+      // Schedule connection on next tick to avoid sync setState
+      const timerId = setTimeout(() => {
+        if (mountedRef.current) {
+          connect();
+        }
+      }, 0);
+      return () => {
+        clearTimeout(timerId);
+        mountedRef.current = false;
+        shouldReconnectRef.current = false;
+        clearReconnectTimeout();
+        if (wsRef.current) {
+          wsRef.current.close(1000, "Component unmount");
+          wsRef.current = null;
+        }
+      };
     }
 
     return () => {

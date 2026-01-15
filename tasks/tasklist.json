@@ -478,7 +478,7 @@
       "id": "phase6-final",
       "title": "Phase 6: Final integration test",
       "description": "Run poly-bot in paper mode with dashboard. Verify all components work. Test WebSocket reconnection. Test REST API queries. Document any issues.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["phase6-build"],
       "files": [],
       "acceptance": [

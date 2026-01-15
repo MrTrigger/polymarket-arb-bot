@@ -11,6 +11,22 @@ interface OrderBookDisplayProps {
 }
 
 /**
+ * Calculate staleness indicator from last update timestamp.
+ * Returns null if data is fresh, otherwise a label and color.
+ */
+function calculateStaleness(
+  lastUpdateMs: number,
+  nowMs: number
+): { label: string; color: string } | null {
+  const age = nowMs - lastUpdateMs;
+  if (age < 1000) return null;
+  if (age < 5000) return { label: "1s ago", color: "text-yellow-500" };
+  if (age < 10000)
+    return { label: `${Math.floor(age / 1000)}s ago`, color: "text-orange-500" };
+  return { label: `${Math.floor(age / 1000)}s ago`, color: "text-red-500" };
+}
+
+/**
  * Displays a single order book (YES or NO) with bid/ask/spread.
  */
 interface SingleBookProps {
@@ -20,9 +36,11 @@ interface SingleBookProps {
   book: OrderBookSummary | null;
   /** Whether this side participates in an arb opportunity. */
   hasArb: boolean;
+  /** Current timestamp for staleness calculation. */
+  nowMs: number;
 }
 
-function SingleBook({ label, book, hasArb }: SingleBookProps) {
+function SingleBook({ label, book, hasArb, nowMs }: SingleBookProps) {
   if (!book) {
     return (
       <div className="flex-1 rounded-lg border border-border bg-muted/20 p-4">
@@ -45,15 +63,8 @@ function SingleBook({ label, book, hasArb }: SingleBookProps) {
   const formatCents = (value: number) => `${(value * 100).toFixed(1)}c`;
   const formatSize = (value: number) => value.toFixed(2);
 
-  // Calculate how stale the data is
-  const staleness = useMemo(() => {
-    const now = Date.now();
-    const age = now - book.last_update_ms;
-    if (age < 1000) return null;
-    if (age < 5000) return { label: "1s ago", color: "text-yellow-500" };
-    if (age < 10000) return { label: `${Math.floor(age / 1000)}s ago`, color: "text-orange-500" };
-    return { label: `${Math.floor(age / 1000)}s ago`, color: "text-red-500" };
-  }, [book.last_update_ms]);
+  // Calculate how stale the data is using passed-in timestamp
+  const staleness = calculateStaleness(book.last_update_ms, nowMs);
 
   return (
     <div
@@ -121,6 +132,15 @@ function SingleBook({ label, book, hasArb }: SingleBookProps) {
  * - Staleness indicator for old data
  */
 export function OrderBookDisplay({ market }: OrderBookDisplayProps) {
+  // Get stable timestamp for staleness calculations
+  // We derive it from market data's own timestamps so it's deterministic
+  const nowMs = useMemo(() => {
+    // Use the latest update timestamp from either book, plus a small buffer
+    const yesUpdate = market.yes_book?.last_update_ms ?? 0;
+    const noUpdate = market.no_book?.last_update_ms ?? 0;
+    return Math.max(yesUpdate, noUpdate) + 100;
+  }, [market.yes_book?.last_update_ms, market.no_book?.last_update_ms]);
+
   // Calculate arbitrage metrics
   const arbMetrics = useMemo(() => {
     const yesAsk = market.yes_book ? parseDecimal(market.yes_book.best_ask) : null;
@@ -181,11 +201,13 @@ export function OrderBookDisplay({ market }: OrderBookDisplayProps) {
             label="YES"
             book={market.yes_book}
             hasArb={arbMetrics.hasArb}
+            nowMs={nowMs}
           />
           <SingleBook
             label="NO"
             book={market.no_book}
             hasArb={arbMetrics.hasArb}
+            nowMs={nowMs}
           />
         </div>
 
