@@ -444,7 +444,7 @@
       "id": "phase6-theme",
       "title": "Phase 6: Finalize dark theme",
       "description": "Ensure dark theme throughout. Configure Lightweight Charts dark theme. Verify all shadcn components use dark mode. No bright flashes.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["phase6-anomalies"],
       "files": [
         "frontend/src/index.css",

@@ -1380,3 +1380,43 @@ Notes for next task (phase6-theme):
 - Review index.css for dark theme variables
 
 ---
+
+### [2026-01-15] Task: phase6-theme - Finalize dark theme
+
+Files changed:
+- frontend/index.html
+- frontend/src/index.css
+
+Changes:
+- Updated index.html:
+  - Added `class="dark"` to `<html>` element for Tailwind dark variant compatibility
+  - Added inline style `background-color: #0a0a0a` to prevent flash of white during initial load
+  - Updated title to "Polymarket Trading Dashboard"
+- Updated index.css:
+  - Made dark theme the default in `:root` (swapped light/dark values)
+  - Added `color-scheme: dark` for proper browser dark mode integration
+  - Kept `.dark` class with identical values for Tailwind dark: variant selector
+  - Added comments explaining the dark-by-default configuration
+- Verified all existing components:
+  - Lightweight Charts (EquityCurve, PriceChart) already have dark theme with zinc colors
+  - All shadcn components use semantic color variables (bg-card, text-foreground, etc.)
+  - No bright flashes during load due to HTML inline background style
+
+Verification:
+- bun run typecheck: PASSED
+- bun run build: PASSED (504.91 kB JS bundle)
+- All dark theme: CONFIRMED (dark values in :root by default)
+- Charts dark: CONFIRMED (transparent bg, zinc grid/crosshair colors)
+
+Learnings:
+- TailwindCSS v4 doesn't use tailwind.config.js - config is in index.css via @theme inline blocks
+- Inline style in index.html prevents FOUC (Flash of Unstyled Content)
+- color-scheme: dark tells browser to use dark scrollbars, form controls, etc.
+- shadcn components properly use CSS variables so they adapt to :root values automatically
+
+Notes for next task (phase6-build):
+- Build already works with hashed assets in dist/
+- May want to serve static files from poly-bot using tower-http
+- Consider code splitting to address bundle size warning (504 kB)
+
+---
