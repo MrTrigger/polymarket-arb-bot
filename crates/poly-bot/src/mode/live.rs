@@ -25,6 +25,10 @@ use tracing::{error, info, warn};
 use poly_common::ClickHouseClient;
 
 use crate::config::{BotConfig, ObservabilityConfig, TradingMode};
+use crate::dashboard::{
+    create_shared_session_manager, end_shared_session, BotMode, ExitReason,
+    SharedSessionManager,
+};
 use crate::data_source::live::{LiveDataSource, LiveDataSourceConfig};
 use crate::executor::live::{LiveExecutor, LiveExecutorConfig};
 use crate::observability::{
@@ -86,6 +90,7 @@ impl LiveModeConfig {
 /// - Executor (real order submission)
 /// - Strategy loop (arb detection, sizing, execution)
 /// - Observability (decisions, counterfactuals, anomalies)
+/// - Session tracking (dashboard events)
 pub struct LiveMode {
     /// Configuration.
     config: LiveModeConfig,
@@ -97,6 +102,8 @@ pub struct LiveMode {
     shutdown_tx: broadcast::Sender<()>,
     /// ClickHouse client for data storage.
     clickhouse: Option<ClickHouseClient>,
+    /// Session manager for dashboard tracking.
+    session: SharedSessionManager,
 }
 
 impl LiveMode {
@@ -122,12 +129,16 @@ impl LiveMode {
         let state = Arc::new(GlobalState::new());
         let (shutdown_tx, _) = broadcast::channel(16);
 
+        // Create session manager (capture will be set up later in setup_observability)
+        let session = create_shared_session_manager(BotMode::Live, &bot_config, None);
+
         Ok(Self {
             config,
             bot_config,
             state,
             shutdown_tx,
             clickhouse: None,
+            session,
         })
     }
 
@@ -156,6 +167,11 @@ impl LiveMode {
     /// Returns `Ok(())` on clean shutdown, `Err` on fatal error.
     pub async fn run(&mut self) -> Result<()> {
         info!("Starting live trading mode");
+
+        // Start session tracking
+        if let Ok(session) = self.session.read() {
+            session.start();
+        }
 
         // Create data source
         let mut shutdown_rx = self.shutdown_tx.subscribe();
@@ -372,6 +388,9 @@ impl LiveMode {
             volume = %metrics.volume_usdc,
             "Final metrics"
         );
+
+        // End session with graceful exit
+        end_shared_session(&self.session, ExitReason::Graceful, &metrics);
 
         info!("Shutdown complete");
     }

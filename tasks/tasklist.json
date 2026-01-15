@@ -73,7 +73,7 @@
       "id": "phase1-session",
       "title": "Phase 1: Implement session lifecycle management",
       "description": "Create/update session records on bot start/stop. Generate session UUID, compute config hash, track exit reason. Integrate with existing mode startup.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["phase1-processor"],
       "files": [
         "crates/poly-bot/src/dashboard/session.rs",

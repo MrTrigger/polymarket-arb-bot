@@ -5,8 +5,10 @@
 
 pub mod capture;
 pub mod processor;
+pub mod session;
 pub mod types;
 
 pub use capture::*;
 pub use processor::*;
+pub use session::*;
 pub use types::*;

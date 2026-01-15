@@ -216,3 +216,54 @@ Notes for next task (phase1-session):
 - Integrate with mode/live.rs and mode/paper.rs startup code
 
 ---
+
+### [2026-01-15] Task: phase1-session - Implement session lifecycle management
+
+Files changed:
+- crates/poly-bot/src/dashboard/session.rs (created)
+- crates/poly-bot/src/dashboard/mod.rs (added session module export)
+- crates/poly-bot/src/mode/live.rs (integrated SessionManager)
+- crates/poly-bot/src/mode/paper.rs (integrated SessionManager)
+
+Changes:
+- Created `SessionManager` for session lifecycle tracking:
+  - Generates UUID session_id on creation
+  - Computes config hash using Keccak256 (sha3 crate)
+  - Tracks markets traded via HashSet
+  - `start()` method sends initial session event
+  - `end(reason, metrics)` method updates record with final metrics
+  - `record_market_traded(event_id)` for tracking unique markets
+- Supporting types:
+  - `SharedSessionManager` = Arc<RwLock<SessionManager>>
+  - Helper functions: `create_shared_session_manager`, `end_shared_session`, `record_market_on_session`
+- Config hash includes:
+  - Trading mode, assets list
+  - Trading params (margins, position limits, sizing)
+  - Risk params (failures, daily loss, imbalance)
+  - Shadow bid config (enabled, offset)
+  - Engine config (arbitrage, directional, maker enabled)
+- Integration with LiveMode and PaperMode:
+  - Session field added to both structs
+  - `session.start()` called at beginning of `run()`
+  - `end_shared_session()` called in `shutdown()` with ExitReason::Graceful
+
+Verification:
+- cargo clippy -p poly-bot -- -D warnings: PASSED
+- cargo test -p poly-bot dashboard::: PASSED (68 tests - 17 new session tests)
+- Session created on startup (via start() call)
+- Session updated on shutdown (via end() call)
+
+Learnings:
+- Use sha3 (Keccak256) for config hashing - already a dependency for EIP-712 signing
+- RwLock is appropriate for session manager (read-heavy, occasional writes)
+- MetricsSnapshot fields are u64, need cast to u32 for SessionRecord trade counts
+- Config hash should include all params that affect trading behavior for reproducibility
+- Collapsible if statements require `let && condition` syntax in Rust
+
+Notes for next task (phase1-mod):
+- Dashboard module structure is already created in mod.rs
+- Need to add DashboardConfig to config.rs
+- May want to add dashboard feature flag to Cargo.toml
+- Consider adding session manager to shadow/backtest modes in future
+
+---

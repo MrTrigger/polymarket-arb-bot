@@ -29,6 +29,10 @@ use poly_common::{ClickHouseClient, CryptoAsset};
 use poly_market::{DiscoveryConfig, MarketDiscovery};
 
 use crate::config::{BotConfig, EnginesConfig, ObservabilityConfig, TradingMode};
+use crate::dashboard::{
+    create_shared_session_manager, end_shared_session, BotMode, ExitReason,
+    SharedSessionManager,
+};
 use crate::data_source::live::{ActiveMarket, LiveDataSource, LiveDataSourceConfig};
 use crate::executor::paper::{PaperExecutor, PaperExecutorConfig};
 use crate::observability::{
@@ -125,6 +129,7 @@ impl PaperModeConfig {
 /// - Executor (simulated fills with configurable latency)
 /// - Strategy loop (arb detection, sizing, execution)
 /// - Observability (decisions, counterfactuals, anomalies)
+/// - Session tracking (dashboard events)
 pub struct PaperMode {
     /// Configuration.
     config: PaperModeConfig,
@@ -134,6 +139,8 @@ pub struct PaperMode {
     shutdown_tx: broadcast::Sender<()>,
     /// ClickHouse client for data storage.
     clickhouse: Option<ClickHouseClient>,
+    /// Session manager for dashboard tracking.
+    session: SharedSessionManager,
 }
 
 impl PaperMode {
@@ -156,11 +163,15 @@ impl PaperMode {
         let state = Arc::new(GlobalState::new());
         let (shutdown_tx, _) = broadcast::channel(16);
 
+        // Create session manager (capture will be set up later in setup_observability)
+        let session = create_shared_session_manager(BotMode::Paper, bot_config, None);
+
         Ok(Self {
             config,
             state,
             shutdown_tx,
             clickhouse: None,
+            session,
         })
     }
 
@@ -189,6 +200,12 @@ impl PaperMode {
     /// Returns `Ok(())` on clean shutdown, `Err` on fatal error.
     pub async fn run(&mut self) -> Result<()> {
         info!("Starting paper trading mode");
+
+        // Start session tracking
+        if let Ok(session) = self.session.read() {
+            session.start();
+        }
+
         info!(
             initial_balance = %self.config.initial_balance,
             fill_latency_ms = self.config.executor.fill_latency_ms,
@@ -445,6 +462,9 @@ impl PaperMode {
             volume = %metrics.volume_usdc,
             "Paper trading final metrics"
         );
+
+        // End session with graceful exit
+        end_shared_session(&self.session, ExitReason::Graceful, &metrics);
 
         info!("Paper trading shutdown complete");
     }
