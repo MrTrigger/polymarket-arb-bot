@@ -1189,3 +1189,57 @@ Notes for next task (phase5-trades):
 - Consider virtualization for long lists (react-virtual or similar)
 
 ---
+
+### [2026-01-15] Task: phase5-trades - Create TradesTable component
+
+Files changed:
+- frontend/src/components/market/TradesTable.tsx (created)
+- frontend/src/components/market/index.ts (added export)
+- frontend/src/pages/MarketDetail.tsx (replaced placeholder with component)
+
+Changes:
+- Created TradesTable component using shadcn Card and Table:
+  - Columns: Time, Side, Action (Outcome), Price, Size, P&L, Status
+  - Sorted by fill_time descending (most recent first)
+  - Color-coded rows by profit/loss (green/red hover states)
+  - P&L estimation based on arb margin or fair value assumption
+  - Side indicators with icons: ArrowUpRight (BUY/green), ArrowDownRight (SELL/red)
+  - Outcome badges for YES/NO display
+  - Status badges for non-FILLED trades (PARTIAL, CANCELLED, FAILED)
+  - Summary stats in header: total P&L, trade count, win rate
+  - Price displayed in cents (Polymarket 0-1 range * 100)
+  - Time formatted as HH:MM:SS.mmm for precision
+- Added TradesTableSkeleton for loading state
+- Integrated into MarketDetail page replacing inline table placeholder
+- Performance optimization: maxDisplay prop limits displayed rows (default 50)
+
+Key features:
+- `SIDE_CONFIG` constant maps BUY/SELL to color, icon, label
+- `OUTCOME_CONFIG` constant maps yes/no to label and color
+- `STATUS_CONFIG` constant maps trade status to badge styling
+- `estimateTradePnl()` calculates P&L from arb margin or fair value assumption
+- `formatTime()` formats ISO timestamp to HH:MM:SS.mmm
+- TradeRow component renders individual trade with all columns
+- useMemo for sorting and stats calculation
+
+Verification:
+- bun run typecheck: PASSED
+- bun run build: PASSED (492.59 kB JS bundle)
+- Trades show: CONFIRMED (Table with all columns)
+- Colors correct: CONFIRMED (green for profitable, red for losing trades)
+
+Learnings:
+- shadcn Table uses TableHeader/TableBody/TableRow/TableCell pattern
+- P&L estimation for arb trades uses arb_margin_at_fill * fill_size - fees
+- For non-arb trades, estimate based on fair value assumption (0.50)
+- No need for virtual scrolling with max 50 rows - simple overflow-y-auto sufficient
+- Display price in cents (multiply by 100) matches Polymarket UI conventions
+- Trade status shown only when not FILLED to reduce visual clutter
+
+Notes for next task (phase5-market-page):
+- MarketDetail page now has all Phase 5 components integrated
+- All components visible: PriceChart, OrderBookDisplay, PositionPanel, TradesTable
+- eventId from URL already working via useParams
+- Task should verify all components work together correctly
+
+---

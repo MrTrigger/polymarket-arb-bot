@@ -2,7 +2,7 @@ import { useParams, Link } from "react-router-dom";
 import { ArrowLeft } from "lucide-react";
 import { useDashboardState } from "@/hooks";
 import { formatUsd, formatTimeRemaining } from "@/lib/types";
-import { PriceChart, OrderBookDisplay, PositionPanel } from "@/components/market";
+import { PriceChart, OrderBookDisplay, PositionPanel, TradesTable } from "@/components/market";
 
 /**
  * Market detail page showing price chart, order book, position, and trades.
@@ -98,57 +98,7 @@ export function MarketDetail() {
         <PositionPanel position={position ?? null} market={market} />
 
         {/* Trades table */}
-        <div className="rounded-lg border border-border bg-card p-4">
-          <h3 className="mb-2 font-semibold">Recent Trades</h3>
-          {marketTrades.length === 0 ? (
-            <div className="flex h-32 items-center justify-center text-muted-foreground">
-              No trades in this market
-            </div>
-          ) : (
-            <div className="max-h-64 overflow-y-auto">
-              <table className="w-full text-sm">
-                <thead className="sticky top-0 bg-card">
-                  <tr className="border-b border-border">
-                    <th className="pb-2 text-left text-muted-foreground">
-                      Time
-                    </th>
-                    <th className="pb-2 text-left text-muted-foreground">
-                      Side
-                    </th>
-                    <th className="pb-2 text-left text-muted-foreground">
-                      Type
-                    </th>
-                    <th className="pb-2 text-right text-muted-foreground">
-                      Price
-                    </th>
-                    <th className="pb-2 text-right text-muted-foreground">
-                      Size
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {marketTrades.slice(0, 10).map((trade) => (
-                    <tr key={trade.trade_id} className="border-b border-border">
-                      <td className="py-2 text-muted-foreground">
-                        {new Date(trade.fill_time).toLocaleTimeString()}
-                      </td>
-                      <td
-                        className={`py-2 ${trade.side === "BUY" ? "text-green-500" : "text-red-500"}`}
-                      >
-                        {trade.side}
-                      </td>
-                      <td className="py-2">{trade.outcome.toUpperCase()}</td>
-                      <td className="py-2 text-right">
-                        {formatUsd(trade.fill_price)}
-                      </td>
-                      <td className="py-2 text-right">{trade.fill_size}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
+        <TradesTable trades={marketTrades} />
       </div>
     </div>
   );

@@ -388,7 +388,7 @@
       "id": "phase5-trades",
       "title": "Phase 5: Create TradesTable component",
       "description": "Table of trades for this market. Columns: time, side, action, price, size, P&L. Sorted by time desc. Color by profit/loss. Virtualized for performance.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["phase5-position"],
       "files": ["frontend/src/components/market/TradesTable.tsx"],
       "acceptance": [
