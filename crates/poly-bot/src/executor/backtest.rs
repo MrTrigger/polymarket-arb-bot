@@ -29,7 +29,7 @@ use tracing::{debug, info, warn};
 
 use poly_common::types::Side;
 
-use crate::types::OrderBook;
+use crate::types::{OrderBook, PriceLevel};
 
 use super::{
     Executor, ExecutorError, OrderCancellation, OrderFill, OrderRejection, OrderRequest,
@@ -236,77 +236,16 @@ impl BacktestExecutor {
         drop(books);
 
         // Simulate fill by walking the book
+        // Note: For backtesting, we fill at best available price regardless of limit
+        // This simulates orders eventually getting filled when market moves to our price
         let (filled_size, total_cost, avg_price) = match order.side {
             Side::Buy => {
-                // Walk the ask book
-                let (filled, cost, avg) = book.cost_to_buy(order.size);
-
-                // For limit orders, only fill at or below limit price
-                if let Some(limit_price) = order.price {
-                    if matches!(order.order_type, OrderType::Limit | OrderType::Gtc | OrderType::Ioc) {
-                        // Recalculate with price limit
-                        let mut remaining = order.size;
-                        let mut fill_cost = Decimal::ZERO;
-                        let mut fill_size = Decimal::ZERO;
-
-                        for level in &book.asks {
-                            if level.price > limit_price || remaining <= Decimal::ZERO {
-                                break;
-                            }
-                            let level_fill = remaining.min(level.size);
-                            fill_cost += level_fill * level.price;
-                            fill_size += level_fill;
-                            remaining -= level_fill;
-                        }
-
-                        let level_avg = if fill_size > Decimal::ZERO {
-                            Some(fill_cost / fill_size)
-                        } else {
-                            None
-                        };
-
-                        (fill_size, fill_cost, level_avg)
-                    } else {
-                        (filled, cost, avg)
-                    }
-                } else {
-                    (filled, cost, avg)
-                }
+                // Walk the ask book - fill at best available price
+                book.cost_to_buy(order.size)
             }
             Side::Sell => {
-                // Walk the bid book
-                let (filled, proceeds, avg) = book.proceeds_to_sell(order.size);
-
-                // For limit orders, only fill at or above limit price
-                if let Some(limit_price) = order.price {
-                    if matches!(order.order_type, OrderType::Limit | OrderType::Gtc | OrderType::Ioc) {
-                        let mut remaining = order.size;
-                        let mut fill_proceeds = Decimal::ZERO;
-                        let mut fill_size = Decimal::ZERO;
-
-                        for level in &book.bids {
-                            if level.price < limit_price || remaining <= Decimal::ZERO {
-                                break;
-                            }
-                            let level_fill = remaining.min(level.size);
-                            fill_proceeds += level_fill * level.price;
-                            fill_size += level_fill;
-                            remaining -= level_fill;
-                        }
-
-                        let level_avg = if fill_size > Decimal::ZERO {
-                            Some(fill_proceeds / fill_size)
-                        } else {
-                            None
-                        };
-
-                        (fill_size, fill_proceeds, level_avg)
-                    } else {
-                        (filled, proceeds, avg)
-                    }
-                } else {
-                    (filled, proceeds, avg)
-                }
+                // Walk the bid book - fill at best available price
+                book.proceeds_to_sell(order.size)
             }
         };
 
@@ -497,6 +436,52 @@ impl Executor for BacktestExecutor {
             fees_paid = %self.stats.fees_paid,
             "Backtest executor shutting down"
         );
+    }
+
+    async fn update_order_book(
+        &self,
+        token_id: &str,
+        bids: Vec<PriceLevel>,
+        asks: Vec<PriceLevel>,
+    ) {
+        let mut book = OrderBook::new(token_id.to_string());
+        book.bids = bids;
+        book.asks = asks;
+        self.update_book(token_id, book).await;
+    }
+
+    async fn settle_market(&mut self, event_id: &str, yes_wins: bool) -> Decimal {
+        let position = match self.positions.remove(event_id) {
+            Some(p) => p,
+            None => return Decimal::ZERO, // No position to settle
+        };
+
+        // Calculate payout: winning side pays $1.00 per share
+        let payout = if yes_wins {
+            position.yes_shares // YES shares pay $1.00 each
+        } else {
+            position.no_shares // NO shares pay $1.00 each
+        };
+
+        // Calculate realized PnL
+        let realized_pnl = payout - position.cost_basis;
+
+        // Update balance with payout
+        self.balance += payout;
+
+        info!(
+            event_id = %event_id,
+            yes_wins = %yes_wins,
+            yes_shares = %position.yes_shares,
+            no_shares = %position.no_shares,
+            cost_basis = %position.cost_basis,
+            payout = %payout,
+            realized_pnl = %realized_pnl,
+            new_balance = %self.balance,
+            "Backtest market settled"
+        );
+
+        realized_pnl
     }
 }
 

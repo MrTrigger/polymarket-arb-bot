@@ -1781,7 +1781,10 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "csv",
  "dashmap",
+ "dotenvy",
+ "futures",
  "futures-util",
  "poly-common",
  "poly-market",
@@ -1811,26 +1814,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.17",
-]
-
-[[package]]
-name = "poly-import"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "clickhouse",
- "poly-common",
- "reqwest",
- "rust_decimal",
- "rust_decimal_macros",
- "serde",
- "serde_json",
- "thiserror 2.0.17",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

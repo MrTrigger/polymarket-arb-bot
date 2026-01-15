@@ -1,70 +1,68 @@
-# Poly-collect configuration
-# All values can be overridden via CLI arguments or environment variables
+# Data Collection Configuration
+# ==============================
+#
+# Collects data from Binance (spot prices) and Polymarket (orderbooks).
+# Supports both historical and live collection modes.
+#
+# Environment variables:
+#   CLICKHOUSE_URL      - ClickHouse HTTP URL
+#   CLICKHOUSE_USER     - Username (optional)
+#   CLICKHOUSE_PASSWORD - Password (optional)
+#
+# Usage:
+#   # Historical mode (fetch past data)
+#   cargo run -p poly-collect --release
+#
+#   # Live mode (stream real-time data)
+#   # Set mode = "live" in [collection] below
+
+# ============================================================================
+# USER SETTINGS (configure these)
+# ============================================================================
 
 [general]
-# Crypto assets to track (BTC, ETH, SOL, XRP)
-assets = ["BTC", "ETH", "SOL"]
+assets = ["BTC", "ETH", "SOL"]    # Assets to collect
+timeframes = ["15m"]              # Timeframes: "5m", "15m", "1h"
+log_level = "info"                # info, debug, trace
 
-# Discovery interval in seconds (how often to check for new markets)
-discovery_interval_secs = 300
+[collection]
+mode = "history"                  # "history" or "live"
+# Use start_date/end_date OR days (not both)
+#start_date = "2025-01-01"        # Start date (YYYY-MM-DD)
+#end_date = "2025-01-15"          # End date (YYYY-MM-DD)
+days = 7                          # Alternative: collect last N days
 
-# Log level (trace, debug, info, warn, error)
-log_level = "info"
+[output]
+mode = "csv"                      # clickhouse, csv, or both
+csv_dir = "data"                  # Directory for CSV output
 
-[clickhouse]
-# ClickHouse HTTP URL
-url = "http://localhost:8123"
+# ============================================================================
+# DEFAULTS (rarely need to change)
+# ============================================================================
 
-# Database name
-database = "default"
-
-# Maximum rows per batch insert
-max_rows = 10000
-
-# Maximum bytes per batch insert
-max_bytes = 10485760  # 10 MB
-
-# Batch commit period in seconds
-period_secs = 5
+[live]
+discovery_interval_secs = 300     # How often to check for new markets
 
 [binance]
-# Buffer size before flushing to ClickHouse
 buffer_size = 500
-
-# Maximum time between flushes in milliseconds
 flush_interval_ms = 5000
-
-# Connection timeout in seconds
 connect_timeout_secs = 10
-
-# Initial reconnect delay in seconds
 initial_reconnect_delay_secs = 1
-
-# Maximum reconnect delay in seconds
 max_reconnect_delay_secs = 60
 
 [clob]
-# Snapshot buffer size before flushing to ClickHouse
 snapshot_buffer_size = 500
-
-# Delta buffer size before flushing to ClickHouse
 delta_buffer_size = 1000
-
-# Maximum time between flushes in milliseconds
 flush_interval_ms = 5000
-
-# Snapshot capture interval in milliseconds (100ms for high-fidelity backtest)
 snapshot_interval_ms = 100
-
-# Connection timeout in seconds
 connect_timeout_secs = 10
-
-# Initial reconnect delay in seconds
 initial_reconnect_delay_secs = 1
-
-# Maximum reconnect delay in seconds
 max_reconnect_delay_secs = 60
 
+[clickhouse]
+max_rows = 10000
+max_bytes = 10485760
+period_secs = 5
+
 [health]
-# Health check and stats logging interval in seconds
 log_interval_secs = 30

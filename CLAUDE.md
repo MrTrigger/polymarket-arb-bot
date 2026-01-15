@@ -8,12 +8,11 @@ Polymarket 15-Minute Arbitrage Bot - HFT-optimized trading bot for crypto binary
 
 ## Architecture
 
-Three separate binaries in a Cargo workspace:
+Two separate binaries in a Cargo workspace:
 
 | Binary | Purpose |
 |--------|---------|
-| `poly-collect` | Real-time data collection (Binance spot prices, Polymarket CLOB orderbooks) |
-| `poly-import` | Historical data import from Polymarket APIs |
+| `poly-collect` | Data collection: live (WebSocket) or historical (API). Binance spot prices, Polymarket orderbooks & price history |
 | `poly-bot` | Trading strategy execution with multiple modes (live, paper, shadow, backtest) |
 
 Shared types and utilities live in `poly-common` crate.
@@ -57,11 +56,8 @@ crates/
 │   └── src/
 │       ├── discovery.rs  # Market discovery via Gamma API
 │       ├── binance.rs    # Binance WebSocket capture
-│       └── clob.rs       # Polymarket CLOB WebSocket
-├── poly-import/          # Historical import binary
-│   └── src/
-│       ├── prices.rs     # Price history API
-│       └── trades.rs     # Trade history API
+│       ├── clob.rs       # Polymarket CLOB WebSocket
+│       └── history.rs    # Historical data collection
 └── poly-bot/             # Trading bot binary
     └── src/
         ├── config.rs       # BotConfig, ObservabilityConfig

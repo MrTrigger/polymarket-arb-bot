@@ -1,4 +1,8 @@
-//! Poly-collect: Real-time data collector for Polymarket arbitrage bot.
+//! Poly-collect: Data collector for Polymarket arbitrage bot.
+//!
+//! Supports two modes:
+//! - history: Fetch historical data from Binance/Polymarket APIs
+//! - live: Stream real-time data via WebSocket
 //!
 //! Usage:
 //!   poly-collect [OPTIONS]
@@ -15,6 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use chrono::Utc;
 use clap::Parser;
 use poly_common::{ClickHouseClient, CryptoAsset};
 use tokio::sync::{broadcast, RwLock};
@@ -24,13 +29,15 @@ use tracing_subscriber::FmtSubscriber;
 
 use poly_collect::binance::BinanceCapture;
 use poly_collect::clob::{update_active_markets, ActiveMarkets, ClobCapture};
-use poly_collect::config::CollectConfig;
+use poly_collect::config::{CollectConfig, CollectionMode};
+use poly_collect::data_writer::DataWriter;
 use poly_collect::discovery::MarketDiscovery;
+use poly_collect::history::HistoricalCollector;
 
 /// CLI arguments for poly-collect.
 #[derive(Parser, Debug)]
 #[command(name = "poly-collect")]
-#[command(about = "Real-time data collector for Polymarket arbitrage bot")]
+#[command(about = "Data collector for Polymarket arbitrage bot")]
 #[command(version)]
 struct Args {
     /// Config file path
@@ -67,6 +74,9 @@ impl HealthStats {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Load .env file (if present)
+    dotenvy::dotenv().ok();
+
     // Parse CLI arguments
     let args = Args::parse();
 
@@ -98,28 +108,121 @@ async fn main() -> Result<()> {
     tracing::subscriber::set_global_default(subscriber)?;
 
     info!("Starting poly-collect data collector");
+    info!("Mode: {:?}", config.mode);
     info!("Assets: {:?}", config.assets);
-    info!("ClickHouse URL: {}", config.clickhouse.url);
 
-    // Create ClickHouse client
-    let db = Arc::new(ClickHouseClient::new(config.clickhouse.clone()));
+    // Create ClickHouse client if needed
+    let clickhouse = if config.output.use_clickhouse() {
+        info!("ClickHouse URL: {}", config.clickhouse.url);
+        let client = Arc::new(ClickHouseClient::new(config.clickhouse.clone()));
 
-    // Test connection
-    info!("Testing ClickHouse connection...");
-    match db.ping().await {
-        Ok(()) => {
-            info!("ClickHouse connection successful");
-            // Create tables if needed
-            if let Err(e) = db.create_tables().await {
-                warn!("Failed to create tables: {}", e);
+        // Test connection
+        info!("Testing ClickHouse connection...");
+        match client.ping().await {
+            Ok(()) => {
+                info!("ClickHouse connection successful");
+                if let Err(e) = client.create_tables().await {
+                    warn!("Failed to create tables: {}", e);
+                }
+            }
+            Err(e) => {
+                warn!("ClickHouse not available: {}. Continuing anyway.", e);
             }
         }
-        Err(e) => {
-            warn!(
-                "ClickHouse not available: {}. Continuing anyway for data capture.",
-                e
-            );
+        Some(client)
+    } else {
+        info!("ClickHouse output disabled");
+        None
+    };
+
+    // Run the appropriate mode
+    match config.mode {
+        CollectionMode::History => run_history_mode(&config, clickhouse).await,
+        CollectionMode::Live => {
+            // Create DataWriter for live mode (no collection params)
+            let writer = Arc::new(DataWriter::new(&config.output, clickhouse.clone())?);
+            if let Some(dir) = writer.csv_dir() {
+                info!("CSV output directory: {:?}", dir);
+            }
+            run_live_mode(&config, writer, clickhouse).await
         }
+    }
+}
+
+/// Run historical data collection mode.
+async fn run_history_mode(
+    config: &CollectConfig,
+    clickhouse: Option<Arc<ClickHouseClient>>,
+) -> Result<()> {
+    use poly_collect::data_writer::CollectionParams;
+
+    // Determine date range from start_date/end_date or days
+    let (start_date, end_date) = if let (Some(start), Some(end)) =
+        (config.start_date, config.end_date)
+    {
+        (start, end)
+    } else if let Some(days) = config.duration.days {
+        // Use last N days
+        let end = chrono::Utc::now().date_naive();
+        let start = end - chrono::Duration::days(days as i64);
+        (start, end)
+    } else {
+        anyhow::bail!("Either start_date/end_date or days must be specified for history mode");
+    };
+
+    info!(
+        "Running historical collection from {} to {}",
+        start_date, end_date
+    );
+
+    // Create DataWriter with collection params for organized CSV output
+    // Use configured timeframes for folder naming (e.g., "15m" or "5m,15m,1h")
+    let interval = config
+        .timeframes
+        .iter()
+        .map(|t| t.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    let params = CollectionParams {
+        start_date,
+        end_date,
+        interval,
+    };
+    let writer = Arc::new(DataWriter::with_params(
+        &config.output,
+        clickhouse,
+        Some(params),
+    )?);
+
+    if let Some(dir) = writer.csv_dir() {
+        info!("CSV output directory: {:?}", dir);
+    }
+
+    let collector = HistoricalCollector::new(writer, config.timeframes.clone())?;
+    let stats = collector
+        .collect(&config.assets, start_date, end_date)
+        .await?;
+
+    info!("Historical collection complete:");
+    info!("  Assets completed: {}", stats.assets_completed);
+    info!("  Assets failed: {}", stats.assets_failed);
+    info!("  Binance records: {}", stats.binance_records);
+    info!("  Polymarket records: {}", stats.polymarket_records);
+
+    Ok(())
+}
+
+/// Run live streaming mode.
+async fn run_live_mode(
+    config: &CollectConfig,
+    writer: Arc<DataWriter>,
+    clickhouse: Option<Arc<ClickHouseClient>>,
+) -> Result<()> {
+    // Log collection duration
+    if config.duration.is_indefinite() {
+        info!("Collection duration: indefinite (press Ctrl+C to stop)");
+    } else if let Some(stop_time) = config.duration.stop_time() {
+        info!("Collection will stop at: {}", stop_time);
     }
 
     // Shared state for active markets (discovery writes, CLOB reads)
@@ -131,20 +234,24 @@ async fn main() -> Result<()> {
     // Health statistics
     let stats = Arc::new(HealthStats::default());
 
-    // Spawn discovery task with integrated active markets update
-    let discovery_handle = spawn_discovery_task(
-        Arc::clone(&db),
-        config.assets.clone(),
-        Arc::clone(&active_markets),
-        Arc::clone(&stats),
-        config.discovery_interval,
-        shutdown_tx.subscribe(),
-    );
-    info!("Discovery task started");
+    // Spawn discovery task (needs ClickHouse for market window storage)
+    let discovery_handle = if let Some(db) = clickhouse.clone() {
+        Some(spawn_discovery_task(
+            db,
+            config.assets.clone(),
+            Arc::clone(&active_markets),
+            Arc::clone(&stats),
+            config.discovery_interval,
+            shutdown_tx.subscribe(),
+        ))
+    } else {
+        warn!("Discovery disabled (requires ClickHouse)");
+        None
+    };
 
     // Spawn Binance capture task
     let binance_handle = spawn_binance_task(
-        Arc::clone(&db),
+        Arc::clone(&writer),
         config.binance.clone(),
         shutdown_tx.subscribe(),
     );
@@ -152,7 +259,7 @@ async fn main() -> Result<()> {
 
     // Spawn CLOB capture task
     let clob_handle = spawn_clob_task(
-        Arc::clone(&db),
+        Arc::clone(&writer),
         config.clob.clone(),
         Arc::clone(&active_markets),
         shutdown_tx.subscribe(),
@@ -170,7 +277,17 @@ async fn main() -> Result<()> {
     // Wait for shutdown signal
     info!("All tasks running. Press Ctrl+C to stop.");
 
-    // Handle shutdown signals
+    // Calculate duration until stop time (if set)
+    let duration_until_stop = config.duration.stop_time().map(|stop_time| {
+        let now = Utc::now();
+        if stop_time > now {
+            (stop_time - now).to_std().unwrap_or(Duration::from_secs(0))
+        } else {
+            Duration::from_secs(0)
+        }
+    });
+
+    // Handle shutdown signals (Ctrl+C or duration expiry)
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
@@ -184,13 +301,34 @@ async fn main() -> Result<()> {
             _ = sigint.recv() => {
                 info!("Received SIGINT");
             }
+            _ = async {
+                if let Some(duration) = duration_until_stop {
+                    tokio::time::sleep(duration).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {
+                info!("Collection duration reached, stopping...");
+            }
         }
     }
 
     #[cfg(windows)]
     {
-        tokio::signal::ctrl_c().await?;
-        info!("Received Ctrl+C");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                info!("Received Ctrl+C");
+            }
+            _ = async {
+                if let Some(duration) = duration_until_stop {
+                    tokio::time::sleep(duration).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {
+                info!("Collection duration reached, stopping...");
+            }
+        }
     }
 
     // Send shutdown signal to all tasks
@@ -202,7 +340,7 @@ async fn main() -> Result<()> {
 
     tokio::select! {
         _ = async {
-            let _ = discovery_handle.await;
+            if let Some(h) = discovery_handle { let _ = h.await; }
             let _ = binance_handle.await;
             let _ = clob_handle.await;
             let _ = health_handle.await;
@@ -249,8 +387,6 @@ fn spawn_discovery_task(
                             .markets_discovered
                             .fetch_add(count as u64, Ordering::Relaxed);
 
-                        // Update active markets for CLOB capture
-                        // Get discovered market windows from discovery's internal state
                         if let Ok(windows) = discovery.get_discovered_windows().await {
                             update_active_markets(&active_markets, &windows).await;
                         }
@@ -275,13 +411,12 @@ fn spawn_discovery_task(
 
 /// Spawn the Binance capture task.
 fn spawn_binance_task(
-    db: Arc<ClickHouseClient>,
+    writer: Arc<DataWriter>,
     config: poly_collect::binance::BinanceConfig,
     shutdown: broadcast::Receiver<()>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        // BinanceCapture takes ClickHouseClient by value (it's Clone)
-        let binance = BinanceCapture::new(config, (*db).clone());
+        let binance = BinanceCapture::new(config, writer);
         if let Err(e) = binance.run(shutdown).await {
             error!("Binance capture error: {}", e);
         }
@@ -290,14 +425,13 @@ fn spawn_binance_task(
 
 /// Spawn the CLOB capture task.
 fn spawn_clob_task(
-    db: Arc<ClickHouseClient>,
+    writer: Arc<DataWriter>,
     config: poly_collect::clob::ClobConfig,
     active_markets: ActiveMarkets,
     shutdown: broadcast::Receiver<()>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        // ClobCapture takes ClickHouseClient by value (it's Clone)
-        let clob = ClobCapture::new(config, (*db).clone(), active_markets);
+        let clob = ClobCapture::new(config, writer, active_markets);
         if let Err(e) = clob.run(shutdown).await {
             error!("CLOB capture error: {}", e);
         }

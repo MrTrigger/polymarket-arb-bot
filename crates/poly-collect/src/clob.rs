@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
-use poly_common::{ClickHouseClient, MarketWindow, OrderBookDelta, OrderBookSnapshot};
+use poly_common::{MarketWindow, OrderBookDelta, OrderBookSnapshot};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -20,6 +20,8 @@ use tokio_tungstenite::{
     tungstenite::{protocol::Message, Error as WsError},
 };
 use tracing::{debug, error, info, warn};
+
+use crate::data_writer::DataWriter;
 
 // Re-export types from poly-market for convenience
 pub use poly_market::{
@@ -47,8 +49,8 @@ pub enum ClobError {
     #[error("JSON parse error: {0}")]
     Parse(#[from] serde_json::Error),
 
-    #[error("ClickHouse error: {0}")]
-    ClickHouse(#[from] poly_common::ClickHouseError),
+    #[error("Write error: {0}")]
+    Write(String),
 
     #[error("Connection timeout")]
     Timeout,
@@ -125,7 +127,7 @@ pub struct MarketInfo {
 /// Polymarket CLOB WebSocket capture client.
 pub struct ClobCapture {
     config: ClobConfig,
-    clickhouse: ClickHouseClient,
+    writer: Arc<DataWriter>,
     /// Shared state of active markets.
     active_markets: ActiveMarkets,
 }
@@ -134,12 +136,12 @@ impl ClobCapture {
     /// Creates a new CLOB capture client.
     pub fn new(
         config: ClobConfig,
-        clickhouse: ClickHouseClient,
+        writer: Arc<DataWriter>,
         active_markets: ActiveMarkets,
     ) -> Self {
         Self {
             config,
-            clickhouse,
+            writer,
             active_markets,
         }
     }
@@ -493,7 +495,7 @@ impl ClobCapture {
         markets.get(token_id).cloned()
     }
 
-    /// Flush snapshot buffer to ClickHouse.
+    /// Flush snapshot buffer to storage.
     async fn flush_snapshots(
         &self,
         buffer: &mut Vec<OrderBookSnapshot>,
@@ -504,9 +506,9 @@ impl ClobCapture {
         }
 
         let count = buffer.len();
-        debug!("Flushing {} snapshots to ClickHouse", count);
+        debug!("Flushing {} snapshots to storage", count);
 
-        match self.clickhouse.insert_snapshots(buffer).await {
+        match self.writer.write_snapshots(buffer).await {
             Ok(()) => {
                 stats.snapshots_written += count as u64;
                 buffer.clear();
@@ -514,13 +516,13 @@ impl ClobCapture {
             }
             Err(e) => {
                 stats.write_errors += 1;
-                error!("Failed to write snapshots to ClickHouse: {e}");
-                Err(ClobError::ClickHouse(e))
+                error!("Failed to write snapshots: {e}");
+                Err(ClobError::Write(e.to_string()))
             }
         }
     }
 
-    /// Flush delta buffer to ClickHouse.
+    /// Flush delta buffer to storage.
     async fn flush_deltas(
         &self,
         buffer: &mut Vec<OrderBookDelta>,
@@ -531,9 +533,9 @@ impl ClobCapture {
         }
 
         let count = buffer.len();
-        debug!("Flushing {} deltas to ClickHouse", count);
+        debug!("Flushing {} deltas to storage", count);
 
-        match self.clickhouse.insert_deltas(buffer).await {
+        match self.writer.write_deltas(buffer).await {
             Ok(()) => {
                 stats.deltas_written += count as u64;
                 buffer.clear();
@@ -541,8 +543,8 @@ impl ClobCapture {
             }
             Err(e) => {
                 stats.write_errors += 1;
-                error!("Failed to write deltas to ClickHouse: {e}");
-                Err(ClobError::ClickHouse(e))
+                error!("Failed to write deltas: {e}");
+                Err(ClobError::Write(e.to_string()))
             }
         }
     }

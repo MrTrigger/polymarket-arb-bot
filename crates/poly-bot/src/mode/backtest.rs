@@ -27,33 +27,36 @@ use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 use poly_common::types::CryptoAsset;
 use poly_common::ClickHouseClient;
 
-use crate::config::{BacktestConfig, BotConfig, ObservabilityConfig, TradingMode};
+use crate::config::{BacktestConfig, BotConfig, EnginesConfig, ObservabilityConfig, TradingMode};
+use crate::data_source::csv_replay::{CsvReplayConfig, CsvReplayDataSource};
 use crate::data_source::replay::{ReplayConfig, ReplayDataSource};
-use crate::data_source::{DataSource, MarketEvent};
+use crate::data_source::DataSource;
 use crate::executor::backtest::{BacktestExecutor, BacktestExecutorConfig, BacktestStats};
-use crate::executor::Executor;
 use crate::observability::{
     create_shared_analyzer, create_shared_detector_with_capture, AnomalyConfig, CaptureConfig,
     CounterfactualConfig, InMemoryIdLookup, ObservabilityCapture, ProcessorConfig,
 };
 use crate::state::GlobalState;
 use crate::strategy::{StrategyConfig, StrategyLoop};
-use crate::types::OrderBook;
 
 /// Configuration for backtest mode.
 #[derive(Debug, Clone)]
 pub struct BacktestModeConfig {
-    /// Data source configuration.
+    /// Data source configuration (for ClickHouse replay).
     pub data_source: ReplayConfig,
+    /// CSV data directory (if set, uses CSV instead of ClickHouse).
+    pub csv_data_dir: Option<String>,
     /// Executor configuration.
     pub executor: BacktestExecutorConfig,
     /// Strategy configuration.
     pub strategy: StrategyConfig,
+    /// Engines configuration (arbitrage, directional, maker).
+    pub engines: EnginesConfig,
     /// Observability configuration.
     pub observability: ObservabilityConfig,
     /// Initial virtual balance (USDC).
@@ -70,8 +73,10 @@ impl Default for BacktestModeConfig {
     fn default() -> Self {
         Self {
             data_source: ReplayConfig::default(),
+            csv_data_dir: None,
             executor: BacktestExecutorConfig::default(),
             strategy: StrategyConfig::default(),
+            engines: EnginesConfig::default(),
             observability: ObservabilityConfig::default(),
             initial_balance: dec!(10000),
             shutdown_timeout_secs: 30,
@@ -111,8 +116,10 @@ impl BacktestModeConfig {
 
         Ok(Self {
             data_source: replay_config,
+            csv_data_dir: config.backtest.data_dir.clone(),
             executor: executor_config,
             strategy: StrategyConfig::from_trading_config(&config.trading, (config.window_duration.minutes() * 60) as i64),
+            engines: config.engines.clone(),
             observability: config.observability.clone(),
             initial_balance: dec!(10000),
             shutdown_timeout_secs: 30,
@@ -372,6 +379,7 @@ pub struct PositionSummary {
     pub cost_basis: Decimal,
 }
 
+
 /// Backtest trading mode runner.
 ///
 /// Coordinates all components for backtesting:
@@ -457,43 +465,112 @@ impl BacktestMode {
     }
 
     /// Run a single backtest.
+    ///
+    /// Uses the same StrategyLoop as paper/live modes to ensure backtest
+    /// results accurately reflect real trading behavior.
     async fn run_single(&mut self) -> Result<BacktestResult> {
+        // Dispatch to concrete implementation based on data source type
+        if let Some(ref data_dir) = self.config.csv_data_dir {
+            self.run_with_csv_source(data_dir.clone()).await
+        } else {
+            self.run_with_clickhouse_source().await
+        }
+    }
+
+    /// Run backtest with CSV data source.
+    async fn run_with_csv_source(&mut self, data_dir: String) -> Result<BacktestResult> {
         let start_instant = std::time::Instant::now();
 
         info!("Starting backtest mode");
+
+        // Reset state for this run
+        self.state = Arc::new(GlobalState::new());
+
+        // Create CSV data source
+        let shutdown_rx = self.shutdown_tx.subscribe();
+        info!(
+            data_dir = %data_dir,
+            speed = self.config.data_source.speed,
+            initial_balance = %self.config.initial_balance,
+            "Using CSV data source"
+        );
+
+        let csv_config = CsvReplayConfig {
+            data_dir,
+            start_time: Some(self.config.data_source.start_time),
+            end_time: Some(self.config.data_source.end_time),
+            assets: self.config.data_source.assets.clone(),
+            speed: self.config.data_source.speed,
+        };
+        let data_source = CsvReplayDataSource::new(csv_config);
+
+        // Create backtest executor
+        let mut executor_config = self.config.executor.clone();
+        executor_config.initial_balance = self.config.initial_balance;
+        let executor = BacktestExecutor::new(executor_config);
+
+        // Run the common backtest logic
+        self.run_backtest_common(data_source, executor, shutdown_rx, start_instant).await
+    }
+
+    /// Run backtest with ClickHouse data source.
+    async fn run_with_clickhouse_source(&mut self) -> Result<BacktestResult> {
+        let start_instant = std::time::Instant::now();
+
+        info!("Starting backtest mode");
+
+        // Reset state for this run
+        self.state = Arc::new(GlobalState::new());
+
+        // Create ClickHouse data source
+        let shutdown_rx = self.shutdown_tx.subscribe();
         info!(
             start = %self.config.data_source.start_time,
             end = %self.config.data_source.end_time,
             speed = self.config.data_source.speed,
             initial_balance = %self.config.initial_balance,
-            "Backtest configuration"
+            "Using ClickHouse data source"
         );
 
-        // Reset state for this run
-        self.state = Arc::new(GlobalState::new());
-
-        // Create data source (historical data from ClickHouse)
-        let mut shutdown_rx = self.shutdown_tx.subscribe();
-        let mut data_source =
-            ReplayDataSource::new(self.config.data_source.clone(), self.clickhouse.clone());
+        let data_source = ReplayDataSource::new(self.config.data_source.clone(), self.clickhouse.clone());
 
         // Create backtest executor
         let mut executor_config = self.config.executor.clone();
         executor_config.initial_balance = self.config.initial_balance;
-        let mut executor = BacktestExecutor::new(executor_config);
-        let order_books = executor.order_books();
+        let executor = BacktestExecutor::new(executor_config);
+
+        // Run the common backtest logic
+        self.run_backtest_common(data_source, executor, shutdown_rx, start_instant).await
+    }
+
+    /// Common backtest logic that works with any DataSource.
+    async fn run_backtest_common<D: DataSource>(
+        &mut self,
+        data_source: D,
+        executor: BacktestExecutor,
+        mut shutdown_rx: broadcast::Receiver<()>,
+        start_instant: std::time::Instant,
+    ) -> Result<BacktestResult> {
+        // Log enabled engines
+        let enabled_engines = self.config.engines.enabled_engines();
+        info!(
+            engines = ?enabled_engines,
+            arbitrage = self.config.engines.arbitrage.enabled,
+            directional = self.config.engines.directional.enabled,
+            maker = self.config.engines.maker.enabled,
+            "Trading engines configuration"
+        );
 
         // Set up observability
         let (capture, obs_tasks) = self.setup_observability().await?;
 
-        // Create strategy loop (used for observability channel setup)
-        // Note: In backtest mode, we drive events manually rather than using
-        // the strategy loop's run() method
-        let mut _strategy = StrategyLoop::new(
-            MockDataSource, // Placeholder - we'll drive events manually
-            MockExecutor,   // Placeholder - we'll drive execution manually
+        // Create strategy loop with engines config - uses the SAME strategy as paper/live mode
+        let mut strategy = StrategyLoop::with_engines(
+            data_source,
+            executor,
             self.state.clone(),
             self.config.strategy.clone(),
+            self.config.engines.clone(),
         );
 
         // Add observability sender if capture is enabled
@@ -501,7 +578,7 @@ impl BacktestMode {
             && cap.is_enabled()
         {
             let (tx, mut rx) = tokio::sync::mpsc::channel(1024);
-            _strategy = _strategy.with_observability(tx);
+            strategy = strategy.with_observability(tx);
 
             // Spawn task to forward decisions to capture
             let cap_clone = cap.clone();
@@ -546,64 +623,49 @@ impl BacktestMode {
 
         // Enable trading
         self.state.enable_trading();
-        info!("Backtest started - processing historical data");
+        info!("Backtest started - running strategy loop on historical data");
 
-        // Process events from replay source
-        let mut events_processed: u64 = 0;
-        let result = loop {
-            tokio::select! {
-                event_result = data_source.next_event() => {
-                    match event_result {
-                        Ok(Some(event)) => {
-                            events_processed += 1;
-
-                            // Update simulation time
-                            let time = event.timestamp();
-                            executor.set_time(time);
-
-                            // Process the event
-                            self.process_event(&event, &mut executor, &order_books).await;
-
-                            // Log progress periodically
-                            if events_processed.is_multiple_of(10_000) {
-                                debug!(
-                                    events = events_processed,
-                                    balance = %executor.balance(),
-                                    "Backtest progress"
-                                );
-                            }
-                        }
-                        Ok(None) => {
-                            info!("Replay complete - all historical data processed");
-                            break Ok(());
-                        }
-                        Err(e) => {
-                            error!("Error reading replay data: {}", e);
-                            break Err(anyhow::anyhow!("Replay error: {}", e));
-                        }
+        // Run strategy loop - this is the SAME code path as paper/live mode
+        let result = tokio::select! {
+            result = strategy.run() => {
+                match result {
+                    Ok(()) => {
+                        info!("Strategy loop completed - all historical data processed");
+                        Ok(())
+                    }
+                    Err(crate::strategy::StrategyError::Shutdown) => {
+                        info!("Strategy loop shutdown requested");
+                        Ok(())
+                    }
+                    Err(e) => {
+                        error!("Strategy loop error: {}", e);
+                        Err(anyhow::anyhow!("Strategy error: {}", e))
                     }
                 }
-                _ = shutdown_rx.recv() => {
-                    info!("Shutdown signal received");
-                    break Ok(());
-                }
+            }
+            _ = shutdown_rx.recv() => {
+                info!("Shutdown signal received");
+                Ok(())
             }
         };
 
         // Graceful shutdown
-        self.shutdown_internal(&mut data_source, &mut executor, obs_tasks)
-            .await;
+        self.shutdown_strategy(&mut strategy, obs_tasks).await;
 
-        // Generate result
+        // Get final balance and metrics
+        let final_balance = strategy.available_balance();
+        let metrics = strategy.metrics();
+
+        // Generate result using default stats (detailed stats tracked in metrics)
         let duration_secs = start_instant.elapsed().as_secs_f64();
-        let metrics = self.state.metrics.snapshot();
+        let default_stats = BacktestStats::default();
 
         let backtest_result = BacktestResult::new(
             self.config.data_source.start_time,
             self.config.data_source.end_time,
             self.config.initial_balance,
-            executor.balance(),
-            executor.stats(),
+            final_balance,
+            &default_stats,
             &metrics,
             duration_secs,
         );
@@ -708,83 +770,34 @@ impl BacktestMode {
         combinations
     }
 
-    /// Process a single market event.
-    async fn process_event(
+    /// Perform graceful shutdown of strategy loop.
+    async fn shutdown_strategy<D: DataSource, E: crate::executor::Executor>(
         &self,
-        event: &MarketEvent,
-        executor: &mut BacktestExecutor,
-        order_books: &Arc<tokio::sync::RwLock<HashMap<String, OrderBook>>>,
+        strategy: &mut StrategyLoop<D, E>,
+        obs_tasks: Vec<tokio::task::JoinHandle<()>>,
     ) {
-        match event {
-            MarketEvent::SpotPrice(price_event) => {
-                // Update spot price in state
-                self.state.market_data.update_spot_price(
-                    price_event.asset.as_str(),
-                    price_event.price,
-                    price_event.timestamp.timestamp_millis(),
-                );
-            }
-            MarketEvent::BookSnapshot(snapshot) => {
-                // Update order book in executor
-                let mut book = OrderBook::new(snapshot.token_id.clone());
-                book.apply_snapshot(
-                    snapshot.bids.clone(),
-                    snapshot.asks.clone(),
-                    snapshot.timestamp.timestamp_millis(),
-                );
-                executor.update_book(&snapshot.token_id, book.clone()).await;
+        info!("Beginning backtest shutdown");
 
-                // Also update in shared order books
-                let mut books = order_books.write().await;
-                books.insert(snapshot.token_id.clone(), book);
-            }
-            MarketEvent::BookDelta(delta) => {
-                // Apply delta to order book
-                let mut books = order_books.write().await;
-                if let Some(book) = books.get_mut(&delta.token_id) {
-                    book.apply_delta(
-                        delta.side,
-                        delta.price,
-                        delta.size,
-                        delta.timestamp.timestamp_millis(),
-                    );
-                    // Update executor's copy too
-                    executor.update_book(&delta.token_id, book.clone()).await;
-                }
-            }
-            MarketEvent::WindowOpen(window) => {
-                // Track new market window
-                debug!(
-                    event_id = %window.event_id,
-                    asset = ?window.asset,
-                    strike = %window.strike_price,
-                    "Market window opened"
-                );
-                self.state.metrics.inc_events();
-            }
-            MarketEvent::WindowClose(window) => {
-                debug!(
-                    event_id = %window.event_id,
-                    outcome = ?window.outcome,
-                    "Market window closed"
-                );
-            }
-            MarketEvent::Fill(fill) => {
-                debug!(
-                    event_id = %fill.event_id,
-                    outcome = ?fill.outcome,
-                    size = %fill.size,
-                    price = %fill.price,
-                    "Fill received"
-                );
-            }
-            MarketEvent::Heartbeat(_) => {
-                // Ignore heartbeats
+        // Disable trading
+        self.state.disable_trading();
+
+        // Signal shutdown
+        let _ = self.shutdown_tx.send(());
+
+        // Shutdown strategy (which shuts down data source and executor)
+        strategy.shutdown().await;
+
+        // Wait for observability tasks with timeout
+        let timeout = Duration::from_secs(self.config.shutdown_timeout_secs);
+        for handle in obs_tasks {
+            match tokio::time::timeout(timeout, handle).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => warn!("Observability task panicked: {}", e),
+                Err(_) => warn!("Observability task timed out during shutdown"),
             }
         }
 
-        // Update metrics
-        self.state.metrics.inc_events();
+        info!("Backtest shutdown complete");
     }
 
     /// Set up observability components.
@@ -865,91 +878,12 @@ impl BacktestMode {
     }
 
     /// Perform graceful shutdown.
-    async fn shutdown_internal(
-        &self,
-        data_source: &mut ReplayDataSource,
-        executor: &mut BacktestExecutor,
-        obs_tasks: Vec<tokio::task::JoinHandle<()>>,
-    ) {
-        info!("Beginning backtest shutdown");
-
-        // Disable trading
-        self.state.disable_trading();
-
-        // Signal shutdown
-        let _ = self.shutdown_tx.send(());
-
-        // Shutdown data source and executor
-        data_source.shutdown().await;
-        executor.shutdown().await;
-
-        // Wait for observability tasks with timeout
-        let timeout = Duration::from_secs(self.config.shutdown_timeout_secs);
-        for handle in obs_tasks {
-            match tokio::time::timeout(timeout, handle).await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => warn!("Observability task panicked: {}", e),
-                Err(_) => warn!("Observability task timed out during shutdown"),
-            }
-        }
-
-        info!("Backtest shutdown complete");
-    }
-
     /// Request shutdown.
     pub fn request_shutdown(&self) {
         info!("Backtest shutdown requested");
         self.state.control.request_shutdown();
         let _ = self.shutdown_tx.send(());
     }
-}
-
-// Helper types for strategy loop placeholders
-struct MockDataSource;
-struct MockExecutor;
-
-#[async_trait::async_trait]
-impl DataSource for MockDataSource {
-    async fn next_event(&mut self) -> Result<Option<MarketEvent>, crate::data_source::DataSourceError> {
-        Ok(None)
-    }
-    fn has_more(&self) -> bool {
-        false
-    }
-    fn current_time(&self) -> Option<DateTime<Utc>> {
-        None
-    }
-    async fn shutdown(&mut self) {}
-}
-
-#[async_trait::async_trait]
-impl Executor for MockExecutor {
-    async fn place_order(
-        &mut self,
-        _order: crate::executor::OrderRequest,
-    ) -> Result<crate::executor::OrderResult, crate::executor::ExecutorError> {
-        Err(crate::executor::ExecutorError::Connection(
-            "Mock executor".to_string(),
-        ))
-    }
-    async fn cancel_order(
-        &mut self,
-        _order_id: &str,
-    ) -> Result<crate::executor::OrderCancellation, crate::executor::ExecutorError> {
-        Err(crate::executor::ExecutorError::Connection(
-            "Mock executor".to_string(),
-        ))
-    }
-    async fn order_status(&self, _order_id: &str) -> Option<crate::executor::OrderResult> {
-        None
-    }
-    fn pending_orders(&self) -> Vec<crate::executor::PendingOrder> {
-        Vec::new()
-    }
-    fn available_balance(&self) -> Decimal {
-        Decimal::ZERO
-    }
-    async fn shutdown(&mut self) {}
 }
 
 /// Parse date range from BacktestConfig.
@@ -1001,6 +935,7 @@ fn parse_asset(s: &str) -> Option<CryptoAsset> {
 /// Apply a sweep parameter to the config.
 fn apply_parameter(config: &mut BacktestModeConfig, name: &str, value: f64) {
     match name {
+        // Arbitrage thresholds
         "margin_early" => {
             config.strategy.arb_thresholds.early =
                 Decimal::from_f64_retain(value).unwrap_or_default();
@@ -1013,6 +948,7 @@ fn apply_parameter(config: &mut BacktestModeConfig, name: &str, value: f64) {
             config.strategy.arb_thresholds.late =
                 Decimal::from_f64_retain(value).unwrap_or_default();
         }
+        // Sizing
         "max_position_per_market" => {
             config.strategy.sizing_config.max_position_per_market =
                 Decimal::from_f64_retain(value).unwrap_or_default();
@@ -1023,6 +959,37 @@ fn apply_parameter(config: &mut BacktestModeConfig, name: &str, value: f64) {
         }
         "min_fill_ratio" => {
             config.executor.min_fill_ratio = Decimal::from_f64_retain(value).unwrap_or_default();
+        }
+        // Phase-based confidence thresholds (for directional trading)
+        "early_threshold" => {
+            config.strategy.early_threshold =
+                Decimal::from_f64_retain(value).unwrap_or_default();
+        }
+        "build_threshold" => {
+            config.strategy.build_threshold =
+                Decimal::from_f64_retain(value).unwrap_or_default();
+        }
+        "core_threshold" => {
+            config.strategy.core_threshold =
+                Decimal::from_f64_retain(value).unwrap_or_default();
+        }
+        "final_threshold" => {
+            config.strategy.final_threshold =
+                Decimal::from_f64_retain(value).unwrap_or_default();
+        }
+        // Edge-based mode (alternative to phase-based)
+        "max_edge_factor" => {
+            config.strategy.max_edge_factor =
+                Decimal::from_f64_retain(value).unwrap_or_default();
+        }
+        // Allocation ratios
+        "strong_up_ratio" => {
+            config.strategy.strong_up_ratio =
+                Decimal::from_f64_retain(value).unwrap_or_default();
+        }
+        "lean_up_ratio" => {
+            config.strategy.lean_up_ratio =
+                Decimal::from_f64_retain(value).unwrap_or_default();
         }
         _ => {
             warn!("Unknown sweep parameter: {}", name);
@@ -1185,5 +1152,28 @@ mod tests {
 
         let result = BacktestMode::new(config, &bot_config, ClickHouseClient::with_defaults());
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_apply_phase_threshold_parameters() {
+        let mut config = BacktestModeConfig::default();
+
+        // Verify defaults
+        assert_eq!(config.strategy.early_threshold, dec!(0.80));
+        assert_eq!(config.strategy.build_threshold, dec!(0.60));
+        assert_eq!(config.strategy.core_threshold, dec!(0.50));
+        assert_eq!(config.strategy.final_threshold, dec!(0.40));
+
+        // Apply phase threshold parameters
+        apply_parameter(&mut config, "early_threshold", 0.85);
+        apply_parameter(&mut config, "build_threshold", 0.70);
+        apply_parameter(&mut config, "core_threshold", 0.55);
+        apply_parameter(&mut config, "final_threshold", 0.35);
+
+        // Verify updated values (use approximate comparison for f64 -> Decimal conversion)
+        assert!(config.strategy.early_threshold > dec!(0.84) && config.strategy.early_threshold < dec!(0.86));
+        assert!(config.strategy.build_threshold > dec!(0.69) && config.strategy.build_threshold < dec!(0.71));
+        assert!(config.strategy.core_threshold > dec!(0.54) && config.strategy.core_threshold < dec!(0.56));
+        assert!(config.strategy.final_threshold > dec!(0.34) && config.strategy.final_threshold < dec!(0.36));
     }
 }

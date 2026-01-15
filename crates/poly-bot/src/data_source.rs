@@ -13,6 +13,7 @@
 //! - Fill notifications for position tracking
 //! - Market window lifecycle events
 
+pub mod csv_replay;
 pub mod live;
 pub mod replay;
 

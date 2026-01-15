@@ -404,6 +404,24 @@ pub trait Executor: Send + Sync {
 
     /// Shutdown the executor gracefully.
     async fn shutdown(&mut self);
+
+    /// Update order book for backtesting.
+    ///
+    /// For backtest execution, this updates the simulated order book state.
+    /// For live/paper execution, this is a no-op.
+    ///
+    /// # Arguments
+    /// * `token_id` - The token ID for the order book
+    /// * `bids` - Bid price levels
+    /// * `asks` - Ask price levels
+    async fn update_order_book(
+        &self,
+        _token_id: &str,
+        _bids: Vec<crate::types::PriceLevel>,
+        _asks: Vec<crate::types::PriceLevel>,
+    ) {
+        // Default: no-op for live/paper execution
+    }
 }
 
 #[cfg(test)]

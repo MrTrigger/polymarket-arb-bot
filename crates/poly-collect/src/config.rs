@@ -2,38 +2,140 @@
 //!
 //! Supports loading from TOML file with CLI argument overrides.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use poly_common::{ClickHouseConfig, CryptoAsset};
+use chrono::{NaiveDate, Utc};
+use poly_common::{ClickHouseConfig, CryptoAsset, WindowDuration};
 use serde::Deserialize;
+
+/// Collection mode.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum CollectionMode {
+    /// Live streaming via WebSocket (default)
+    #[default]
+    Live,
+    /// Historical data fetching from APIs
+    History,
+}
+
+/// Output mode for collected data.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum OutputMode {
+    /// Store data in ClickHouse database only (default)
+    #[default]
+    ClickHouse,
+    /// Store data in CSV files only
+    Csv {
+        /// Directory to store CSV files
+        output_dir: PathBuf,
+    },
+    /// Store data in both ClickHouse and CSV
+    Both {
+        /// Directory to store CSV files
+        output_dir: PathBuf,
+    },
+}
+
+impl OutputMode {
+    /// Returns true if ClickHouse storage is enabled.
+    pub fn use_clickhouse(&self) -> bool {
+        matches!(self, OutputMode::ClickHouse | OutputMode::Both { .. })
+    }
+
+    /// Returns true if CSV storage is enabled.
+    pub fn use_csv(&self) -> bool {
+        matches!(self, OutputMode::Csv { .. } | OutputMode::Both { .. })
+    }
+
+    /// Returns the CSV output directory if CSV is enabled.
+    pub fn csv_dir(&self) -> Option<&PathBuf> {
+        match self {
+            OutputMode::Csv { output_dir } | OutputMode::Both { output_dir } => Some(output_dir),
+            OutputMode::ClickHouse => None,
+        }
+    }
+}
 
 use crate::binance::BinanceConfig;
 use crate::clob::ClobConfig;
 
+/// Collection duration specification.
+#[derive(Debug, Clone, Default)]
+pub struct CollectionDuration {
+    /// Run for this many days
+    pub days: Option<u32>,
+    /// Run for this many hours
+    pub hours: Option<u32>,
+    /// Run until this date (YYYY-MM-DD)
+    pub end_date: Option<NaiveDate>,
+}
+
+impl CollectionDuration {
+    /// Calculate when collection should stop.
+    /// Returns None if collection should run indefinitely.
+    pub fn stop_time(&self) -> Option<chrono::DateTime<Utc>> {
+        if let Some(days) = self.days {
+            return Some(Utc::now() + chrono::Duration::days(days as i64));
+        }
+        if let Some(hours) = self.hours {
+            return Some(Utc::now() + chrono::Duration::hours(hours as i64));
+        }
+        if let Some(end_date) = self.end_date {
+            // End at midnight UTC of the end date
+            return end_date.and_hms_opt(23, 59, 59)
+                .map(|dt| chrono::DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc));
+        }
+        None
+    }
+
+    /// Check if we should stop now.
+    pub fn should_stop(&self) -> bool {
+        self.stop_time().map(|t| Utc::now() >= t).unwrap_or(false)
+    }
+
+    /// Returns true if collection should run indefinitely.
+    pub fn is_indefinite(&self) -> bool {
+        self.days.is_none() && self.hours.is_none() && self.end_date.is_none()
+    }
+}
+
 /// Top-level configuration for poly-collect.
 #[derive(Debug, Clone)]
 pub struct CollectConfig {
+    pub mode: CollectionMode,
     pub assets: Vec<CryptoAsset>,
+    /// Timeframes to collect (5m, 15m, 1h). Used for market filtering.
+    pub timeframes: Vec<WindowDuration>,
+    pub start_date: Option<NaiveDate>,
+    pub end_date: Option<NaiveDate>,
     pub discovery_interval: Duration,
     pub log_level: String,
+    pub output: OutputMode,
     pub clickhouse: ClickHouseConfig,
     pub binance: BinanceConfig,
     pub clob: ClobConfig,
     pub health_log_interval: Duration,
+    pub duration: CollectionDuration,
 }
 
 impl Default for CollectConfig {
     fn default() -> Self {
         Self {
+            mode: CollectionMode::default(),
             assets: vec![CryptoAsset::Btc, CryptoAsset::Eth, CryptoAsset::Sol],
+            timeframes: vec![WindowDuration::FifteenMin],
+            start_date: None,
+            end_date: None,
             discovery_interval: Duration::from_secs(300),
             log_level: "info".to_string(),
+            output: OutputMode::default(),
             clickhouse: ClickHouseConfig::default(),
             binance: BinanceConfig::default(),
             clob: ClobConfig::default(),
             health_log_interval: Duration::from_secs(30),
+            duration: CollectionDuration::default(),
         }
     }
 }
@@ -99,6 +201,12 @@ struct TomlConfig {
     #[serde(default)]
     general: GeneralConfig,
     #[serde(default)]
+    collection: CollectionToml,
+    #[serde(default)]
+    output: OutputToml,
+    #[serde(default)]
+    live: LiveToml,
+    #[serde(default)]
     clickhouse: ClickHouseToml,
     #[serde(default)]
     binance: BinanceToml,
@@ -108,11 +216,58 @@ struct TomlConfig {
     health: HealthToml,
 }
 
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+struct CollectionToml {
+    /// Collection mode: "live" or "history"
+    mode: Option<String>,
+    /// Start date for collection (YYYY-MM-DD)
+    start_date: Option<String>,
+    /// End date for collection (YYYY-MM-DD)
+    end_date: Option<String>,
+    /// Alternative: collect for N days (from today backwards for history, forward for live)
+    days: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+struct LiveToml {
+    /// Discovery interval in seconds
+    discovery_interval_secs: u64,
+}
+
+impl Default for LiveToml {
+    fn default() -> Self {
+        Self {
+            discovery_interval_secs: 300,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+struct OutputToml {
+    /// Output mode: "clickhouse" or "csv"
+    mode: String,
+    /// Directory for CSV output (only used when mode = "csv")
+    csv_dir: Option<String>,
+}
+
+impl Default for OutputToml {
+    fn default() -> Self {
+        Self {
+            mode: "clickhouse".to_string(),
+            csv_dir: None,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 struct GeneralConfig {
     assets: Vec<String>,
-    discovery_interval_secs: u64,
+    /// Timeframes to collect: "5m", "15m", "1h"
+    timeframes: Vec<String>,
     log_level: String,
 }
 
@@ -120,7 +275,7 @@ impl Default for GeneralConfig {
     fn default() -> Self {
         Self {
             assets: vec!["BTC".to_string(), "ETH".to_string(), "SOL".to_string()],
-            discovery_interval_secs: 300,
+            timeframes: vec!["15m".to_string()],
             log_level: "info".to_string(),
         }
     }
@@ -210,6 +365,44 @@ impl Default for HealthToml {
     }
 }
 
+/// Build ClickHouse config from TOML, then override with environment variables.
+fn build_clickhouse_config(toml: &ClickHouseToml) -> ClickHouseConfig {
+    // Start with TOML defaults
+    let mut url = toml.url.clone();
+    let mut database = toml.database.clone();
+    let mut user = None;
+    let mut password = None;
+
+    // Override with environment variables if set
+    // CLICKHOUSE_URL + CLICKHOUSE_HTTP_PORT -> http://{url}:{port}
+    if let Ok(host) = std::env::var("CLICKHOUSE_URL") {
+        let port = std::env::var("CLICKHOUSE_HTTP_PORT").unwrap_or_else(|_| "8123".to_string());
+        url = format!("http://{}:{}", host, port);
+    }
+
+    if let Ok(db) = std::env::var("CLICKHOUSE_DATABASE") {
+        database = db;
+    }
+
+    if let Ok(u) = std::env::var("CLICKHOUSE_USER") {
+        user = Some(u);
+    }
+
+    if let Ok(p) = std::env::var("CLICKHOUSE_PASSWORD") {
+        password = Some(p);
+    }
+
+    ClickHouseConfig {
+        url,
+        database,
+        user,
+        password,
+        max_rows: toml.max_rows,
+        max_bytes: toml.max_bytes,
+        commit_period: Duration::from_secs(toml.period_secs),
+    }
+}
+
 impl From<TomlConfig> for CollectConfig {
     fn from(toml: TomlConfig) -> Self {
         // Parse assets
@@ -226,19 +419,70 @@ impl From<TomlConfig> for CollectConfig {
             .map(|a| a.binance_symbol().to_lowercase())
             .collect();
 
+        // Parse collection mode
+        let mode = match toml.collection.mode.as_deref() {
+            Some("history") | Some("historical") => CollectionMode::History,
+            _ => CollectionMode::Live,
+        };
+
+        // Parse dates for historical mode
+        let start_date = toml.collection.start_date.as_ref().and_then(|s| {
+            NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()
+        });
+        let end_date = toml.collection.end_date.as_ref().and_then(|s| {
+            NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()
+        });
+
+        // Parse collection duration (for live mode)
+        let duration = CollectionDuration {
+            days: toml.collection.days,
+            hours: None,
+            end_date: None,
+        };
+
+        // Parse timeframes
+        let timeframes: Vec<WindowDuration> = toml
+            .general
+            .timeframes
+            .iter()
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        let timeframes = if timeframes.is_empty() {
+            vec![WindowDuration::FifteenMin]
+        } else {
+            timeframes
+        };
+
+        // Parse output mode
+        let output = match toml.output.mode.to_lowercase().as_str() {
+            "csv" => {
+                let dir = toml.output.csv_dir.unwrap_or_else(|| "data".to_string());
+                OutputMode::Csv {
+                    output_dir: PathBuf::from(dir),
+                }
+            }
+            "both" => {
+                let dir = toml.output.csv_dir.unwrap_or_else(|| "data".to_string());
+                OutputMode::Both {
+                    output_dir: PathBuf::from(dir),
+                }
+            }
+            _ => OutputMode::ClickHouse,
+        };
+
+        // Build ClickHouse config with env var overrides
+        let clickhouse = build_clickhouse_config(&toml.clickhouse);
+
         Self {
+            mode,
             assets,
-            discovery_interval: Duration::from_secs(toml.general.discovery_interval_secs),
+            timeframes,
+            start_date,
+            end_date,
+            discovery_interval: Duration::from_secs(toml.live.discovery_interval_secs),
             log_level: toml.general.log_level,
-            clickhouse: ClickHouseConfig {
-                url: toml.clickhouse.url,
-                database: toml.clickhouse.database,
-                user: None,
-                password: None,
-                max_rows: toml.clickhouse.max_rows,
-                max_bytes: toml.clickhouse.max_bytes,
-                commit_period: Duration::from_secs(toml.clickhouse.period_secs),
-            },
+            output,
+            clickhouse,
             binance: BinanceConfig {
                 symbols: binance_symbols,
                 buffer_size: toml.binance.buffer_size,
@@ -261,6 +505,7 @@ impl From<TomlConfig> for CollectConfig {
                 max_reconnect_delay: Duration::from_secs(toml.clob.max_reconnect_delay_secs),
             },
             health_log_interval: Duration::from_secs(toml.health.log_interval_secs),
+            duration,
         }
     }
 }

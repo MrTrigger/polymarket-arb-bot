@@ -23,7 +23,7 @@ use poly_common::{ClickHouseClient, WindowDuration};
 use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
-use poly_bot::config::{BotConfig, DashboardConfig, TradingMode};
+use poly_bot::config::{BotConfig, DashboardConfig, SweepConfig, TradingMode};
 use poly_bot::dashboard::{
     create_shared_dashboard_state_manager, spawn_api_server, spawn_websocket_server,
     ApiServerConfig, WebSocketServerConfig,
@@ -347,8 +347,31 @@ async fn run_backtest_mode(config: BotConfig, clickhouse: ClickHouseClient) -> R
     }
 
     // Create mode config
-    let mode_config = BacktestModeConfig::from_bot_config(&config, &clickhouse)
+    let mut mode_config = BacktestModeConfig::from_bot_config(&config, &clickhouse)
         .context("Failed to create backtest config")?;
+
+    // Load sweep params from strategy.toml if sweep is enabled
+    if config.backtest.sweep_enabled {
+        let strategy_path = std::path::Path::new("config/strategy.toml");
+        match SweepConfig::from_file(strategy_path) {
+            Ok(sweep_config) => {
+                let sweep_params = sweep_config.to_sweep_parameters();
+                if sweep_params.is_empty() {
+                    warn!("Sweep enabled but no sweep parameters found in {}", strategy_path.display());
+                } else {
+                    info!("Loaded {} sweep parameters from {}", sweep_params.len(), strategy_path.display());
+                    for param in &sweep_params {
+                        info!("  {} [{} to {} step {}]", param.name, param.start, param.end, param.step);
+                    }
+                    mode_config.sweep_params = sweep_params;
+                }
+            }
+            Err(e) => {
+                warn!("Failed to load sweep config from {}: {}", strategy_path.display(), e);
+                warn!("Sweep will run with default parameters");
+            }
+        }
+    }
 
     // Create backtest mode runner
     let mut mode = BacktestMode::new(mode_config, &config, clickhouse)

@@ -5,9 +5,11 @@
 
 use std::time::Duration;
 
+use std::sync::Arc;
+
 use chrono::{TimeZone, Utc};
 use futures_util::{SinkExt, StreamExt};
-use poly_common::{ClickHouseClient, SpotPrice};
+use poly_common::SpotPrice;
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use thiserror::Error;
@@ -18,6 +20,8 @@ use tokio_tungstenite::{
     tungstenite::{protocol::Message, Error as WsError},
 };
 use tracing::{debug, error, info, warn};
+
+use crate::data_writer::DataWriter;
 
 /// Binance WebSocket base URL.
 const BINANCE_WS_URL: &str = "wss://stream.binance.com:9443/ws";
@@ -34,8 +38,8 @@ pub enum BinanceError {
     #[error("JSON parse error: {0}")]
     Parse(#[from] serde_json::Error),
 
-    #[error("ClickHouse error: {0}")]
-    ClickHouse(#[from] poly_common::ClickHouseError),
+    #[error("Write error: {0}")]
+    Write(String),
 
     #[error("Connection timeout")]
     Timeout,
@@ -130,13 +134,13 @@ fn symbol_to_asset(symbol: &str) -> Option<&'static str> {
 /// Binance WebSocket capture client.
 pub struct BinanceCapture {
     config: BinanceConfig,
-    clickhouse: ClickHouseClient,
+    writer: Arc<DataWriter>,
 }
 
 impl BinanceCapture {
     /// Creates a new Binance capture client.
-    pub fn new(config: BinanceConfig, clickhouse: ClickHouseClient) -> Self {
-        Self { config, clickhouse }
+    pub fn new(config: BinanceConfig, writer: Arc<DataWriter>) -> Self {
+        Self { config, writer }
     }
 
     /// Runs the capture loop with automatic reconnection.
@@ -345,16 +349,16 @@ impl BinanceCapture {
         })
     }
 
-    /// Flushes the buffer to ClickHouse.
+    /// Flushes the buffer to storage.
     async fn flush_buffer(
         &self,
         buffer: &mut Vec<SpotPrice>,
         stats: &mut CaptureStats,
     ) -> Result<(), BinanceError> {
         let count = buffer.len();
-        debug!("Flushing {} trades to ClickHouse", count);
+        debug!("Flushing {} trades to storage", count);
 
-        match self.clickhouse.insert_spot_prices(buffer).await {
+        match self.writer.write_spot_prices(buffer).await {
             Ok(()) => {
                 stats.trades_written += count as u64;
                 buffer.clear();
@@ -362,9 +366,9 @@ impl BinanceCapture {
             }
             Err(e) => {
                 stats.write_errors += 1;
-                error!("Failed to write to ClickHouse: {e}");
+                error!("Failed to write: {e}");
                 // Keep buffer, will retry
-                Err(BinanceError::ClickHouse(e))
+                Err(BinanceError::Write(e.to_string()))
             }
         }
     }
@@ -381,6 +385,15 @@ struct CaptureStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::OutputMode;
+
+    fn create_test_writer() -> Arc<DataWriter> {
+        let temp_dir = std::env::temp_dir().join("binance_test");
+        let mode = OutputMode::Csv {
+            output_dir: temp_dir,
+        };
+        Arc::new(DataWriter::new(&mode, None).unwrap())
+    }
 
     #[test]
     fn test_symbol_to_asset() {
@@ -395,8 +408,8 @@ mod tests {
     #[test]
     fn test_parse_trade() {
         let config = BinanceConfig::default();
-        let clickhouse = ClickHouseClient::with_defaults();
-        let capture = BinanceCapture::new(config, clickhouse);
+        let writer = create_test_writer();
+        let capture = BinanceCapture::new(config, writer);
 
         // Valid trade message
         let msg = r#"{
@@ -421,8 +434,8 @@ mod tests {
     #[test]
     fn test_parse_subscription_response() {
         let config = BinanceConfig::default();
-        let clickhouse = ClickHouseClient::with_defaults();
-        let capture = BinanceCapture::new(config, clickhouse);
+        let writer = create_test_writer();
+        let capture = BinanceCapture::new(config, writer);
 
         // Subscription confirmation should be ignored
         let msg = r#"{"result":null,"id":1}"#;
@@ -433,8 +446,8 @@ mod tests {
     #[test]
     fn test_parse_invalid_message() {
         let config = BinanceConfig::default();
-        let clickhouse = ClickHouseClient::with_defaults();
-        let capture = BinanceCapture::new(config, clickhouse);
+        let writer = create_test_writer();
+        let capture = BinanceCapture::new(config, writer);
 
         // Invalid JSON
         let msg = "not json";

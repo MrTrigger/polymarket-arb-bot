@@ -426,14 +426,14 @@ impl TrackedMarket {
         self.position_manager.budget_remaining()
     }
 
-    /// Update seconds remaining.
-    fn update_time(&mut self) {
-        self.state.seconds_remaining = (self.window_end - Utc::now()).num_seconds().max(0);
+    /// Update seconds remaining based on simulated time.
+    fn update_time(&mut self, current_time: DateTime<Utc>) {
+        self.state.seconds_remaining = (self.window_end - current_time).num_seconds().max(0);
     }
 
-    /// Check if window has expired.
-    fn is_expired(&self) -> bool {
-        Utc::now() >= self.window_end
+    /// Check if window has expired based on simulated time.
+    fn is_expired(&self, current_time: DateTime<Utc>) -> bool {
+        current_time >= self.window_end
     }
 }
 
@@ -453,6 +453,27 @@ pub struct StrategyConfig {
     /// Window duration in seconds (900 for 15min, 3600 for 1h).
     /// Used for edge requirement calculation in directional trading.
     pub window_duration_secs: i64,
+
+    // Phase-based confidence thresholds (configurable via sweep)
+    /// Minimum confidence for early phase (>10 min remaining).
+    pub early_threshold: Decimal,
+    /// Minimum confidence for build phase (5-10 min remaining).
+    pub build_threshold: Decimal,
+    /// Minimum confidence for core phase (2-5 min remaining).
+    pub core_threshold: Decimal,
+    /// Minimum confidence for final phase (<2 min remaining).
+    pub final_threshold: Decimal,
+
+    /// Maximum edge factor for dynamic confidence requirement.
+    /// When > 0, uses edge-based: required = price + (edge_factor * time_remaining / window_duration)
+    /// When = 0, uses phase-based thresholds (legacy mode, slightly better in backtest).
+    pub max_edge_factor: Decimal,
+
+    // Allocation ratios for directional trading (configurable via sweep)
+    /// Strong UP signal allocation ratio (0.0-1.0).
+    pub strong_up_ratio: Decimal,
+    /// Lean UP signal allocation ratio (0.0-1.0).
+    pub lean_up_ratio: Decimal,
 }
 
 impl Default for StrategyConfig {
@@ -464,6 +485,16 @@ impl Default for StrategyConfig {
             max_consecutive_failures: 3,
             block_on_toxic_high: true,
             window_duration_secs: 900, // 15-minute windows by default
+            // Optimized thresholds from param sweep (18.2% ROI)
+            early_threshold: dec!(0.80),
+            build_threshold: dec!(0.60),
+            core_threshold: dec!(0.50),
+            final_threshold: dec!(0.40),
+            // Use phase-based by default (0 = disabled)
+            max_edge_factor: Decimal::ZERO,
+            // Allocation ratios (optimized via param sweep)
+            strong_up_ratio: dec!(0.82),
+            lean_up_ratio: dec!(0.65),
         }
     }
 }
@@ -485,6 +516,49 @@ impl StrategyConfig {
             max_consecutive_failures: 3,
             block_on_toxic_high: true,
             window_duration_secs,
+            // Default phase thresholds (can be overridden via sweep)
+            early_threshold: dec!(0.80),
+            build_threshold: dec!(0.60),
+            core_threshold: dec!(0.50),
+            final_threshold: dec!(0.40),
+            max_edge_factor: Decimal::ZERO,
+            // Allocation ratios (optimized via param sweep)
+            strong_up_ratio: dec!(0.82),
+            lean_up_ratio: dec!(0.65),
+        }
+    }
+
+    /// Create from trading config with custom phase thresholds.
+    pub fn from_trading_config_with_phases(
+        config: &TradingConfig,
+        window_duration_secs: i64,
+        early_threshold: Decimal,
+        build_threshold: Decimal,
+        core_threshold: Decimal,
+        final_threshold: Decimal,
+    ) -> Self {
+        Self {
+            arb_thresholds: ArbThresholds {
+                early: config.min_margin_early,
+                mid: config.min_margin_mid,
+                late: config.min_margin_late,
+                early_threshold_secs: config.early_threshold_secs,
+                mid_threshold_secs: config.mid_threshold_secs,
+                min_time_remaining_secs: config.min_time_remaining_secs,
+            },
+            sizing_config: SizingConfig::from_trading_config(config),
+            toxic_config: ToxicFlowConfig::default(),
+            max_consecutive_failures: 3,
+            block_on_toxic_high: true,
+            window_duration_secs,
+            early_threshold,
+            build_threshold,
+            core_threshold,
+            final_threshold,
+            max_edge_factor: Decimal::ZERO,
+            // Allocation ratios (optimized via param sweep)
+            strong_up_ratio: dec!(0.82),
+            lean_up_ratio: dec!(0.65),
         }
     }
 
@@ -547,6 +621,8 @@ pub struct StrategyLoop<D: DataSource, E: Executor> {
     last_status_log: std::time::Instant,
     /// Dynamic ATR tracker for volatility-adjusted position sizing.
     atr_tracker: atr::AtrTracker,
+    /// Simulated time for backtest mode (uses event timestamps instead of wall-clock time).
+    simulated_time: DateTime<Utc>,
 }
 
 impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
@@ -607,6 +683,7 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             multi_obs_sender: None,
             last_status_log: std::time::Instant::now(),
             atr_tracker: atr::AtrTracker::default(),
+            simulated_time: Utc::now(),
         }
     }
 
@@ -716,16 +793,19 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
     async fn process_event(&mut self, event: MarketEvent) -> Result<(), StrategyError> {
         let event_time = std::time::Instant::now();
 
+        // Update simulated time from event timestamp (for backtest mode)
+        self.simulated_time = event.timestamp();
+
         match event {
             MarketEvent::SpotPrice(e) => self.handle_spot_price(e),
-            MarketEvent::BookSnapshot(e) => self.handle_book_snapshot(e),
+            MarketEvent::BookSnapshot(e) => self.handle_book_snapshot(e).await,
             MarketEvent::BookDelta(e) => self.handle_book_delta(e),
             MarketEvent::Fill(e) => self.handle_fill(e).await?,
             MarketEvent::WindowOpen(e) => self.handle_window_open(e),
-            MarketEvent::WindowClose(e) => self.handle_window_close(e),
+            MarketEvent::WindowClose(e) => self.handle_window_close(e).await,
             MarketEvent::Heartbeat(_) => {
                 // Heartbeat - update time remaining and settle expired markets
-                self.update_all_market_times();
+                self.update_all_market_times(self.simulated_time);
                 self.settle_expired_markets().await;
                 return Ok(());
             }
@@ -774,11 +854,11 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
     }
 
     /// Log periodic market status for debugging.
-    fn log_market_status(&self) {
+    fn log_market_status(&self, current_time: DateTime<Utc>) {
         // Find the closest market to expiry
         let mut closest_market: Option<(&String, &TrackedMarket)> = None;
         for (event_id, market) in &self.markets {
-            if market.is_expired() {
+            if market.is_expired(current_time) {
                 continue;
             }
             match &closest_market {
@@ -830,9 +910,16 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
     }
 
     /// Handle order book snapshot.
-    fn handle_book_snapshot(&mut self, event: BookSnapshotEvent) {
+    async fn handle_book_snapshot(&mut self, event: BookSnapshotEvent) {
         trace!("Book snapshot: {} ({} bids, {} asks)",
             event.token_id, event.bids.len(), event.asks.len());
+
+        // Update executor's order book (for backtest simulation)
+        self.executor.update_order_book(
+            &event.token_id,
+            event.bids.clone(),
+            event.asks.clone(),
+        ).await;
 
         // Find the market this token belongs to
         let event_id = match self.token_to_event.get(&event.token_id) {
@@ -1012,8 +1099,33 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
     }
 
     /// Handle window close.
-    fn handle_window_close(&mut self, event: WindowCloseEvent) {
+    async fn handle_window_close(&mut self, event: WindowCloseEvent) {
         info!("Window close: {} outcome={:?}", event.event_id, event.outcome);
+
+        // Settle positions before removing market
+        if let Some(market) = self.markets.get(&event.event_id) {
+            // Determine outcome: YES wins if final spot > strike
+            let final_spot = self.spot_prices.get(&market.asset).copied().unwrap_or(Decimal::ZERO);
+            let yes_wins = final_spot > market.strike_price;
+            let asset = market.asset;
+
+            let realized_pnl = self.executor.settle_market(&event.event_id, yes_wins).await;
+
+            if realized_pnl != Decimal::ZERO {
+                // Update global state with realized PnL (convert to cents)
+                let pnl_cents = (realized_pnl * Decimal::new(100, 0)).to_i64().unwrap_or(0);
+                self.state.metrics.add_pnl_cents(pnl_cents);
+
+                info!(
+                    event_id = %event.event_id,
+                    asset = ?asset,
+                    yes_wins = %yes_wins,
+                    final_spot = %final_spot,
+                    realized_pnl = %realized_pnl,
+                    "Market settled at window close"
+                );
+            }
+        }
 
         // Remove from tracked markets
         if let Some(market) = self.markets.remove(&event.event_id) {
@@ -1023,19 +1135,19 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
     }
 
     /// Update time remaining on all markets.
-    fn update_all_market_times(&mut self) {
+    fn update_all_market_times(&mut self, current_time: DateTime<Utc>) {
         // Update remaining markets
         for market in self.markets.values_mut() {
-            market.update_time();
+            market.update_time(current_time);
         }
     }
 
     /// Collect expired markets with settlement info.
     /// Returns Vec of (event_id, yes_token_id, no_token_id, yes_wins, asset).
-    fn collect_expired_markets(&mut self) -> Vec<(String, String, String, bool, CryptoAsset)> {
+    fn collect_expired_markets(&mut self, current_time: DateTime<Utc>) -> Vec<(String, String, String, bool, CryptoAsset)> {
         let expired: Vec<_> = self.markets
             .iter()
-            .filter(|(_, m)| m.is_expired())
+            .filter(|(_, m)| m.is_expired(current_time))
             .map(|(id, m)| {
                 // For Up/Down markets: YES wins if final_spot > strike
                 let final_spot = self.spot_prices.get(&m.asset).copied().unwrap_or(Decimal::ZERO);
@@ -1062,7 +1174,7 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
 
     /// Settle expired markets and update PnL.
     async fn settle_expired_markets(&mut self) {
-        let expired = self.collect_expired_markets();
+        let expired = self.collect_expired_markets(self.simulated_time);
 
         for (event_id, _, _, yes_wins, asset) in expired {
             let realized_pnl = self.executor.settle_market(&event_id, yes_wins).await;
@@ -1100,7 +1212,7 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
         // Periodic status log (every 15 seconds)
         if self.last_status_log.elapsed() > std::time::Duration::from_secs(15) {
             self.last_status_log = std::time::Instant::now();
-            self.log_market_status();
+            self.log_market_status(self.simulated_time);
         }
 
         // Calculate total exposure once
@@ -1117,10 +1229,10 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             };
 
             // Update time
-            market.update_time();
+            market.update_time(self.simulated_time);
 
             // Skip expired markets
-            if market.is_expired() {
+            if market.is_expired(self.simulated_time) {
                 continue;
             }
 
@@ -2237,6 +2349,11 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
     /// Get number of tracked markets.
     pub fn market_count(&self) -> usize {
         self.markets.len()
+    }
+
+    /// Get executor's available balance.
+    pub fn available_balance(&self) -> Decimal {
+        self.executor.available_balance()
     }
 }
 

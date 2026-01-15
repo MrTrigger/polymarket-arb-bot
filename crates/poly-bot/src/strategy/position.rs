@@ -113,6 +113,16 @@ pub struct PositionConfig {
     /// Average True Range for distance normalization.
     /// Distance confidence is measured in ATR multiples.
     pub atr: Decimal,
+
+    // Phase-based thresholds (configurable via strategy.toml)
+    /// Minimum confidence for early phase (>10 min remaining).
+    pub early_threshold: Decimal,
+    /// Minimum confidence for build phase (5-10 min remaining).
+    pub build_threshold: Decimal,
+    /// Minimum confidence for core phase (2-5 min remaining).
+    pub core_threshold: Decimal,
+    /// Minimum confidence for final phase (<2 min remaining).
+    pub final_threshold: Decimal,
 }
 
 impl Default for PositionConfig {
@@ -124,6 +134,11 @@ impl Default for PositionConfig {
             min_hedge_ratio: dec!(0.20),
             trades_per_phase: 15,
             atr: dec!(100), // Default ATR suitable for BTC
+            // Optimized thresholds from param sweep (18.2% ROI)
+            early_threshold: dec!(0.80),
+            build_threshold: dec!(0.60),
+            core_threshold: dec!(0.50),
+            final_threshold: dec!(0.40),
         }
     }
 }
@@ -143,6 +158,17 @@ impl PositionConfig {
             total_budget,
             atr,
             ..Default::default()
+        }
+    }
+
+    /// Get the minimum confidence threshold for a given phase.
+    /// Uses configurable thresholds instead of hardcoded Phase::min_confidence().
+    pub fn threshold_for_phase(&self, phase: Phase) -> Decimal {
+        match phase {
+            Phase::Early => self.early_threshold,
+            Phase::Build => self.build_threshold,
+            Phase::Core => self.core_threshold,
+            Phase::Final => self.final_threshold,
         }
     }
 
@@ -371,8 +397,8 @@ impl PositionManager {
             let min_edge = max_edge_factor * time_factor;
             favorable_price + min_edge
         } else {
-            // Legacy phase-based thresholds (optimized via sweep: 18.2% ROI)
-            phase.min_confidence()
+            // Legacy phase-based thresholds (configurable via PositionConfig)
+            self.config.threshold_for_phase(phase)
         };
 
         if confidence < required_confidence {

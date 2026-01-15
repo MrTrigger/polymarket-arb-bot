@@ -4,7 +4,6 @@ members = [
     "crates/poly-common",
     "crates/poly-market",
     "crates/poly-collect",
-    "crates/poly-import",
     "crates/poly-bot",
 ]
 

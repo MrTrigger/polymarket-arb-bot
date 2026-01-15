@@ -1,222 +1,122 @@
 # Polymarket Arbitrage Bot Configuration
 # ========================================
 #
-# Sensitive values (wallet keys, API credentials) should be set via
-# environment variables, NOT in this file:
+# Environment variables (set in .env or shell):
 #   POLY_PRIVATE_KEY    - Wallet private key for signing transactions
 #   POLY_API_KEY        - Polymarket API key
 #   POLY_API_SECRET     - Polymarket API secret
 #   POLY_API_PASSPHRASE - Polymarket API passphrase
-#   CLICKHOUSE_URL      - Override ClickHouse URL
+#   CLICKHOUSE_URL      - ClickHouse HTTP URL
 #   CLICKHOUSE_USER     - ClickHouse username
 #   CLICKHOUSE_PASSWORD - ClickHouse password
-#   ALERT_WEBHOOK_URL   - Webhook URL for alerts
+#
+# Usage:
+#   cargo run -p poly-bot --release -- --mode paper
+
+# ============================================================================
+# USER SETTINGS (configure these)
+# ============================================================================
 
 [general]
-# Trading mode: live, paper, shadow, backtest
-# - live: Real trading with real money
-# - paper: Real data, simulated execution
-# - shadow: Real data, log-only (no execution)
-# - backtest: Historical data replay
-mode = "paper"
-
-# Assets to trade
-assets = ["BTC", "ETH", "SOL"]
-
-# Market window duration: "15min" or "1h"
-window_duration = "15min"
-
-# Log level: trace, debug, info, warn, error
-log_level = "debug"
-
-[clickhouse]
-url = "http://localhost:8123"
-database = "polymarket"
-max_rows = 10000
-max_bytes = 10485760  # 10MB
-period_secs = 5
+mode = "paper"                    # paper, live, shadow, backtest
+assets = ["BTC", "ETH", "SOL"]    # Assets to trade
+log_level = "debug"               # info, debug, trace
+window_duration = "15min"         # 15min or 1h
 
 [trading]
-# Time-based minimum arbitrage margins (in percent)
-# Early phase (>5 min remaining): higher threshold for safety
-# Mid phase (2-5 min remaining): moderate threshold
-# Late phase (<2 min remaining): lower threshold, more aggressive
-min_margin_early_pct = 2.5
-min_margin_mid_pct = 1.5
-min_margin_late_pct = 0.5
-
-# Time boundaries (seconds remaining in window)
-early_threshold_secs = 300   # 5 minutes
-mid_threshold_secs = 120     # 2 minutes
-
-# Minimum time remaining to enter new trade (seconds)
-min_time_remaining_secs = 30
-
-# Position limits (in USDC)
+# Position limits (USDC)
 max_position_per_market = 1000.0
 max_total_exposure = 5000.0
 base_order_size = 50.0
+# Defaults below
+min_margin_early_pct = 2.5
+min_margin_mid_pct = 1.5
+min_margin_late_pct = 0.5
+early_threshold_secs = 300
+mid_threshold_secs = 120
+min_time_remaining_secs = 30
 
 [risk]
-# Risk management mode: "circuit_breaker", "daily_pnl", or "both"
-# - circuit_breaker: Lock-free atomic checks for consecutive failures (fastest)
-# - daily_pnl: P&L-based checks (daily loss, consecutive losses, hedge ratio)
-# - both: Combines both strategies (recommended for production)
+max_daily_loss = 500.0            # Stop trading if daily loss exceeds this
+# Defaults below
 risk_mode = "both"
-
-# Circuit breaker settings
 max_consecutive_failures = 3
-circuit_breaker_cooldown_secs = 300  # 5 minutes
-
-# Loss limits
-max_daily_loss = 500.0  # USDC
-
-# Inventory management
-max_imbalance_ratio = 0.7  # 0.0-1.0
-
-# Toxic flow protection (severity threshold 0-100)
+circuit_breaker_cooldown_secs = 300
+max_imbalance_ratio = 0.7
 toxic_flow_threshold = 80
-
-# Emergency close threshold for leg risk (USDC)
 emergency_close_threshold = 200.0
 
+[backtest]
+start_date = "2026-01-08"        # Backtest start date
+end_date = "2026-01-15"          # Backtest end date
+sweep_enabled = false
+speed = 0.0
+data_dir = "data/2026-01-08_2026-01-15_15min"  # CSV data directory
+
+# ============================================================================
+# DEFAULTS (rarely need to change)
+# ============================================================================
+
 [shadow]
-# Shadow bid system (fire opposite leg immediately on primary fill)
 enabled = true
-price_offset_bps = 50      # 0.5% offset from primary
-max_wait_ms = 2000         # 2 second timeout
+price_offset_bps = 50
+max_wait_ms = 2000
 
 [execution]
-# Price chasing (adjust limit price toward fill)
 chase_enabled = true
-chase_step_size = 0.001    # Price increment per iteration
+chase_step_size = 0.001
 chase_check_interval_ms = 100
-max_chase_time_ms = 5000   # 5 second max chase
-
-# Paper trading simulation
+max_chase_time_ms = 5000
 paper_fill_latency_ms = 50
-
-# General order settings
-order_timeout_ms = 10000   # 10 seconds
+order_timeout_ms = 10000
 
 [observability]
-# Decision capture to ClickHouse
 capture_decisions = true
-
-# Counterfactual analysis (what-if for skipped opportunities)
 capture_counterfactuals = true
-
-# Anomaly detection (extreme margins, flash crashes, latency spikes)
 detect_anomalies = true
-
-# Fire-and-forget channel settings
 channel_buffer_size = 10000
 batch_size = 1000
 flush_interval_secs = 5
-
-# Alert webhooks (URL set via ALERT_WEBHOOK_URL env var)
 alerts_enabled = false
-
-[backtest]
-# Backtest date range (YYYY-MM-DD format)
-# start_date = "2025-01-01"
-# end_date = "2025-01-31"
-
-# Playback speed (0 = max speed, 1.0 = real-time)
-speed = 0.0
-
-# Parameter sweep mode for optimization
-sweep_enabled = false
-
-# ============================================================================
-# Trading Engines Configuration
-# ============================================================================
-# Priority order determines which engine takes precedence
-# Engines can run concurrently when non-conflicting (e.g., maker with directional)
 
 [engines]
 priority = ["directional", "arbitrage", "maker"]
 
 [engines.arbitrage]
-# Arbitrage engine: Buy YES+NO when combined < $1.00 (risk-free profit)
 enabled = true
-min_margin_early_bps = 250     # 2.5% minimum margin in early phase
-min_margin_mid_bps = 150       # 1.5% in mid phase
-min_margin_late_bps = 50       # 0.5% in late phase
+min_margin_early_bps = 250
+min_margin_mid_bps = 150
+min_margin_late_bps = 50
 
 [engines.directional]
-# Directional engine: Signal-based asymmetric allocations
-# OPTIMIZED via Python backtest (14 days, 180 markets):
-#   - Best config: Strong 0.03%, Strong ratio 0.90 -> 5.99% return, 61% win rate
-#   - Lean signals are net negative (39-48% win rate) -> use high threshold to reduce
-#   - BTC outperforms (13.86%) vs ETH/SOL (1-3%)
-#
-# Time-scaled thresholds (% from opening price):
-#   >30 min: 0.03% strong / 0.02% lean (base thresholds)
-#   10-30 min: 0.021% strong / 0.014% lean (factor 0.7)
-#   3-10 min: 0.015% strong / 0.01% lean (factor 0.5)
-#   <3 min: 0.009% strong / 0.006% lean (factor 0.3)
 enabled = true
-min_seconds_remaining = 60     # Minimum time to enter directional trade
-max_combined_cost = 1.02       # Max combined YES+NO cost (tighter than before)
-max_spread_bps = 1500          # Max bid-ask spread to trade (15%)
-min_favorable_depth = 50.0     # Minimum depth on favorable side ($50)
-
-# Signal thresholds (in basis points from open price)
-# Strong signals have positive expectancy; lean signals are marginal
-# Note: These are used for late-phase (<3 min) only; earlier phases use time-scaled values
-strong_threshold_late_bps = 9  # 0.009% for late phase (factor 0.3 of 0.03%)
-lean_threshold_late_bps = 6    # 0.006% for late phase (factor 0.3 of 0.02%)
-
-# Signal allocation ratios (OPTIMIZED via param sweep: 0.82/0.65)
-strong_up_ratio = 0.82         # Strong UP signal: 82% YES, 18% NO
-lean_up_ratio = 0.65           # Lean UP signal: 65% YES, 35% NO
-neutral_ratio = 0.50           # Neutral signal: 50/50
-
-# Dynamic edge requirement
-# Required confidence = favorable_price + (max_edge_factor * time_remaining / window_duration)
-# Set to 0 to use legacy phase-based thresholds (slightly better in backtest: 18.2% vs 18.0%)
-# At window start: need price + max_edge_factor. At window end: need price + 0.
-max_edge_factor = 0.0          # 0 = use phase-based thresholds (best in backtest)
+min_seconds_remaining = 60
+max_combined_cost = 1.02
+max_spread_bps = 1500
+min_favorable_depth = 50.0
+strong_threshold_late_bps = 9
+lean_threshold_late_bps = 6
+strong_up_ratio = 0.82
+lean_up_ratio = 0.65
+neutral_ratio = 0.50
+max_edge_factor = 0.0
 
 [engines.maker]
-# Maker engine: Passive limit orders for rebates
-enabled = false                # Disabled for initial paper trading
-min_seconds_remaining = 120    # Minimum time remaining
-min_spread_bps = 100           # Minimum spread to participate (1%)
-max_spread_bps = 1000          # Maximum spread (10%)
-default_order_size = 50.0      # Default order size in USDC
-
-# ============================================================================
-# Dashboard Configuration
-# ============================================================================
+enabled = false
+min_seconds_remaining = 120
+min_spread_bps = 100
+max_spread_bps = 1000
+default_order_size = 50.0
 
 [dashboard]
-# Enable/disable the dashboard (WebSocket server + REST API)
 enabled = true
-
-# WebSocket server port (real-time state broadcast)
 websocket_port = 3001
-
-# REST API server port (historical queries)
 api_port = 3002
-
-# State broadcast interval in milliseconds
 broadcast_interval_ms = 500
-
-# P&L snapshot interval for equity curve (seconds)
 pnl_snapshot_interval_secs = 10
-
-# Capture channel settings (fire-and-forget)
 channel_capacity = 10000
 log_drops = true
 drop_log_threshold = 100
-
-# ClickHouse batch settings
 batch_size = 100
 flush_interval_secs = 5
 max_buffer_size = 10000
-
-# Static file serving (set to frontend/dist for production)
-# Leave empty to disable static file serving
-# static_dir = "frontend/dist"

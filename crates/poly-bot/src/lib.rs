@@ -33,7 +33,7 @@ pub mod types;
 
 pub use config::{
     ArbitrageEngineConfig, BotConfig, DashboardConfig, DirectionalEngineConfig, EnginesConfig,
-    MakerEngineConfig, ObservabilityConfig,
+    MakerEngineConfig, ObservabilityConfig, SweepConfig,
 };
 pub use data_source::{
     BookDeltaEvent, BookSnapshotEvent, DataSource, DataSourceError, FillEvent, MarketEvent,
