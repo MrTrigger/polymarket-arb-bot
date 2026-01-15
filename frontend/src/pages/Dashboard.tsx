@@ -1,19 +1,13 @@
 import { useDashboardState } from "@/hooks";
-import { formatUsd } from "@/lib/types";
-import { MetricsCards, EquityCurve } from "@/components/dashboard";
+import { MetricsCards, EquityCurve, MarketsGrid } from "@/components/dashboard";
 
 /**
  * Main dashboard page showing trading metrics, markets, and logs.
  * Components will be added in subsequent tasks.
  */
 export function Dashboard() {
-  const {
-    initialized,
-    markets,
-    tradingEnabled,
-    circuitBreakerTripped,
-    arbOpportunities,
-  } = useDashboardState();
+  const { initialized, tradingEnabled, circuitBreakerTripped, arbOpportunities } =
+    useDashboardState();
 
   if (!initialized) {
     return (
@@ -57,61 +51,9 @@ export function Dashboard() {
         )}
       </div>
 
-      {/* Placeholder for markets grid - to be replaced by MarketsGrid component */}
+      {/* Markets Grid */}
       <div className="mb-6">
-        <h2 className="mb-4 text-lg font-semibold">Active Markets</h2>
-        {markets.length === 0 ? (
-          <div className="rounded-lg border border-border bg-card p-8 text-center text-muted-foreground">
-            No active markets
-          </div>
-        ) : (
-          <div className="overflow-x-auto rounded-lg border border-border">
-            <table className="w-full">
-              <thead className="border-b border-border bg-muted/50">
-                <tr>
-                  <th className="px-4 py-3 text-left text-sm font-medium text-muted-foreground">
-                    Asset
-                  </th>
-                  <th className="px-4 py-3 text-left text-sm font-medium text-muted-foreground">
-                    Strike
-                  </th>
-                  <th className="px-4 py-3 text-left text-sm font-medium text-muted-foreground">
-                    Time Left
-                  </th>
-                  <th className="px-4 py-3 text-left text-sm font-medium text-muted-foreground">
-                    Spot
-                  </th>
-                  <th className="px-4 py-3 text-left text-sm font-medium text-muted-foreground">
-                    Arb Spread
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {markets.map((market) => (
-                  <tr
-                    key={market.event_id}
-                    className="border-b border-border last:border-0 hover:bg-muted/50"
-                  >
-                    <td className="px-4 py-3 font-medium">{market.asset}</td>
-                    <td className="px-4 py-3">
-                      {formatUsd(market.strike_price)}
-                    </td>
-                    <td className="px-4 py-3">
-                      {Math.floor(market.seconds_remaining / 60)}m{" "}
-                      {market.seconds_remaining % 60}s
-                    </td>
-                    <td className="px-4 py-3">{formatUsd(market.spot_price)}</td>
-                    <td
-                      className={`px-4 py-3 ${market.has_arb_opportunity ? "text-yellow-500" : ""}`}
-                    >
-                      {(parseFloat(market.arb_spread) * 100).toFixed(2)}%
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
+        <MarketsGrid />
       </div>
 
       {/* Equity Curve and Logs */}

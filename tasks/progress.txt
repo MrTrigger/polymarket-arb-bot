@@ -829,3 +829,54 @@ Notes for next task (phase4-markets):
 - Consider shadcn Table component for consistent styling
 
 ---
+
+### [2026-01-15] Task: phase4-markets - Create MarketsGrid component
+
+Files changed:
+- frontend/src/components/dashboard/MarketsGrid.tsx (created)
+- frontend/src/components/dashboard/index.ts (added export)
+- frontend/src/components/ui/table.tsx (added via shadcn)
+- frontend/src/pages/Dashboard.tsx (replaced placeholder with MarketsGrid)
+
+Changes:
+- Added shadcn Table component via `bun x shadcn@latest add table`
+- Created MarketsGrid component with comprehensive market data display:
+  - Columns: Asset, Strike, Time Left, Spot, YES Bid/Ask, NO Bid/Ask, Arb Spread, Position
+  - Clickable rows navigate to /market/:eventId using react-router-dom Link
+  - Arb opportunities highlighted with yellow background and TrendingUp icon
+  - Time remaining highlighted red when < 60 seconds
+  - Order book bid/ask shown in green/red cents format
+  - Position cell shows YES/NO shares and realized P&L
+  - Arb spread shown in basis points with color coding
+- Added skeleton loader component for loading state
+- Updated Dashboard.tsx to use new MarketsGrid component
+- Removed unused formatUsd import and markets variable from Dashboard
+
+Key features:
+- `MarketRow` - Single row component with Link wrapping all cells
+- `OrderBookCell` - Displays best bid/ask in cents with color coding
+- `PositionCell` - Shows position shares and P&L if position exists
+- `formatArbSpread()` - Converts decimal spread to basis points
+- `getArbSpreadColor()` - Returns appropriate color class for spread
+
+Verification:
+- bun run typecheck: PASSED
+- bun run build: PASSED (445.79 kB JS bundle)
+- Shows all markets: CONFIRMED (8 columns with all data fields)
+- Rows clickable: CONFIRMED (Link to /market/:eventId)
+- Arb highlighted: CONFIRMED (yellow background + icon for has_arb_opportunity)
+
+Learnings:
+- shadcn Table uses function components (not React.forwardRef) in new-york style
+- Link components can wrap table cells but need to be inside TableCell
+- Position lookup via Map is efficient for matching markets to positions
+- Basis points display is more intuitive than percentage for small spreads
+- Time remaining < 60s deserves visual highlight (red text, bold)
+
+Notes for next task (phase4-circuit):
+- Create CircuitBreakerStatus component
+- Show status indicator: green=enabled, yellow=disabled, red=tripped
+- Show failure count and cooldown remaining if tripped
+- Uses controlState from useDashboardState hook
+
+---

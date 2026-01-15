@@ -287,7 +287,7 @@
       "id": "phase4-markets",
       "title": "Phase 4: Create MarketsGrid component",
       "description": "Table of active markets. Columns: asset, strike, time remaining, spot price, YES/NO bid/ask, arb spread, position. Clickable rows navigate to /market/:eventId. Highlight arb opportunities.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["phase4-equity"],
       "files": ["frontend/src/components/dashboard/MarketsGrid.tsx"],
       "acceptance": [
