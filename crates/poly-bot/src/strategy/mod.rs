@@ -546,7 +546,14 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
         engines_config: EnginesConfig,
     ) -> Self {
         let arb_detector = ArbDetector::new(config.arb_thresholds.clone());
-        let directional_detector = DirectionalDetector::new();
+        // Create directional detector with config from engines_config
+        let directional_config = DirectionalConfig {
+            min_seconds_remaining: engines_config.directional.min_seconds_remaining as i64,
+            max_combined_cost: engines_config.directional.max_combined_cost,
+            max_spread_ratio: Decimal::from(engines_config.directional.max_spread_bps) / dec!(10000),
+            min_favorable_depth: engines_config.directional.min_favorable_depth,
+        };
+        let directional_detector = DirectionalDetector::with_config(directional_config);
         let maker_detector = MakerDetector::new();
         let aggregator = DecisionAggregator::new(&engines_config);
         let toxic_detector = ToxicFlowDetector::new(config.toxic_config.clone());
@@ -734,6 +741,7 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                         market.event_id, event.price
                     );
                     market.state.strike_price = event.price;
+                    market.strike_price = event.price; // Also update the TrackedMarket field
                 }
             }
         }
@@ -1087,10 +1095,10 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             let directional_opportunity = if self.engines_config.directional.enabled {
                 match self.directional_detector.detect(market_state) {
                     Ok(opp) => {
-                        // Log signal detection at trace level to reduce spam
+                        // Log signal detection at debug level to confirm detection is working
                         let mins = Decimal::from(market_state.seconds_remaining) / dec!(60);
                         let thresholds = get_thresholds(mins);
-                        trace!(
+                        debug!(
                             "🎯 Signal {} {}: {:?} dist={:.4}% | thresholds: lean={:.4}% strong={:.4}% | ratio=UP:{}/DOWN:{}",
                             event_id, asset, opp.signal, opp.distance * dec!(100),
                             thresholds.lean * dec!(100), thresholds.strong * dec!(100),
@@ -1099,7 +1107,7 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                         Some(opp)
                     }
                     Err(reason) => {
-                        trace!("No directional in {}: {}", event_id, reason);
+                        debug!("No directional in {}: {}", event_id, reason);
                         None
                     }
                 }
@@ -1129,6 +1137,12 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             if !aggregated.should_act() {
                 continue;
             }
+
+            debug!(
+                "🎲 Opportunity {} {}: engine={:?} has_arb={} has_dir={} has_maker={}",
+                event_id, asset, aggregated.primary_engine(),
+                aggregated.summary.has_arb, aggregated.summary.has_directional, aggregated.summary.has_maker
+            );
 
             // Track opportunity detected
             self.state.metrics.inc_opportunities();
