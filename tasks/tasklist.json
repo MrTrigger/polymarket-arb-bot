@@ -461,7 +461,7 @@
       "id": "phase6-build",
       "title": "Phase 6: Configure production build",
       "description": "Verify bun run build produces optimized dist/. Assets hashed. Optionally serve from poly-bot with tower-http static files.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["phase6-theme"],
       "files": [
         "frontend/vite.config.ts",

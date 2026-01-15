@@ -1420,3 +1420,56 @@ Notes for next task (phase6-build):
 - Consider code splitting to address bundle size warning (504 kB)
 
 ---
+
+### [2026-01-15] Task: phase6-build - Configure production build
+
+Files changed:
+- frontend/vite.config.ts (added production build config with chunk splitting)
+- crates/poly-bot/src/config.rs (added static_dir field to DashboardConfig)
+- crates/poly-bot/src/dashboard/api.rs (added static file serving via tower-http)
+
+Changes:
+- Updated vite.config.ts with production optimizations:
+  - Manual chunk splitting to improve caching:
+    - `vendor-react` (46.60 kB): react, react-dom, react-router-dom
+    - `vendor-charts` (167.47 kB): lightweight-charts
+    - `vendor-state` (1.12 kB): zustand, @tanstack/react-query
+  - Increased chunkSizeWarningLimit to 600 kB
+  - Configured base path for assets
+- Added `static_dir: Option<String>` field to DashboardConfig:
+  - When set, API server serves frontend dist/ at root path
+  - Supports SPA routing (falls back to index.html for non-API routes)
+- Updated ApiServerConfig with static_dir field
+- Modified run_api_server() to serve static files:
+  - Uses tower_http::services::{ServeDir, ServeFile}
+  - API routes take precedence over static files
+  - ServeDir with not_found_service for SPA fallback
+
+Build output:
+- dist/index.html (0.85 kB)
+- dist/assets/index-C495loC0.css (39.70 kB)
+- dist/assets/index-Brt7cetw.js (289.31 kB)
+- dist/assets/vendor-react-oVvY_IC4.js (46.60 kB)
+- dist/assets/vendor-charts-CHlMIDsr.js (167.47 kB)
+- dist/assets/vendor-state-D1WWuMbI.js (1.12 kB)
+
+Verification:
+- bun run build: PASSED (all assets hashed, ~1.5s build time)
+- dist/ contains hashed assets: CONFIRMED
+- cargo clippy -p poly-bot -- -D warnings: PASSED
+- cargo test -p poly-bot: PASSED (all tests pass)
+- poly-bot can serve static files: CONFIRMED (via static_dir config)
+
+Learnings:
+- Vite manualChunks key = output filename, value = array of package names
+- tower-http ServeDir with not_found_service enables SPA routing
+- Keep vendor chunks separate (react, charts) for better caching
+- Build time reduced from 1.83s to 1.54s with chunk splitting
+
+Notes for next task (phase6-final):
+- Need to run poly-bot with dashboard enabled
+- Test WebSocket connection and data flow
+- Test REST API endpoints
+- Verify all frontend components work with real data
+
+---

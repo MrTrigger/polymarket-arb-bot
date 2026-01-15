@@ -418,6 +418,11 @@ pub struct DashboardConfig {
 
     /// P&L snapshot interval in seconds.
     pub pnl_snapshot_interval_secs: u64,
+
+    /// Path to the frontend dist/ directory for static file serving.
+    /// If set, the API server will serve the React dashboard at the root path.
+    /// If None, only the REST API endpoints will be available.
+    pub static_dir: Option<String>,
 }
 
 impl Default for DashboardConfig {
@@ -434,6 +439,7 @@ impl Default for DashboardConfig {
             api_port: 3002,
             broadcast_interval_ms: 500,
             pnl_snapshot_interval_secs: 60,
+            static_dir: None,
         }
     }
 }
@@ -1216,6 +1222,7 @@ struct DashboardToml {
     api_port: u16,
     broadcast_interval_ms: u64,
     pnl_snapshot_interval_secs: u64,
+    static_dir: Option<String>,
 }
 
 impl Default for DashboardToml {
@@ -1232,6 +1239,7 @@ impl Default for DashboardToml {
             api_port: 3002,
             broadcast_interval_ms: 500,
             pnl_snapshot_interval_secs: 60,
+            static_dir: None,
         }
     }
 }
@@ -1478,6 +1486,7 @@ impl From<TomlConfig> for BotConfig {
                 api_port: toml.dashboard.api_port,
                 broadcast_interval_ms: toml.dashboard.broadcast_interval_ms,
                 pnl_snapshot_interval_secs: toml.dashboard.pnl_snapshot_interval_secs,
+                static_dir: toml.dashboard.static_dir.clone(),
             },
             wallet: WalletConfig::default(), // Always from env vars
             backtest: BacktestConfig {

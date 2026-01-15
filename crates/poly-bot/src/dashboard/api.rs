@@ -575,6 +575,9 @@ pub struct ApiServerConfig {
     pub port: u16,
     /// Enable CORS for frontend development.
     pub enable_cors: bool,
+    /// Path to static files directory (frontend dist/).
+    /// If set, serves the React dashboard at the root path.
+    pub static_dir: Option<String>,
 }
 
 impl Default for ApiServerConfig {
@@ -582,6 +585,7 @@ impl Default for ApiServerConfig {
         Self {
             port: 3002,
             enable_cors: true,
+            static_dir: None,
         }
     }
 }
@@ -592,6 +596,7 @@ impl ApiServerConfig {
         Self {
             port: config.api_port,
             enable_cors: true,
+            static_dir: config.static_dir.clone(),
         }
     }
 }
@@ -613,8 +618,33 @@ pub async fn run_api_server(
     config: ApiServerConfig,
     clickhouse: ClickHouseClient,
 ) -> anyhow::Result<()> {
+    use std::path::PathBuf;
+    use tower_http::services::{ServeDir, ServeFile};
+
     let state = Arc::new(ApiState::new(clickhouse));
-    let app = create_api_router(state);
+    let api_router = create_api_router(state);
+
+    // Build the app with optional static file serving
+    let app = if let Some(ref static_dir) = config.static_dir {
+        let static_path = PathBuf::from(static_dir);
+        let index_path = static_path.join("index.html");
+
+        info!(
+            static_dir = %static_dir,
+            "Serving static files for dashboard"
+        );
+
+        // Serve API routes first, then fallback to static files
+        // The fallback serves index.html for any non-API route (SPA routing)
+        Router::new()
+            .merge(api_router)
+            .fallback_service(
+                ServeDir::new(&static_path)
+                    .not_found_service(ServeFile::new(&index_path)),
+            )
+    } else {
+        api_router
+    };
 
     // Add CORS if enabled
     let app = if config.enable_cors {
@@ -631,7 +661,14 @@ pub async fn run_api_server(
     let addr = format!("0.0.0.0:{}", config.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
 
-    info!(port = config.port, "Dashboard REST API server started");
+    if config.static_dir.is_some() {
+        info!(
+            port = config.port,
+            "Dashboard server started (API + static files)"
+        );
+    } else {
+        info!(port = config.port, "Dashboard REST API server started");
+    }
 
     axum::serve(listener, app).await?;
 
