@@ -302,7 +302,7 @@
       "id": "phase4-circuit",
       "title": "Phase 4: Create CircuitBreakerStatus component",
       "description": "Status indicator: green=enabled, yellow=disabled, red=tripped. Show failure count. Show cooldown remaining if tripped.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["phase4-markets"],
       "files": ["frontend/src/components/dashboard/CircuitBreakerStatus.tsx"],
       "acceptance": [

@@ -880,3 +880,53 @@ Notes for next task (phase4-circuit):
 - Uses controlState from useDashboardState hook
 
 ---
+
+### [2026-01-15] Task: phase4-circuit - Create CircuitBreakerStatus component
+
+Files changed:
+- frontend/src/components/dashboard/CircuitBreakerStatus.tsx (created)
+- frontend/src/components/dashboard/index.ts (added export)
+- frontend/src/pages/Dashboard.tsx (integrated component, removed inline status indicators)
+
+Changes:
+- Created CircuitBreakerStatus component using shadcn Card:
+  - Three status states with distinct colors:
+    - Green (Active): Trading enabled, circuit breaker healthy
+    - Yellow (Disabled): Trading manually disabled
+    - Red (Tripped): Circuit breaker tripped with cooldown
+  - Status indicator dot with pulse animation when tripped
+  - Icons: Shield (active), ShieldOff (disabled), ShieldAlert (tripped)
+  - Consecutive failure count display
+  - Cooldown remaining timer when circuit breaker is tripped
+  - Warning message when failures accumulating (breaker may trip soon)
+  - Shutdown requested indicator
+- Added CircuitBreakerStatusSkeleton for loading state
+- Integrated into Dashboard page, replacing inline status indicators
+- Card has colored border based on status for high visibility
+
+Helper functions:
+- `getStatus()` - Returns StatusConfig based on tradingEnabled/circuitBreakerTripped
+- `getCooldownRemaining()` - Calculates remaining cooldown seconds from trip time
+- `formatCooldown()` - Formats seconds as "Xm Ys" or "Xs"
+
+Verification:
+- bun run typecheck: PASSED
+- bun run build: PASSED (449.93 kB JS bundle)
+- Shows correct status: CONFIRMED (green/yellow/red based on state)
+- Colors correct: CONFIRMED (border, dot, icon, text all match status)
+
+Learnings:
+- ControlState provides all needed data: trading_enabled, circuit_breaker_tripped, consecutive_failures, circuit_breaker_trip_time
+- Pulse animation on the status dot draws attention when tripped
+- Border color on Card component provides quick visual status at a glance
+- Cooldown calculation assumes 30s default - should match bot config in production
+- Multiple warning states can be shown (failures accumulating, shutdown requested)
+
+Notes for next task (phase4-logs):
+- Create LogWindow component with collapsible panel
+- Color logs by level: ERROR=red, WARN=yellow, INFO=white, DEBUG=gray
+- Need auto-scroll to bottom for new logs
+- Filter by log level and text search
+- Uses recentLogs from useDashboardState hook (last 100)
+
+---

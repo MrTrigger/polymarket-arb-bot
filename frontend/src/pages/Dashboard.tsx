@@ -1,13 +1,17 @@
 import { useDashboardState } from "@/hooks";
-import { MetricsCards, EquityCurve, MarketsGrid } from "@/components/dashboard";
+import {
+  MetricsCards,
+  EquityCurve,
+  MarketsGrid,
+  CircuitBreakerStatus,
+} from "@/components/dashboard";
 
 /**
  * Main dashboard page showing trading metrics, markets, and logs.
  * Components will be added in subsequent tasks.
  */
 export function Dashboard() {
-  const { initialized, tradingEnabled, circuitBreakerTripped, arbOpportunities } =
-    useDashboardState();
+  const { initialized, arbOpportunities } = useDashboardState();
 
   if (!initialized) {
     return (
@@ -31,18 +35,14 @@ export function Dashboard() {
         <MetricsCards />
       </div>
 
-      {/* Status indicators */}
-      <div className="mb-6 flex gap-4">
-        <div
-          className={`rounded-full px-3 py-1 text-sm ${tradingEnabled ? "bg-green-500/10 text-green-500" : "bg-red-500/10 text-red-500"}`}
-        >
-          Trading: {tradingEnabled ? "Enabled" : "Disabled"}
+      {/* Status indicators row */}
+      <div className="mb-6 flex items-start gap-4">
+        {/* Circuit Breaker Status Card */}
+        <div className="w-64">
+          <CircuitBreakerStatus />
         </div>
-        {circuitBreakerTripped && (
-          <div className="rounded-full bg-red-500/10 px-3 py-1 text-sm text-red-500">
-            Circuit Breaker Tripped
-          </div>
-        )}
+
+        {/* Arb opportunities indicator */}
         {arbOpportunities.length > 0 && (
           <div className="rounded-full bg-yellow-500/10 px-3 py-1 text-sm text-yellow-500">
             {arbOpportunities.length} Arb Opportunit
