@@ -34,7 +34,7 @@ time = { version = "0.3", features = ["serde"] }
 dashmap = "6.1"
 
 # Database
-clickhouse = { version = "0.13", features = ["inserter", "time"] }
+clickhouse = { version = "0.13", features = ["inserter", "time", "uuid"] }
 
 # Error handling
 thiserror = "2.0"

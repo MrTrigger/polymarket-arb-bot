@@ -4,7 +4,9 @@
 //! dashboard that displays trading activity, P&L, and market state.
 
 pub mod capture;
+pub mod processor;
 pub mod types;
 
 pub use capture::*;
+pub use processor::*;
 pub use types::*;

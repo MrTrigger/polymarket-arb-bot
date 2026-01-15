@@ -163,3 +163,56 @@ Notes for next task (phase1-processor):
 - event_type() returns string for logging/metrics
 
 ---
+
+### [2026-01-15] Task: phase1-processor - Implement dashboard event processor
+
+Files changed:
+- crates/poly-bot/src/dashboard/processor.rs (created)
+- crates/poly-bot/src/dashboard/mod.rs (added processor module export)
+- Cargo.toml (added `uuid` feature to clickhouse dependency)
+
+Changes:
+- Created `DashboardProcessor` following observability/processor.rs pattern:
+  - ClickHouse Row types for each table:
+    - `SessionRow` -> `sessions` table
+    - `TradeRow` -> `bot_trades` table
+    - `PnlRow` -> `pnl_snapshots` table
+    - `LogRow` -> `structured_logs` table
+    - `MarketSessionRow` -> `market_sessions` table
+  - `DashboardProcessorConfig` - batch_size, flush_interval, max_buffer_size
+  - `DashboardProcessorStats` / `DashboardProcessorStatsSnapshot` - tracking counters
+  - `EventBuffers` - separate VecDeque for each event type
+- Processor loop:
+  - Receives events from capture channel
+  - Buffers by event type for batch efficiency
+  - Flushes when batch_size reached OR flush_interval timer fires
+  - Graceful shutdown on channel close or shutdown signal
+  - Final flush before exit
+- Row type conversions:
+  - From rust_decimal::Decimal to f64 (ClickHouse limitation)
+  - From chrono::DateTime to time::OffsetDateTime
+  - UUID serialization with clickhouse::serde::uuid
+- Helper functions:
+  - `create_shared_dashboard_processor(config)` - creates Arc-wrapped processor
+  - `spawn_dashboard_processor(...)` - spawns as background tokio task
+
+Verification:
+- cargo clippy -p poly-bot -- -D warnings: PASSED
+- cargo test -p poly-bot dashboard:: PASSED (53 tests - 22 capture + 18 processor + 13 types)
+- Writes to all 5 tables via separate flush methods
+- Handles shutdown signal via tokio::select!
+
+Learnings:
+- clickhouse crate requires `uuid` feature for UUID field serialization
+- Row types need both `Row` derive AND `Serialize` trait bound for write()
+- Use time::OffsetDateTime (not chrono) for clickhouse datetime64 fields
+- datetime_to_offset helper for chrono -> time conversion
+- Backpressure drops oldest events when buffer full (per-type buffers)
+
+Notes for next task (phase1-session):
+- DashboardProcessor is ready to receive events
+- Need session manager to create SessionRecord on startup
+- Session manager should update record on shutdown with exit reason
+- Integrate with mode/live.rs and mode/paper.rs startup code
+
+---

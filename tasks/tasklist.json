@@ -58,7 +58,7 @@
       "id": "phase1-processor",
       "title": "Phase 1: Implement dashboard event processor",
       "description": "Background processor that receives DashboardEvents and writes to ClickHouse. Batch inserts for efficiency. Graceful shutdown handling.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["phase1-capture"],
       "files": ["crates/poly-bot/src/dashboard/processor.rs"],
       "acceptance": [
