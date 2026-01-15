@@ -15,6 +15,7 @@
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -22,7 +23,11 @@ use poly_common::{ClickHouseClient, WindowDuration};
 use tracing::{error, info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
-use poly_bot::config::{BotConfig, TradingMode};
+use poly_bot::config::{BotConfig, DashboardConfig, TradingMode};
+use poly_bot::dashboard::{
+    create_shared_dashboard_state_manager, spawn_api_server, spawn_websocket_server,
+    ApiServerConfig, WebSocketServerConfig,
+};
 use poly_bot::mode::{
     BacktestMode, BacktestModeConfig, LiveMode, LiveModeConfig, PaperMode, PaperModeConfig,
     ShadowMode, ShadowModeConfig,
@@ -177,13 +182,68 @@ async fn run() -> Result<()> {
         }
     }
 
+    // Start dashboard servers if enabled (except in backtest mode)
+    let dashboard_handles = if config.dashboard.enabled && config.mode != TradingMode::Backtest {
+        Some(start_dashboard_servers(&config.dashboard, clickhouse.clone()).await?)
+    } else {
+        None
+    };
+
     // Run the selected mode
-    match config.mode {
+    let result = match config.mode {
         TradingMode::Live => run_live_mode(config, clickhouse).await,
         TradingMode::Paper => run_paper_mode(config, clickhouse).await,
         TradingMode::Shadow => run_shadow_mode(config, clickhouse).await,
         TradingMode::Backtest => run_backtest_mode(config, clickhouse).await,
+    };
+
+    // Shutdown dashboard servers
+    if let Some((ws_server, ws_handle, api_handle)) = dashboard_handles {
+        info!("Shutting down dashboard servers...");
+        let _ = ws_server.shutdown_handle().send(());
+        ws_handle.abort();
+        api_handle.abort();
     }
+
+    result
+}
+
+/// Start the dashboard WebSocket and REST API servers.
+///
+/// Returns handles to both servers for graceful shutdown.
+async fn start_dashboard_servers(
+    config: &DashboardConfig,
+    clickhouse: ClickHouseClient,
+) -> Result<(
+    poly_bot::dashboard::SharedWebSocketServer,
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+)> {
+    info!(
+        ws_port = config.websocket_port,
+        api_port = config.api_port,
+        broadcast_interval_ms = config.broadcast_interval_ms,
+        "Starting dashboard servers"
+    );
+
+    // Create shared state manager for WebSocket broadcasts
+    let state_manager = create_shared_dashboard_state_manager();
+
+    // Create a temporary GlobalState for dashboard state snapshots
+    // In practice, this will be replaced by the mode's actual GlobalState
+    // once we wire the mode to pass its state to the dashboard
+    let global_state = Arc::new(poly_bot::state::GlobalState::new());
+
+    // Configure and start WebSocket server
+    let ws_config = WebSocketServerConfig::from_dashboard_config(config);
+    let (ws_server, ws_handle) =
+        spawn_websocket_server(ws_config, state_manager, global_state);
+
+    // Configure and start REST API server
+    let api_config = ApiServerConfig::from_dashboard_config(config);
+    let api_handle = spawn_api_server(api_config, clickhouse);
+
+    Ok((ws_server, ws_handle, api_handle))
 }
 
 /// Run live trading mode.

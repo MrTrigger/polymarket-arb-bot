@@ -5,6 +5,7 @@
 
 pub mod api;
 pub mod capture;
+pub mod integration;
 pub mod processor;
 pub mod server;
 pub mod session;
@@ -13,6 +14,7 @@ pub mod types;
 
 pub use api::*;
 pub use capture::*;
+pub use integration::*;
 pub use processor::*;
 pub use server::*;
 pub use session::*;

@@ -156,11 +156,13 @@
       "id": "phase2-integration",
       "title": "Phase 2: Integrate dashboard with bot startup",
       "description": "Start dashboard server in bot main(). Wire capture channel to executor for trade events. Add PnL snapshot timer. Wire to tracing for log capture.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["phase2-rest-api"],
       "files": [
         "crates/poly-bot/src/main.rs",
-        "crates/poly-bot/src/executor.rs"
+        "crates/poly-bot/src/dashboard/integration.rs",
+        "crates/poly-bot/src/mode/paper.rs",
+        "crates/poly-bot/src/mode/live.rs"
       ],
       "acceptance": [
         "cargo clippy -p poly-bot -- -D warnings passes",

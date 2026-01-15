@@ -30,7 +30,7 @@ use poly_market::{DiscoveryConfig, MarketDiscovery};
 
 use crate::config::{BotConfig, EnginesConfig, ObservabilityConfig, TradingMode};
 use crate::dashboard::{
-    create_shared_session_manager, end_shared_session, BotMode, ExitReason,
+    create_shared_session_manager, end_shared_session, BotMode, DashboardIntegration, ExitReason,
     SharedSessionManager,
 };
 use crate::data_source::live::{ActiveMarket, LiveDataSource, LiveDataSourceConfig};
@@ -57,6 +57,8 @@ pub struct PaperModeConfig {
     pub engines: EnginesConfig,
     /// Market discovery configuration.
     pub discovery: DiscoveryConfig,
+    /// Dashboard configuration.
+    pub dashboard: crate::config::DashboardConfig,
     /// Initial virtual balance (USDC).
     pub initial_balance: Decimal,
     /// Graceful shutdown timeout (seconds).
@@ -72,6 +74,7 @@ impl Default for PaperModeConfig {
             observability: ObservabilityConfig::default(),
             engines: EnginesConfig::default(),
             discovery: DiscoveryConfig::default(),
+            dashboard: crate::config::DashboardConfig::default(),
             initial_balance: Decimal::new(10000, 0), // $10,000 default for paper
             shutdown_timeout_secs: 30,
         }
@@ -116,6 +119,7 @@ impl PaperModeConfig {
             observability: config.observability.clone(),
             engines: config.engines.clone(),
             discovery: discovery_config,
+            dashboard: config.dashboard.clone(),
             initial_balance: Decimal::new(10000, 0),
             shutdown_timeout_secs: 30,
         }
@@ -130,6 +134,7 @@ impl PaperModeConfig {
 /// - Strategy loop (arb detection, sizing, execution)
 /// - Observability (decisions, counterfactuals, anomalies)
 /// - Session tracking (dashboard events)
+/// - Dashboard integration (P&L snapshots, trade capture)
 pub struct PaperMode {
     /// Configuration.
     config: PaperModeConfig,
@@ -141,6 +146,8 @@ pub struct PaperMode {
     clickhouse: Option<ClickHouseClient>,
     /// Session manager for dashboard tracking.
     session: SharedSessionManager,
+    /// Dashboard integration for P&L capture.
+    dashboard: Option<DashboardIntegration>,
 }
 
 impl PaperMode {
@@ -172,6 +179,7 @@ impl PaperMode {
             shutdown_tx,
             clickhouse: None,
             session,
+            dashboard: None,
         })
     }
 
@@ -247,6 +255,26 @@ impl PaperMode {
 
         // Set up observability
         let (capture, obs_tasks) = self.setup_observability().await?;
+
+        // Set up dashboard integration
+        let session_id = self.session.read().map(|s| s.session_id()).unwrap_or_default();
+        let mut dashboard_tasks = Vec::new();
+        self.dashboard = DashboardIntegration::new(
+            &self.config.dashboard,
+            self.clickhouse.as_ref(),
+            &self.shutdown_tx,
+            session_id,
+        )
+        .await;
+
+        // Start P&L snapshot timer if dashboard is enabled
+        if let Some(ref dashboard) = self.dashboard {
+            let pnl_timer = dashboard.start_pnl_timer(
+                self.state.clone(),
+                self.shutdown_tx.subscribe(),
+            );
+            dashboard_tasks.push(pnl_timer);
+        }
 
         // Create strategy loop with engines config
         let mut strategy = StrategyLoop::with_engines(
@@ -336,7 +364,7 @@ impl PaperMode {
         };
 
         // Graceful shutdown
-        self.shutdown(&mut strategy, obs_tasks).await;
+        self.shutdown(&mut strategy, obs_tasks, dashboard_tasks).await;
 
         result
     }
@@ -426,6 +454,7 @@ impl PaperMode {
         &self,
         strategy: &mut StrategyLoop<D, E>,
         obs_tasks: Vec<tokio::task::JoinHandle<()>>,
+        dashboard_tasks: Vec<tokio::task::JoinHandle<()>>,
     ) where
         D: crate::data_source::DataSource,
         E: crate::executor::Executor,
@@ -441,13 +470,20 @@ impl PaperMode {
         // Shutdown strategy (which shuts down data source and executor)
         strategy.shutdown().await;
 
-        // Wait for observability tasks with timeout
+        // Wait for observability and dashboard tasks with timeout
         let timeout = Duration::from_secs(self.config.shutdown_timeout_secs);
         for handle in obs_tasks {
             match tokio::time::timeout(timeout, handle).await {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => warn!("Observability task panicked: {}", e),
                 Err(_) => warn!("Observability task timed out during shutdown"),
+            }
+        }
+        for handle in dashboard_tasks {
+            match tokio::time::timeout(timeout, handle).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => warn!("Dashboard task panicked: {}", e),
+                Err(_) => warn!("Dashboard task timed out during shutdown"),
             }
         }
 

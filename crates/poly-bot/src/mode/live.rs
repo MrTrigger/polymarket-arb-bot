@@ -24,9 +24,9 @@ use tracing::{error, info, warn};
 
 use poly_common::ClickHouseClient;
 
-use crate::config::{BotConfig, ObservabilityConfig, TradingMode};
+use crate::config::{BotConfig, DashboardConfig, ObservabilityConfig, TradingMode};
 use crate::dashboard::{
-    create_shared_session_manager, end_shared_session, BotMode, ExitReason,
+    create_shared_session_manager, end_shared_session, BotMode, DashboardIntegration, ExitReason,
     SharedSessionManager,
 };
 use crate::data_source::live::{LiveDataSource, LiveDataSourceConfig};
@@ -50,6 +50,8 @@ pub struct LiveModeConfig {
     pub strategy: StrategyConfig,
     /// Observability configuration.
     pub observability: ObservabilityConfig,
+    /// Dashboard configuration.
+    pub dashboard: DashboardConfig,
     /// Initial USDC balance.
     pub initial_balance: Decimal,
     /// Graceful shutdown timeout (seconds).
@@ -63,6 +65,7 @@ impl Default for LiveModeConfig {
             executor: LiveExecutorConfig::default(),
             strategy: StrategyConfig::default(),
             observability: ObservabilityConfig::default(),
+            dashboard: DashboardConfig::default(),
             initial_balance: Decimal::new(1000, 0), // $1000 default
             shutdown_timeout_secs: 30,
         }
@@ -77,6 +80,7 @@ impl LiveModeConfig {
             executor: LiveExecutorConfig::from_execution_config(&config.execution),
             strategy: StrategyConfig::from_trading_config(&config.trading),
             observability: config.observability.clone(),
+            dashboard: config.dashboard.clone(),
             initial_balance: Decimal::new(1000, 0),
             shutdown_timeout_secs: 30,
         }
@@ -91,6 +95,7 @@ impl LiveModeConfig {
 /// - Strategy loop (arb detection, sizing, execution)
 /// - Observability (decisions, counterfactuals, anomalies)
 /// - Session tracking (dashboard events)
+/// - Dashboard integration (P&L snapshots, trade capture)
 pub struct LiveMode {
     /// Configuration.
     config: LiveModeConfig,
@@ -104,6 +109,8 @@ pub struct LiveMode {
     clickhouse: Option<ClickHouseClient>,
     /// Session manager for dashboard tracking.
     session: SharedSessionManager,
+    /// Dashboard integration for P&L capture.
+    dashboard: Option<DashboardIntegration>,
 }
 
 impl LiveMode {
@@ -139,6 +146,7 @@ impl LiveMode {
             shutdown_tx,
             clickhouse: None,
             session,
+            dashboard: None,
         })
     }
 
@@ -188,6 +196,26 @@ impl LiveMode {
 
         // Set up observability
         let (capture, obs_tasks) = self.setup_observability().await?;
+
+        // Set up dashboard integration
+        let session_id = self.session.read().map(|s| s.session_id()).unwrap_or_default();
+        let mut dashboard_tasks = Vec::new();
+        self.dashboard = DashboardIntegration::new(
+            &self.config.dashboard,
+            self.clickhouse.as_ref(),
+            &self.shutdown_tx,
+            session_id,
+        )
+        .await;
+
+        // Start P&L snapshot timer if dashboard is enabled
+        if let Some(ref dashboard) = self.dashboard {
+            let pnl_timer = dashboard.start_pnl_timer(
+                self.state.clone(),
+                self.shutdown_tx.subscribe(),
+            );
+            dashboard_tasks.push(pnl_timer);
+        }
 
         // Create strategy loop
         let mut strategy = StrategyLoop::new(
@@ -266,7 +294,7 @@ impl LiveMode {
         };
 
         // Graceful shutdown
-        self.shutdown(&mut strategy, obs_tasks).await;
+        self.shutdown(&mut strategy, obs_tasks, dashboard_tasks).await;
 
         result
     }
@@ -351,6 +379,7 @@ impl LiveMode {
         &self,
         strategy: &mut StrategyLoop<D, E>,
         obs_tasks: Vec<tokio::task::JoinHandle<()>>,
+        dashboard_tasks: Vec<tokio::task::JoinHandle<()>>,
     )
     where
         D: crate::data_source::DataSource,
@@ -367,13 +396,20 @@ impl LiveMode {
         // Shutdown strategy (which shuts down data source and executor)
         strategy.shutdown().await;
 
-        // Wait for observability tasks with timeout
+        // Wait for observability and dashboard tasks with timeout
         let timeout = Duration::from_secs(self.config.shutdown_timeout_secs);
         for handle in obs_tasks {
             match tokio::time::timeout(timeout, handle).await {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => warn!("Observability task panicked: {}", e),
                 Err(_) => warn!("Observability task timed out during shutdown"),
+            }
+        }
+        for handle in dashboard_tasks {
+            match tokio::time::timeout(timeout, handle).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => warn!("Dashboard task panicked: {}", e),
+                Err(_) => warn!("Dashboard task timed out during shutdown"),
             }
         }
 
