@@ -1,6 +1,6 @@
 import { useDashboardState } from "@/hooks";
 import { formatUsd } from "@/lib/types";
-import { MetricsCards } from "@/components/dashboard";
+import { MetricsCards, EquityCurve } from "@/components/dashboard";
 
 /**
  * Main dashboard page showing trading metrics, markets, and logs.
@@ -114,14 +114,9 @@ export function Dashboard() {
         )}
       </div>
 
-      {/* Placeholder for equity curve and logs - to be added in subsequent tasks */}
+      {/* Equity Curve and Logs */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-        <div className="rounded-lg border border-border bg-card p-4">
-          <h3 className="mb-2 font-semibold">Equity Curve</h3>
-          <div className="flex h-48 items-center justify-center text-muted-foreground">
-            Chart component coming soon
-          </div>
-        </div>
+        <EquityCurve />
         <div className="rounded-lg border border-border bg-card p-4">
           <h3 className="mb-2 font-semibold">Recent Logs</h3>
           <div className="flex h-48 items-center justify-center text-muted-foreground">

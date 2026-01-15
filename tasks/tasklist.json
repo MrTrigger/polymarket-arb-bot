@@ -273,7 +273,7 @@
       "id": "phase4-equity",
       "title": "Phase 4: Create EquityCurve chart",
       "description": "Lightweight Charts line chart for cumulative P&L. Dark theme. Time on X-axis, USDC on Y. Crosshair with values. Auto-scale. Real-time updates.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["phase4-metrics"],
       "files": ["frontend/src/components/dashboard/EquityCurve.tsx"],
       "acceptance": [

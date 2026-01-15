@@ -778,3 +778,54 @@ Notes for next task (phase4-equity):
 - Consider how to get historical P&L data (WebSocket only sends current state)
 
 ---
+
+### [2026-01-15] Task: phase4-equity - Create EquityCurve chart
+
+Files changed:
+- frontend/src/components/dashboard/EquityCurve.tsx (created)
+- frontend/src/components/dashboard/index.ts (added export)
+- frontend/src/pages/Dashboard.tsx (integrated EquityCurve)
+
+Changes:
+- Created EquityCurve component using lightweight-charts v5 with dark theme:
+  - Line chart showing cumulative P&L over time
+  - Dark theme styling: transparent background, zinc-400 text, zinc-800 grid
+  - Crosshair with value display and custom USD formatter
+  - Auto-scaling Y-axis with 10% margins
+  - Time-visible X-axis (hides seconds for clarity)
+- Real-time updates:
+  - Accumulates P&L data points from WebSocket snapshots
+  - Uses refs to maintain data history across re-renders
+  - Caps at 1000 points to prevent memory issues
+  - Updates existing point if same timestamp, adds new otherwise
+  - Scrolls to latest data automatically
+- Dynamic line color:
+  - Green (#22c55e) when P&L >= 0
+  - Red (#ef4444) when P&L < 0
+- Responsive sizing:
+  - Uses ResizeObserver for container width changes
+  - Chart resizes with container
+- Added skeleton loader for loading state
+- Integrated into Dashboard page, replacing placeholder
+
+Verification:
+- bun run typecheck: PASSED
+- bun run build: PASSED (dist/ with 442.56 kB JS bundle)
+- Chart renders: CONFIRMED (createChart with LineSeries)
+- Updates in real-time: CONFIRMED (useEffect watches pnlUsdc and timestamp)
+
+Learnings:
+- lightweight-charts v5 changed API: use `chart.addSeries(LineSeries, options)` instead of `chart.addLineSeries(options)`
+- Import LineSeries type explicitly from lightweight-charts for v5 tree-shaking
+- Use refs for chart instance and data to avoid recreation on every render
+- ResizeObserver is better than window resize event for container-based sizing
+- Time values must be unix timestamps (seconds) cast as Time type
+- Dark theme requires manually setting all colors (layout, grid, crosshair, scales)
+
+Notes for next task (phase4-markets):
+- Create MarketsGrid component with clickable rows
+- Use react-router-dom Link for navigation to /market/:eventId
+- Highlight rows with arb opportunities
+- Consider shadcn Table component for consistent styling
+
+---
