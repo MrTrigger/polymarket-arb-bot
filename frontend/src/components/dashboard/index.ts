@@ -5,3 +5,4 @@ export {
   CircuitBreakerStatus,
   CircuitBreakerStatusSkeleton,
 } from "./CircuitBreakerStatus";
+export { LogWindow, LogWindowSkeleton } from "./LogWindow";

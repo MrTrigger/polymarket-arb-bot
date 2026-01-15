@@ -930,3 +930,66 @@ Notes for next task (phase4-logs):
 - Uses recentLogs from useDashboardState hook (last 100)
 
 ---
+
+### [2026-01-15] Task: phase4-logs - Create LogWindow component
+
+Files changed:
+- frontend/src/components/dashboard/LogWindow.tsx (created)
+- frontend/src/components/dashboard/index.ts (added export)
+- frontend/src/pages/Dashboard.tsx (integrated LogWindow)
+- frontend/src/components/ui/collapsible.tsx (added via shadcn)
+- frontend/src/components/ui/input.tsx (added via shadcn)
+- frontend/src/components/ui/badge.tsx (added via shadcn)
+
+Changes:
+- Added shadcn components: collapsible, input, badge
+- Created LogWindow component with comprehensive features:
+  - Collapsible panel using shadcn Collapsible
+  - Level filter buttons for ERROR, WARN, INFO, DEBUG, TRACE
+  - Text search input for filtering by message, target, or event_id
+  - Auto-scroll to latest logs with manual scroll detection
+  - Color-coded log entries by level:
+    - ERROR: red (with red background highlight)
+    - WARN: yellow
+    - INFO: zinc-300 (light gray)
+    - DEBUG: zinc-500 (gray)
+    - TRACE: zinc-600 (dark gray)
+  - Log count badge showing filtered/total count
+  - Error/warning count badges in header
+  - Formatted timestamp display (HH:MM:SS.mmm)
+  - Shortened target module path for readability
+  - Auto/Manual scroll toggle indicator
+- Created LogLine subcomponent for individual log entries
+- Created LogWindowSkeleton for loading state
+- Integrated into Dashboard page, replacing placeholder
+
+Key features:
+- LOG_LEVEL_CONFIG constant with icon, color, bgColor per level
+- useMemo for efficient log filtering
+- useCallback for stable toggle/scroll handlers
+- useRef for scroll container and log count tracking
+- Auto-scroll disables when user scrolls up, re-enables at bottom
+
+Verification:
+- bun run typecheck: PASSED
+- bun run build: PASSED (469.32 kB JS bundle)
+- Shows logs: CONFIRMED (recentLogs from useDashboardState)
+- Filter works: CONFIRMED (level toggle + search input)
+- Auto-scrolls: CONFIRMED (scrollRef.scrollTop = scrollHeight)
+
+Learnings:
+- shadcn Collapsible uses radix-ui primitives under the hood
+- Track scroll position to detect user scroll vs auto-scroll
+- scrollHeight - scrollTop - clientHeight < threshold for "at bottom" check
+- Badge component useful for count indicators
+- Input component integrates well with absolute-positioned icons
+- Font mono (font-family: monospace) essential for log readability
+- padEnd() useful for aligning fixed-width level labels
+
+Notes for next task (phase4-dashboard):
+- Dashboard page now has all Phase 4 components integrated
+- Grid layout already in place (grid-cols-2 for Equity/Logs)
+- Next task verifies all components visible and layout looks good
+- May want to adjust spacing/sizing for optimal desktop experience
+
+---

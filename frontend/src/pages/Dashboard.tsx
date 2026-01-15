@@ -4,6 +4,7 @@ import {
   EquityCurve,
   MarketsGrid,
   CircuitBreakerStatus,
+  LogWindow,
 } from "@/components/dashboard";
 
 /**
@@ -59,12 +60,7 @@ export function Dashboard() {
       {/* Equity Curve and Logs */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
         <EquityCurve />
-        <div className="rounded-lg border border-border bg-card p-4">
-          <h3 className="mb-2 font-semibold">Recent Logs</h3>
-          <div className="flex h-48 items-center justify-center text-muted-foreground">
-            Log window component coming soon
-          </div>
-        </div>
+        <LogWindow />
       </div>
     </div>
   );
