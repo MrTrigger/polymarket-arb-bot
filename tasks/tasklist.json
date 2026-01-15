@@ -197,7 +197,7 @@
       "id": "phase3-types",
       "title": "Phase 3: Create TypeScript types",
       "description": "Create types.ts matching Rust structs: DashboardSnapshot, MetricsSnapshot, ActiveMarket, Position, Trade, LogEntry, Anomaly, ControlState, EquityPoint.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["phase3-scaffold"],
       "files": ["frontend/src/lib/types.ts"],
       "acceptance": [

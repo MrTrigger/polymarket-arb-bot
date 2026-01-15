@@ -525,3 +525,60 @@ Notes for next task (phase3-types):
 - Match exact field names from Rust serialization
 
 ---
+
+### [2026-01-15] Task: phase3-types - Create TypeScript types
+
+Files changed:
+- frontend/src/lib/types.ts (created)
+
+Changes:
+- Created comprehensive TypeScript types matching Rust dashboard structs:
+  - `DashboardSnapshot` - Main WebSocket payload type
+  - `MetricsSnapshot` - Trading metrics (P&L, trades, volume, win rate)
+  - `ActiveMarket` - Active market with order books and arb spread
+  - `OrderBookSummary` - Order book best bid/ask
+  - `Position` - Position state with exposure and imbalance
+  - `ControlState` - Circuit breaker and trading flags
+  - `Trade` - Trade record with full fill details
+  - `LogEntry` - Structured log entries
+  - `Anomaly` / `AnomalySeverity` - Anomaly alerts
+  - `EquityPoint` - Equity curve data point
+  - `Session` / `MarketSession` - REST API types
+  - `PaginatedResponse<T>` - Generic pagination wrapper
+  - `ApiError` - Error response type
+- Type aliases for enums: TradeSide, OrderType, TradeStatus, Outcome, LogLevel, BotMode, ExitReason, InventoryState
+- Helper utility functions:
+  - `parseDecimal()` - Parse decimal string to number
+  - `formatUsd()` - Format as USD currency
+  - `formatPercent()` - Format as percentage
+  - `formatBps()` - Format basis points
+  - `formatTimestamp()` - Format ISO timestamp
+  - `formatTimeRemaining()` - Format seconds as mm:ss
+- All Decimal fields use `string` type (Rust serializes Decimal as string for precision)
+- All DateTime fields use `string` type (ISO 8601 format)
+- All UUID fields use `string` type
+
+Verification:
+- bun run typecheck: PASSED
+- Types match Rust serialization: CONFIRMED (field names and types match state.rs and types.rs)
+
+Learnings:
+- Rust Decimal serializes to string in JSON for precision preservation
+- Optional/nullable fields use `T | null` (not `T | undefined`)
+- Enum string literals must match serde rename_all attribute:
+  - BotMode: lowercase (live, paper, shadow, backtest)
+  - ExitReason: snake_case (graceful, crash, circuit_breaker, manual)
+  - TradeSide/OrderType/TradeStatus: UPPERCASE (BUY, SELL, MARKET, etc.)
+  - LogLevel: UPPERCASE (TRACE, DEBUG, INFO, WARN, ERROR)
+  - AnomalySeverity: lowercase (low, medium, high, critical)
+  - Outcome: lowercase (yes, no)
+
+Notes for next task (phase3-websocket):
+- Create useWebSocket hook in frontend/src/hooks/useWebSocket.ts
+- Connect to ws://localhost:3001 (configurable)
+- Auto-reconnect with exponential backoff
+- Parse incoming JSON as DashboardSnapshot
+- Expose ConnectionStatus type for UI
+- Handle connection errors gracefully
+
+---
