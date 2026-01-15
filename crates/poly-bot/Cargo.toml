@@ -58,6 +58,9 @@ hex = { workspace = true }
 # UUID for session/trade IDs
 uuid = { workspace = true }
 
+# Synchronization
+parking_lot = { workspace = true }
+
 # CSV for backtesting examples
 csv = "1.3"
 

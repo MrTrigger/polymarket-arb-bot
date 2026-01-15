@@ -111,7 +111,7 @@
       "id": "phase2-state",
       "title": "Phase 2: Create DashboardState struct",
       "description": "Aggregate struct containing: MetricsSnapshot, active markets, recent trades, order book summaries, positions, control flags, logs, anomalies. Lock-free snapshot creation from GlobalState DashMaps.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["phase1-mod"],
       "files": ["crates/poly-bot/src/dashboard/state.rs"],
       "acceptance": [

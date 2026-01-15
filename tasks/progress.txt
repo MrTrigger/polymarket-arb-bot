@@ -314,3 +314,63 @@ Notes for next task (phase2-state):
 - Must be lock-free for snapshot creation
 
 ---
+
+### [2026-01-15] Task: phase2-state - Create DashboardState struct
+
+Files changed:
+- crates/poly-bot/src/dashboard/state.rs (created)
+- crates/poly-bot/src/dashboard/mod.rs (added state module)
+- crates/poly-bot/Cargo.toml (added parking_lot)
+- Cargo.toml (added parking_lot to workspace)
+
+Changes:
+- Created `DashboardState` - main aggregate struct for WebSocket broadcast containing:
+  - `timestamp` - Snapshot time
+  - `metrics` - MetricsSnapshotJson (P&L, trades, volume, etc.)
+  - `markets` - Vec<ActiveMarketState> (order books, arb spread)
+  - `positions` - Vec<PositionState> (inventory by market)
+  - `control` - ControlState (trading enabled, circuit breaker)
+  - `recent_trades` - Vec<TradeRecord> (last 100)
+  - `recent_logs` - Vec<LogEntry> (last 100)
+  - `anomalies` - Vec<AnomalyState>
+- Supporting types:
+  - `MetricsSnapshotJson` - JSON-friendly metrics (Decimals as strings)
+  - `ActiveMarketState` - Market with order book summaries and arb calculation
+  - `OrderBookSummary` - Best bid/ask with spread
+  - `PositionState` - Position with exposure and imbalance
+  - `ControlState` - Control flags snapshot
+  - `AnomalyState` / `AnomalySeverity` - Anomaly alerts
+- `DashboardStateManager` - Thread-safe state manager with:
+  - parking_lot::RwLock for recent trades/logs/anomalies
+  - `snapshot()` method combining GlobalState + managed state
+  - Ring buffer behavior for trades/logs (cap at 100)
+- Helper functions:
+  - `create_shared_dashboard_state_manager()` - Creates Arc<DashboardStateManager>
+
+Lock-free design:
+- `DashboardState::from_global_state()` uses only DashMap iteration and atomic reads
+- No Mutex locks on the hot path
+- parking_lot::RwLock only for managed state (brief acquisitions)
+
+Verification:
+- cargo clippy -p poly-bot -- -D warnings: PASSED
+- cargo test -p poly-bot dashboard::state: PASSED (13 tests)
+- cargo test -p poly-bot: PASSED (1012+ tests)
+- Serializes to JSON: CONFIRMED (test_dashboard_state_serialization)
+- No mutex locks in snapshot(): CONFIRMED (uses atomics + DashMap)
+
+Learnings:
+- MetricsSnapshotJson uses String for Decimals (JSON precision preservation)
+- parking_lot::RwLock is faster than std::sync::RwLock for brief locks
+- DashMap iteration is lock-free (each entry has its own lock)
+- Calculate derived values before consuming struct fields to avoid partial moves
+- Arb spread calculation: 1.0 - YES_ask - NO_ask (positive = opportunity)
+
+Notes for next task (phase2-ws-server):
+- DashboardState is ready for WebSocket broadcast
+- Use DashboardStateManager for thread-safe state access
+- Server should call snapshot() at broadcast_interval_ms
+- Consider using tokio-tungstenite for WebSocket implementation
+- Need to handle multiple client connections
+
+---

@@ -1660,6 +1660,7 @@ dependencies = [
  "ethers-core",
  "futures-util",
  "hex",
+ "parking_lot",
  "poly-common",
  "poly-market",
  "reqwest",
