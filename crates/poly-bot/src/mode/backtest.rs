@@ -112,7 +112,7 @@ impl BacktestModeConfig {
         Ok(Self {
             data_source: replay_config,
             executor: executor_config,
-            strategy: StrategyConfig::from_trading_config(&config.trading),
+            strategy: StrategyConfig::from_trading_config(&config.trading, (config.window_duration.minutes() * 60) as i64),
             observability: config.observability.clone(),
             initial_balance: dec!(10000),
             shutdown_timeout_secs: 30,

@@ -79,7 +79,7 @@ impl ShadowModeConfig {
         Self {
             data_source: LiveDataSourceConfig::default(),
             executor: executor_config,
-            strategy: StrategyConfig::from_trading_config(&config.trading),
+            strategy: StrategyConfig::from_trading_config(&config.trading, (config.window_duration.minutes() * 60) as i64),
             observability: config.observability.clone(),
             virtual_balance: Decimal::new(10000, 0),
             shutdown_timeout_secs: 30,

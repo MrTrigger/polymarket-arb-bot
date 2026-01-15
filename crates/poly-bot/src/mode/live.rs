@@ -78,7 +78,7 @@ impl LiveModeConfig {
         Self {
             data_source: LiveDataSourceConfig::default(),
             executor: LiveExecutorConfig::from_execution_config(&config.execution),
-            strategy: StrategyConfig::from_trading_config(&config.trading),
+            strategy: StrategyConfig::from_trading_config(&config.trading, (config.window_duration.minutes() * 60) as i64),
             observability: config.observability.clone(),
             dashboard: config.dashboard.clone(),
             initial_balance: Decimal::new(1000, 0),

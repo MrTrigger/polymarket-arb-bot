@@ -73,10 +73,10 @@ impl Phase {
     /// Optimized via parameter sweep with dynamic ATR (15m markets, 18.2% ROI).
     pub fn min_confidence(&self) -> Decimal {
         match self {
-            Phase::Early => dec!(0.85), // Very selective (optimized)
-            Phase::Build => dec!(0.75), // Selective (optimized)
-            Phase::Core => dec!(0.65),  // Active (optimized)
-            Phase::Final => dec!(0.45), // Most active (optimized)
+            Phase::Early => dec!(0.80), // Very selective (optimized from sweep)
+            Phase::Build => dec!(0.60), // Selective (optimized from sweep)
+            Phase::Core => dec!(0.50),  // Active (optimized from sweep)
+            Phase::Final => dec!(0.40), // Most active (optimized from sweep)
         }
     }
 
@@ -357,16 +357,23 @@ impl PositionManager {
         let phase = Phase::from_minutes(minutes);
         let confidence = self.calculate_confidence(distance_dollars, minutes);
 
-        // 1. Check edge-based confidence threshold
-        // Required confidence = favorable_price + min_edge
-        // min_edge = max_edge_factor * (seconds_remaining / window_duration_secs)
-        let time_factor = if window_duration_secs > 0 {
-            Decimal::new(seconds_remaining, 0) / Decimal::new(window_duration_secs, 0)
+        // 1. Check confidence threshold
+        // When max_edge_factor > 0: use edge-based (required = price + edge)
+        // When max_edge_factor == 0: use phase-based (legacy mode, best in backtest)
+        let required_confidence = if max_edge_factor > Decimal::ZERO {
+            // Edge-based: required confidence = favorable_price + min_edge
+            // min_edge = max_edge_factor * (seconds_remaining / window_duration_secs)
+            let time_factor = if window_duration_secs > 0 {
+                Decimal::new(seconds_remaining, 0) / Decimal::new(window_duration_secs, 0)
+            } else {
+                Decimal::ZERO
+            };
+            let min_edge = max_edge_factor * time_factor;
+            favorable_price + min_edge
         } else {
-            Decimal::ZERO
+            // Legacy phase-based thresholds (optimized via sweep: 18.2% ROI)
+            phase.min_confidence()
         };
-        let min_edge = max_edge_factor * time_factor;
-        let required_confidence = favorable_price + min_edge;
 
         if confidence < required_confidence {
             return TradeDecision::Skip(SkipReason::LowConfidence);
@@ -552,11 +559,11 @@ mod tests {
 
     #[test]
     fn test_phase_min_confidence() {
-        // Optimized thresholds from param sweep with dynamic ATR
-        assert_eq!(Phase::Early.min_confidence(), dec!(0.85));
-        assert_eq!(Phase::Build.min_confidence(), dec!(0.75));
-        assert_eq!(Phase::Core.min_confidence(), dec!(0.65));
-        assert_eq!(Phase::Final.min_confidence(), dec!(0.45));
+        // Optimized thresholds from param sweep with dynamic ATR (18.2% ROI)
+        assert_eq!(Phase::Early.min_confidence(), dec!(0.80));
+        assert_eq!(Phase::Build.min_confidence(), dec!(0.60));
+        assert_eq!(Phase::Core.min_confidence(), dec!(0.50));
+        assert_eq!(Phase::Final.min_confidence(), dec!(0.40));
     }
 
     #[test]

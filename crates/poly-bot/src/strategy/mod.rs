@@ -450,6 +450,9 @@ pub struct StrategyConfig {
     pub max_consecutive_failures: u32,
     /// Whether to block trades on high toxic severity.
     pub block_on_toxic_high: bool,
+    /// Window duration in seconds (900 for 15min, 3600 for 1h).
+    /// Used for edge requirement calculation in directional trading.
+    pub window_duration_secs: i64,
 }
 
 impl Default for StrategyConfig {
@@ -460,13 +463,14 @@ impl Default for StrategyConfig {
             sizing_config: SizingConfig::default(),
             max_consecutive_failures: 3,
             block_on_toxic_high: true,
+            window_duration_secs: 900, // 15-minute windows by default
         }
     }
 }
 
 impl StrategyConfig {
-    /// Create from trading config.
-    pub fn from_trading_config(config: &TradingConfig) -> Self {
+    /// Create from trading config with window duration.
+    pub fn from_trading_config(config: &TradingConfig, window_duration_secs: i64) -> Self {
         Self {
             arb_thresholds: ArbThresholds {
                 early: config.min_margin_early,
@@ -480,7 +484,14 @@ impl StrategyConfig {
             toxic_config: ToxicFlowConfig::default(),
             max_consecutive_failures: 3,
             block_on_toxic_high: true,
+            window_duration_secs,
         }
+    }
+
+    /// Set the window duration on an existing config.
+    pub fn with_window_duration(mut self, window_duration_secs: i64) -> Self {
+        self.window_duration_secs = window_duration_secs;
+        self
     }
 }
 
@@ -1341,18 +1352,27 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                         else if atr_mult > dec!(0.25) { dec!(0.40) }
                         else { dec!(0.20) };
 
-                    // Calculate edge-based required confidence
+                    // Calculate required confidence (matches position.rs logic)
                     let favorable_price = opp.favorable_price();
                     let max_edge_factor = self.engines_config.directional.max_edge_factor;
-                    let window_duration_secs: i64 = 900; // 15-minute windows
-                    let time_factor = Decimal::new(seconds_remaining, 0) / Decimal::new(window_duration_secs, 0);
-                    let min_edge = max_edge_factor * time_factor;
-                    let required_conf = favorable_price + min_edge;
+                    let window_duration_secs = self.config.window_duration_secs;
+                    let (required_conf, min_edge) = if max_edge_factor > Decimal::ZERO {
+                        // Edge-based: required = price + (edge_factor * time_remaining / window_duration)
+                        let time_factor = Decimal::new(seconds_remaining, 0) / Decimal::new(window_duration_secs, 0);
+                        let edge = max_edge_factor * time_factor;
+                        (favorable_price + edge, edge)
+                    } else {
+                        // Legacy phase-based thresholds (best in backtest)
+                        (phase.min_confidence(), Decimal::ZERO)
+                    };
 
                     trace!(
-                        "📈 Confidence {} {}: dist${:.2} atr${:.2} atr_mult={:.2} | time_conf={:.2} dist_conf={:.2} | combined={:.2} need={:.2} (price={:.2}+edge={:.2}) phase={}",
+                        "📈 Confidence {} {}: dist${:.2} atr${:.2} atr_mult={:.2} | time_conf={:.2} dist_conf={:.2} | combined={:.2} need={:.2} ({}={:.2}) phase={}",
                         event_id, asset, distance_dollars.abs(), atr, atr_mult,
-                        time_conf, dist_conf, pm_conf, required_conf, favorable_price, min_edge, phase
+                        time_conf, dist_conf, pm_conf, required_conf,
+                        if max_edge_factor > Decimal::ZERO { "price+edge" } else { "phase_thresh" },
+                        if max_edge_factor > Decimal::ZERO { favorable_price + min_edge } else { phase.min_confidence() },
+                        phase
                     );
 
                     // Check if we should trade based on edge-based confidence threshold and budget
@@ -1368,8 +1388,10 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                         position::TradeDecision::Skip(reason) => {
                             // Log skips at debug level to reduce spam (low confidence is very common)
                             debug!(
-                                "⏭️ SKIP {} {} {:?}: signal={:?} dist=${:.2} atr_mult={:.2} conf={:.2} need={:.2} (price={:.2}+edge={:.2}) phase={}",
-                                event_id, asset, reason, opp.signal, distance_dollars.abs(), atr_mult, pm_conf, required_conf, favorable_price, min_edge, phase
+                                "⏭️ SKIP {} {} {:?}: signal={:?} dist=${:.2} atr_mult={:.2} conf={:.2} need={:.2} ({}={:.2}) phase={}",
+                                event_id, asset, reason, opp.signal, distance_dollars.abs(), atr_mult, pm_conf, required_conf,
+                                if max_edge_factor > Decimal::ZERO { "price+edge" } else { "phase_thresh" },
+                                required_conf, phase
                             );
                             // Only record decision for meaningful skips, not low confidence
                             if !matches!(reason, position::SkipReason::LowConfidence) {

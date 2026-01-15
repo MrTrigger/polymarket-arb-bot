@@ -77,7 +77,7 @@ class PMConfig:
     core_budget: float = 0.30
     final_budget: float = 0.30
 
-    # Confidence thresholds per phase
+    # Confidence thresholds per phase (legacy, used if edge_factor is 0)
     early_conf: float = 0.80
     build_conf: float = 0.60
     core_conf: float = 0.50
@@ -96,6 +96,13 @@ class PMConfig:
     trades_per_phase: int = 15
     size_mult_min: float = 0.5
     size_mult_max: float = 2.0
+
+    # Edge-based confidence requirement (NEW)
+    # Required confidence = favorable_price + (max_edge_factor * time_remaining / window_duration)
+    # At window start: need price + max_edge_factor
+    # At window end: need price (no extra edge)
+    # Set to 0 to use legacy phase-based thresholds
+    max_edge_factor: float = 0.20
 
 
 def get_phase_for_window(mins_remaining: float, window_mins: float) -> Tuple[str, float, float]:
@@ -320,8 +327,21 @@ def run_backtest_with_config(df: pd.DataFrame, cfg: PMConfig, budget_per_market:
             # Get rolling ATR at this point (only past data, no look-ahead)
             dynamic_atr = atr_by_idx.get(idx, 0.0)
 
-            phase_name, phase_pct, min_confidence = get_phase(mins_left, cfg, window_mins)
+            phase_name, phase_pct, _ = get_phase(mins_left, cfg, window_mins)
             confidence = calculate_confidence(distance, mins_left, window_mins, asset, dynamic_atr)
+
+            # Calculate minimum confidence threshold
+            if cfg.max_edge_factor > 0:
+                # Edge-based threshold: required_confidence = favorable_price + (edge * time_factor)
+                # time_factor decays from 1.0 at window start to 0 at window end
+                time_factor = mins_left / window_mins
+                min_edge = cfg.max_edge_factor * time_factor
+                # Approximate favorable price as 0.50 (in real trading, this comes from order book)
+                favorable_price = 0.50
+                min_confidence = favorable_price + min_edge
+            else:
+                # Legacy phase-based threshold
+                _, _, min_confidence = get_phase(mins_left, cfg, window_mins)
 
             if confidence < min_confidence:
                 continue
@@ -499,27 +519,32 @@ def run_parameter_sweep(df: pd.DataFrame, window_mins: float = 15.0) -> List[Dic
     """Run parameter sweep to find optimal config."""
     configs = []
 
-    # Generate parameter combinations (reduced for speed)
-    for strong_ratio in [0.75, 0.78, 0.82]:
-        for lean_ratio in [0.58, 0.61, 0.65]:
-            if lean_ratio >= strong_ratio:
-                continue
-            for base_lean in [20, 30, 40]:
-                for base_conv in [40, 60, 80]:
-                    if base_conv <= base_lean:
-                        continue
-                    for early_conf in [0.75, 0.80, 0.85]:
-                        for final_conf in [0.35, 0.40, 0.45]:
-                            configs.append(PMConfig(
-                                strong_ratio=strong_ratio,
-                                lean_ratio=lean_ratio,
-                                base_lean=base_lean,
-                                base_conviction=base_conv,
-                                early_conf=early_conf,
-                                build_conf=(early_conf + final_conf) / 2 + 0.1,
-                                core_conf=(early_conf + final_conf) / 2,
-                                final_conf=final_conf,
-                            ))
+    # Generate parameter combinations
+    # Edge factor sweep: 0 (legacy), 0.05, 0.10, 0.15, 0.20, 0.25, 0.30
+    for max_edge_factor in [0.0, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30]:
+        for strong_ratio in [0.75, 0.78, 0.82]:
+            for lean_ratio in [0.58, 0.61, 0.65]:
+                if lean_ratio >= strong_ratio:
+                    continue
+                for base_lean in [20, 30, 40]:
+                    for base_conv in [40, 60, 80]:
+                        if base_conv <= base_lean:
+                            continue
+                        # For edge-based mode, we still need phase thresholds for fallback
+                        # but they don't affect the edge-based confidence check
+                        for early_conf in [0.75, 0.80, 0.85]:
+                            for final_conf in [0.35, 0.40, 0.45]:
+                                configs.append(PMConfig(
+                                    strong_ratio=strong_ratio,
+                                    lean_ratio=lean_ratio,
+                                    base_lean=base_lean,
+                                    base_conviction=base_conv,
+                                    early_conf=early_conf,
+                                    build_conf=(early_conf + final_conf) / 2 + 0.1,
+                                    core_conf=(early_conf + final_conf) / 2,
+                                    final_conf=final_conf,
+                                    max_edge_factor=max_edge_factor,
+                                ))
 
     print(f"Testing {len(configs)} parameter combinations...")
 
@@ -540,6 +565,7 @@ def run_parameter_sweep(df: pd.DataFrame, window_mins: float = 15.0) -> List[Dic
                     "base_conviction": cfg.base_conviction,
                     "early_conf": cfg.early_conf,
                     "final_conf": cfg.final_conf,
+                    "max_edge_factor": cfg.max_edge_factor,
                 },
                 "trades": r["trades"],
                 "markets": r["markets"],
@@ -702,7 +728,8 @@ def main():
             print(f"    Trades: {r['trades']} | Capital: ${r['capital']:,.0f} | P&L: ${r['pnl']:,.2f}")
             cfg = r['config']
             print(f"    Ratios: {cfg['strong_ratio']}/{cfg['lean_ratio']} | Thresholds: ${cfg['base_lean']}/${cfg['base_conviction']}")
-            print(f"    Confidence: early={cfg['early_conf']}, final={cfg['final_conf']}")
+            edge_str = f"{cfg['max_edge_factor']:.0%}" if cfg['max_edge_factor'] > 0 else "legacy"
+            print(f"    Edge Factor: {edge_str} | Confidence: early={cfg['early_conf']}, final={cfg['final_conf']}")
 
         # Get best config results
         if sweep_results:
@@ -715,6 +742,7 @@ def main():
                 final_conf=sweep_results[0]['config']['final_conf'],
                 build_conf=(sweep_results[0]['config']['early_conf'] + sweep_results[0]['config']['final_conf']) / 2 + 0.1,
                 core_conf=(sweep_results[0]['config']['early_conf'] + sweep_results[0]['config']['final_conf']) / 2,
+                max_edge_factor=sweep_results[0]['config']['max_edge_factor'],
             )
             pm_best = run_backtest_with_config(df, best_cfg, window_mins=args.window)
 

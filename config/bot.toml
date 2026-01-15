@@ -168,16 +168,16 @@ min_favorable_depth = 50.0     # Minimum depth on favorable side ($50)
 strong_threshold_late_bps = 9  # 0.009% for late phase (factor 0.3 of 0.03%)
 lean_threshold_late_bps = 6    # 0.006% for late phase (factor 0.3 of 0.02%)
 
-# Signal allocation ratios (OPTIMIZED: 0.90 strong ratio is best)
-strong_up_ratio = 0.90         # Strong UP signal: 90% YES, 10% NO
-lean_up_ratio = 0.55           # Lean UP signal: 55% YES, 45% NO (low ratio since lean signals marginal)
+# Signal allocation ratios (OPTIMIZED via param sweep: 0.82/0.65)
+strong_up_ratio = 0.82         # Strong UP signal: 82% YES, 18% NO
+lean_up_ratio = 0.65           # Lean UP signal: 65% YES, 35% NO
 neutral_ratio = 0.50           # Neutral signal: 50/50
 
-# Dynamic edge requirement (replaces fixed phase thresholds)
+# Dynamic edge requirement
 # Required confidence = favorable_price + (max_edge_factor * time_remaining / window_duration)
-# At window start: need price + 20% edge. At window end: need price + 0% edge.
-# Example: price=0.80, 7.5min left in 15min window -> need 0.80 + 0.20*0.5 = 0.90 confidence
-max_edge_factor = 0.20         # 20% edge required at window start, decays linearly to 0
+# Set to 0 to use legacy phase-based thresholds (slightly better in backtest: 18.2% vs 18.0%)
+# At window start: need price + max_edge_factor. At window end: need price + 0.
+max_edge_factor = 0.0          # 0 = use phase-based thresholds (best in backtest)
 
 [engines.maker]
 # Maker engine: Passive limit orders for rebates
