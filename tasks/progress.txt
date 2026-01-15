@@ -423,3 +423,56 @@ Notes for next task (phase2-rest-api):
 - Consider shared state between WS server and REST API
 
 ---
+
+### [2026-01-15] Task: phase2-rest-api - Implement REST API endpoints
+
+Files changed:
+- Cargo.toml (added axum and tower-http to workspace dependencies)
+- crates/poly-bot/Cargo.toml (added axum and tower-http)
+- crates/poly-bot/src/dashboard/api.rs (created)
+- crates/poly-bot/src/dashboard/mod.rs (added api module)
+
+Changes:
+- Added `axum` (v0.8) and `tower-http` (v0.6) to workspace for HTTP server
+- Created REST API module with 5 endpoints:
+  - `GET /api/health` - Health check endpoint
+  - `GET /api/sessions` - List all sessions from ClickHouse
+  - `GET /api/sessions/:id/equity` - Equity curve (P&L snapshots) for a session
+  - `GET /api/sessions/:id/trades` - Trades for a session (paginated)
+  - `GET /api/sessions/:id/logs` - Logs for a session (paginated with level/search filters)
+  - `GET /api/sessions/:id/markets` - Market sessions for a session
+- API types:
+  - `ApiError` - Standardized error responses
+  - `PaginatedResponse<T>` - Generic pagination wrapper
+  - `PaginationParams` / `LogFilterParams` - Query parameters
+  - `ApiState` - Shared state with ClickHouse client
+- ClickHouse Row types for reading:
+  - `SessionApiRow`, `EquityPointRow`, `TradeApiRow`, `LogApiRow`, `MarketSessionApiRow`
+- Configuration:
+  - `ApiServerConfig` - Port, CORS settings
+  - `from_dashboard_config()` for integration with DashboardConfig
+- Helper functions:
+  - `create_api_router()` - Creates axum Router with all endpoints
+  - `run_api_server()` - Runs the server (blocking)
+  - `spawn_api_server()` - Spawns as background task
+
+Verification:
+- cargo clippy -p poly-bot -- -D warnings: PASSED
+- cargo test -p poly-bot: PASSED (1033 tests + 14 doc tests)
+- All 5 endpoints return JSON: CONFIRMED (handlers return Json<T>)
+- Pagination works for logs: CONFIRMED (LogFilterParams with page, page_size, level, search)
+
+Learnings:
+- axum 0.8 uses `{id}` syntax for path parameters instead of `:id`
+- ClickHouse Row types need both `Serialize` and `Deserialize` for fetch_all
+- clickhouse::serde::uuid and time helpers work for both read and write
+- CORS layer from tower-http allows frontend development on different port
+- axum State requires Arc<T> for sharing across handlers
+
+Notes for next task (phase2-integration):
+- API server and WebSocket server can share ClickHouse client
+- Need to wire dashboard capture to executor for trade events
+- Consider starting both servers from main.rs with graceful shutdown
+- P&L snapshot timer should use DashboardCapture.try_capture()
+
+---

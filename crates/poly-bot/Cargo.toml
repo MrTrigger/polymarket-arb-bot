@@ -61,6 +61,10 @@ uuid = { workspace = true }
 # Synchronization
 parking_lot = { workspace = true }
 
+# HTTP server
+axum = { workspace = true }
+tower-http = { workspace = true }
+
 # CSV for backtesting examples
 csv = "1.3"
 

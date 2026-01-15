@@ -141,7 +141,7 @@
       "id": "phase2-rest-api",
       "title": "Phase 2: Implement REST API endpoints",
       "description": "axum HTTP server with endpoints: GET /api/sessions, /api/sessions/:id/equity, /api/sessions/:id/trades, /api/sessions/:id/logs (paginated), /api/sessions/:id/markets. Query ClickHouse, return JSON.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["phase2-ws-server"],
       "files": ["crates/poly-bot/src/dashboard/api.rs"],
       "acceptance": [

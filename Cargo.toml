@@ -67,3 +67,7 @@ uuid = { version = "1.11", features = ["v4", "serde"] }
 
 # Synchronization
 parking_lot = "0.12"
+
+# HTTP server
+axum = { version = "0.8", features = ["macros"] }
+tower-http = { version = "0.6", features = ["cors", "fs"] }
