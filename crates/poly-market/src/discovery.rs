@@ -43,12 +43,6 @@ pub enum DiscoveryError {
 struct BinanceKline(Vec<serde_json::Value>);
 
 impl BinanceKline {
-    /// Get the close price from the kline.
-    fn close_price(&self) -> Option<Decimal> {
-        // Index 4 is the close price (as string)
-        self.0.get(4)?.as_str()?.parse().ok()
-    }
-
     /// Get the open price from the kline.
     fn open_price(&self) -> Option<Decimal> {
         // Index 1 is the open price (as string)
@@ -283,17 +277,17 @@ impl MarketDiscovery {
             if let Some(mut market) = self.parse_crypto_market(&event)? {
                 // For "Up or Down" markets with no strike in title:
                 // If the market is already in progress, fetch historical price
-                if market.strike_price.is_zero() && market.is_active() {
-                    if let Ok(Some(historical_price)) = self
+                if market.strike_price.is_zero()
+                    && market.is_active()
+                    && let Ok(Some(historical_price)) = self
                         .fetch_historical_spot_price(market.asset, market.window_start)
                         .await
-                    {
-                        debug!(
-                            "Setting strike price for {} from historical data: ${}",
-                            market.event_id, historical_price
-                        );
-                        market.strike_price = historical_price;
-                    }
+                {
+                    debug!(
+                        "Setting strike price for {} from historical data: ${}",
+                        market.event_id, historical_price
+                    );
+                    market.strike_price = historical_price;
                 }
 
                 // Track in known markets
@@ -351,7 +345,7 @@ impl MarketDiscovery {
         let slug_patterns = self.config.window_duration.slug_patterns();
 
         let matches_title = keywords.iter().any(|kw| title.contains(kw));
-        let matches_slug = event.slug.as_ref().map_or(false, |slug| {
+        let matches_slug = event.slug.as_ref().is_some_and(|slug| {
             let slug_lower = slug.to_lowercase();
             slug_patterns.iter().any(|p| slug_lower.contains(p))
         });

@@ -21,6 +21,7 @@
 
 pub mod api;
 pub mod config;
+pub mod dashboard;
 pub mod data_source;
 pub mod executor;
 pub mod mode;

@@ -55,6 +55,9 @@ ethers-core = { workspace = true }
 sha3 = { workspace = true }
 hex = { workspace = true }
 
+# UUID for session/trade IDs
+uuid = { workspace = true }
+
 # CSV for backtesting examples
 csv = "1.3"
 

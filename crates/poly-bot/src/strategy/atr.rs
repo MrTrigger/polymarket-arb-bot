@@ -13,6 +13,7 @@ use poly_common::types::CryptoAsset;
 
 /// A single price observation with timestamp.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct PricePoint {
     price: Decimal,
     timestamp: Instant,
@@ -65,36 +66,36 @@ impl AssetTracker {
         }
 
         // Update current window high/low
-        if let Some(high) = self.current_high {
-            if price > high {
-                self.current_high = Some(price);
-            }
+        if let Some(high) = self.current_high
+            && price > high
+        {
+            self.current_high = Some(price);
         }
-        if let Some(low) = self.current_low {
-            if price < low {
-                self.current_low = Some(price);
-            }
+        if let Some(low) = self.current_low
+            && price < low
+        {
+            self.current_low = Some(price);
         }
 
         // Check if window is complete
-        if let Some(start) = self.window_start {
-            if now.duration_since(start) >= self.window_duration {
-                // Complete the window
-                if let (Some(high), Some(low)) = (self.current_high, self.current_low) {
-                    let range = high - low;
-                    self.ranges.push_back(range);
+        if let Some(start) = self.window_start
+            && now.duration_since(start) >= self.window_duration
+        {
+            // Complete the window
+            if let (Some(high), Some(low)) = (self.current_high, self.current_low) {
+                let range = high - low;
+                self.ranges.push_back(range);
 
-                    // Keep only num_windows ranges
-                    while self.ranges.len() > self.num_windows {
-                        self.ranges.pop_front();
-                    }
+                // Keep only num_windows ranges
+                while self.ranges.len() > self.num_windows {
+                    self.ranges.pop_front();
                 }
-
-                // Start new window
-                self.window_start = Some(now);
-                self.current_high = Some(price);
-                self.current_low = Some(price);
             }
+
+            // Start new window
+            self.window_start = Some(now);
+            self.current_high = Some(price);
+            self.current_low = Some(price);
         }
 
         // Store price point (keep last minute for debugging)
@@ -143,8 +144,10 @@ impl AssetTracker {
 pub struct AtrTracker {
     trackers: std::collections::HashMap<CryptoAsset, AssetTracker>,
     /// Window duration for range calculation (default 1 minute).
+    #[allow(dead_code)]
     window_duration: Duration,
     /// Number of windows to average (default 5 = 5-minute ATR).
+    #[allow(dead_code)]
     num_windows: usize,
 }
 

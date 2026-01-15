@@ -73,3 +73,43 @@ Learnings:
 - Nullable types for optional fields (end_time, settlement fields)
 
 ---
+
+### [2026-01-15] Task: phase1-types - Create dashboard event types
+
+Files changed:
+- crates/poly-bot/src/dashboard/types.rs (created)
+- crates/poly-bot/src/dashboard/mod.rs (created)
+- crates/poly-bot/src/lib.rs (added dashboard module)
+- crates/poly-bot/Cargo.toml (added uuid dependency)
+- Cargo.toml (added uuid to workspace dependencies)
+
+Changes:
+- Created dashboard types module with 5 record types:
+  - `SessionRecord` - Bot session lifecycle tracking
+  - `TradeRecord` - Individual trade records with fill details
+  - `PnlSnapshot` - Periodic P&L for equity curve
+  - `LogEntry` - Structured log entries
+  - `MarketSessionUpdate` - Per-market metrics within a session
+- Added supporting enums: BotMode, ExitReason, DashboardOrderType, TradeStatus, TradeSide, PnlTrigger, LogLevel
+- Created `DashboardEvent` enum for capture channel
+- All types implement Serialize/Deserialize
+- Added UUID crate for session_id and trade_id
+
+Verification:
+- cargo clippy -p poly-bot -- -D warnings: PASSED
+- cargo test -p poly-bot dashboard: PASSED (13 tests)
+
+Learnings:
+- Uses rust_decimal::Decimal for all financial math (NOT Float64)
+- UUID v4 for unique identifiers (session_id, trade_id)
+- Outcome type reused from poly_common::types
+- TradeSide converts from poly_common::types::Side
+- LogLevel converts from tracing::Level for integration with tracing subscriber
+- clickhouse::Row derive deferred to processor (types module focuses on domain logic)
+
+Notes for next task (phase1-capture):
+- DashboardEvent enum is ready for the capture channel
+- Follow observability/capture.rs pattern exactly
+- Must use try_send() to avoid blocking hot path
+
+---

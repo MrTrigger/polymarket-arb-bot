@@ -407,6 +407,7 @@ impl TrackedMarket {
     }
 
     /// Get the position manager's budget remaining.
+    #[allow(dead_code)]
     fn budget_remaining(&self) -> Decimal {
         self.position_manager.budget_remaining()
     }
@@ -1455,34 +1456,34 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
 
         // CRITICAL: Update inventory immediately after fills to prevent over-trading.
         // This ensures subsequent orderbook updates see the correct position.
-        if yes_filled_size > Decimal::ZERO || no_filled_size > Decimal::ZERO {
-            if let Some(market) = self.markets.get_mut(&opportunity.event_id) {
-                if yes_filled_size > Decimal::ZERO {
-                    market.inventory.record_fill(Outcome::Yes, yes_filled_size, yes_filled_cost);
-                }
-                if no_filled_size > Decimal::ZERO {
-                    market.inventory.record_fill(Outcome::No, no_filled_size, no_filled_cost);
-                }
-
-                // Update global state inventory for sizing calculations
-                let pos = crate::state::InventoryPosition {
-                    event_id: opportunity.event_id.clone(),
-                    yes_shares: market.inventory.yes_shares,
-                    no_shares: market.inventory.no_shares,
-                    yes_cost_basis: market.inventory.yes_cost_basis,
-                    no_cost_basis: market.inventory.no_cost_basis,
-                    realized_pnl: market.inventory.realized_pnl,
-                };
-                self.state.market_data.update_inventory(&opportunity.event_id, pos);
-
-                debug!(
-                    "Inventory updated for {}: YES={} NO={} total_exposure={}",
-                    opportunity.event_id,
-                    market.inventory.yes_shares,
-                    market.inventory.no_shares,
-                    market.inventory.total_exposure()
-                );
+        if (yes_filled_size > Decimal::ZERO || no_filled_size > Decimal::ZERO)
+            && let Some(market) = self.markets.get_mut(&opportunity.event_id)
+        {
+            if yes_filled_size > Decimal::ZERO {
+                market.inventory.record_fill(Outcome::Yes, yes_filled_size, yes_filled_cost);
             }
+            if no_filled_size > Decimal::ZERO {
+                market.inventory.record_fill(Outcome::No, no_filled_size, no_filled_cost);
+            }
+
+            // Update global state inventory for sizing calculations
+            let pos = crate::state::InventoryPosition {
+                event_id: opportunity.event_id.clone(),
+                yes_shares: market.inventory.yes_shares,
+                no_shares: market.inventory.no_shares,
+                yes_cost_basis: market.inventory.yes_cost_basis,
+                no_cost_basis: market.inventory.no_cost_basis,
+                realized_pnl: market.inventory.realized_pnl,
+            };
+            self.state.market_data.update_inventory(&opportunity.event_id, pos);
+
+            debug!(
+                "Inventory updated for {}: YES={} NO={} total_exposure={}",
+                opportunity.event_id,
+                market.inventory.yes_shares,
+                market.inventory.no_shares,
+                market.inventory.total_exposure()
+            );
         }
 
         // Update volume metrics
@@ -1649,38 +1650,38 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
 
         // CRITICAL: Update inventory immediately after fills to prevent over-trading.
         // This ensures subsequent orderbook updates see the correct position.
-        if up_filled_size > Decimal::ZERO || down_filled_size > Decimal::ZERO {
-            if let Some(market) = self.markets.get_mut(&event_id) {
-                if up_filled_size > Decimal::ZERO {
-                    market.inventory.record_fill(Outcome::Yes, up_filled_size, up_filled_cost);
-                }
-                if down_filled_size > Decimal::ZERO {
-                    market.inventory.record_fill(Outcome::No, down_filled_size, down_filled_cost);
-                }
-
-                // Update global state inventory for sizing calculations
-                let pos = crate::state::InventoryPosition {
-                    event_id: event_id.clone(),
-                    yes_shares: market.inventory.yes_shares,
-                    no_shares: market.inventory.no_shares,
-                    yes_cost_basis: market.inventory.yes_cost_basis,
-                    no_cost_basis: market.inventory.no_cost_basis,
-                    realized_pnl: market.inventory.realized_pnl,
-                };
-                self.state.market_data.update_inventory(&event_id, pos);
-
-                // Record trade in position manager to update phase budgets
-                let seconds_remaining = market.state.seconds_remaining;
-                market.record_trade(total_volume, up_filled_cost, down_filled_cost, seconds_remaining);
-
-                debug!(
-                    "Inventory updated for {}: YES={} NO={} total_exposure={}",
-                    event_id,
-                    market.inventory.yes_shares,
-                    market.inventory.no_shares,
-                    market.inventory.total_exposure()
-                );
+        if (up_filled_size > Decimal::ZERO || down_filled_size > Decimal::ZERO)
+            && let Some(market) = self.markets.get_mut(&event_id)
+        {
+            if up_filled_size > Decimal::ZERO {
+                market.inventory.record_fill(Outcome::Yes, up_filled_size, up_filled_cost);
             }
+            if down_filled_size > Decimal::ZERO {
+                market.inventory.record_fill(Outcome::No, down_filled_size, down_filled_cost);
+            }
+
+            // Update global state inventory for sizing calculations
+            let pos = crate::state::InventoryPosition {
+                event_id: event_id.clone(),
+                yes_shares: market.inventory.yes_shares,
+                no_shares: market.inventory.no_shares,
+                yes_cost_basis: market.inventory.yes_cost_basis,
+                no_cost_basis: market.inventory.no_cost_basis,
+                realized_pnl: market.inventory.realized_pnl,
+            };
+            self.state.market_data.update_inventory(&event_id, pos);
+
+            // Record trade in position manager to update phase budgets
+            let seconds_remaining = market.state.seconds_remaining;
+            market.record_trade(total_volume, up_filled_cost, down_filled_cost, seconds_remaining);
+
+            debug!(
+                "Inventory updated for {}: YES={} NO={} total_exposure={}",
+                event_id,
+                market.inventory.yes_shares,
+                market.inventory.no_shares,
+                market.inventory.total_exposure()
+            );
         }
 
         // Record the trade in confidence sizer

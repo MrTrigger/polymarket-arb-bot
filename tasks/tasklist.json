@@ -29,7 +29,7 @@
       "id": "phase1-types",
       "title": "Phase 1: Create dashboard event types",
       "description": "Create types for dashboard events: SessionRecord, TradeRecord, PnlSnapshot, LogEntry, MarketSessionUpdate. Use rust_decimal for money, UUID for IDs. Add serde + clickhouse derives.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["phase1-schema"],
       "files": ["crates/poly-bot/src/dashboard/types.rs"],
       "acceptance": [
