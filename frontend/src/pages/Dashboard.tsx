@@ -6,10 +6,11 @@ import {
   CircuitBreakerStatus,
   LogWindow,
 } from "@/components/dashboard";
+import { TrendingUp } from "lucide-react";
 
 /**
- * Main dashboard page showing trading metrics, markets, and logs.
- * Components will be added in subsequent tasks.
+ * Main dashboard page - desktop-optimized grid layout.
+ * Shows trading metrics, equity curve, markets, circuit breaker, and logs.
  */
 export function Dashboard() {
   const { initialized, arbOpportunities } = useDashboardState();
@@ -30,38 +31,48 @@ export function Dashboard() {
   }
 
   return (
-    <div className="p-6">
-      {/* Metrics Cards */}
-      <div className="mb-6">
+    <div className="flex h-[calc(100vh-73px)] flex-col gap-4 overflow-hidden p-4">
+      {/* Top section: Metrics Cards */}
+      <section className="shrink-0">
         <MetricsCards />
-      </div>
+      </section>
 
-      {/* Status indicators row */}
-      <div className="mb-6 flex items-start gap-4">
-        {/* Circuit Breaker Status Card */}
-        <div className="w-64">
-          <CircuitBreakerStatus />
+      {/* Middle section: 3-column layout for desktop */}
+      <section className="grid min-h-0 flex-1 grid-cols-1 gap-4 xl:grid-cols-12">
+        {/* Left column: Markets Grid (main content) */}
+        <div className="flex min-h-0 flex-col xl:col-span-8">
+          <div className="mb-2 flex items-center justify-between">
+            <h2 className="text-sm font-medium text-muted-foreground">
+              Active Markets
+            </h2>
+            {arbOpportunities.length > 0 && (
+              <div className="flex items-center gap-1 rounded-full bg-yellow-500/10 px-2 py-0.5 text-xs text-yellow-500">
+                <TrendingUp className="h-3 w-3" />
+                {arbOpportunities.length} Arb
+                {arbOpportunities.length === 1 ? "" : "s"}
+              </div>
+            )}
+          </div>
+          <div className="min-h-0 flex-1 overflow-auto">
+            <MarketsGrid />
+          </div>
         </div>
 
-        {/* Arb opportunities indicator */}
-        {arbOpportunities.length > 0 && (
-          <div className="rounded-full bg-yellow-500/10 px-3 py-1 text-sm text-yellow-500">
-            {arbOpportunities.length} Arb Opportunit
-            {arbOpportunities.length === 1 ? "y" : "ies"}
+        {/* Right column: Circuit Breaker and Equity Curve stacked */}
+        <div className="flex min-h-0 flex-col gap-4 xl:col-span-4">
+          <div className="shrink-0">
+            <CircuitBreakerStatus />
           </div>
-        )}
-      </div>
+          <div className="min-h-0 flex-1">
+            <EquityCurve />
+          </div>
+        </div>
+      </section>
 
-      {/* Markets Grid */}
-      <div className="mb-6">
-        <MarketsGrid />
-      </div>
-
-      {/* Equity Curve and Logs */}
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-        <EquityCurve />
+      {/* Bottom section: Logs (collapsible) */}
+      <section className="shrink-0">
         <LogWindow />
-      </div>
+      </section>
     </div>
   );
 }

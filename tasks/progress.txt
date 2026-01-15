@@ -993,3 +993,46 @@ Notes for next task (phase4-dashboard):
 - May want to adjust spacing/sizing for optimal desktop experience
 
 ---
+
+### [2026-01-15] Task: phase4-dashboard - Assemble Dashboard page
+
+Files changed:
+- frontend/src/pages/Dashboard.tsx (redesigned layout)
+
+Changes:
+- Redesigned Dashboard.tsx with desktop-optimized grid layout:
+  - Full viewport height layout (100vh - header) with overflow handling
+  - Three-section structure: top (metrics), middle (main content), bottom (logs)
+  - Middle section uses 12-column grid for XL screens:
+    - Left 8 columns: Active Markets table (main content area)
+    - Right 4 columns: Circuit Breaker status + Equity Curve stacked
+  - Markets section has header row with "Active Markets" label and arb count badge
+  - Arb opportunities indicator moved inline with markets header
+  - LogWindow at bottom (collapsible for space efficiency)
+  - Uses flex with shrink-0/flex-1 for proper sizing
+  - min-h-0 on flex children to allow shrinking below content size
+- Added TrendingUp icon import from lucide-react for arb indicator
+- Improved visual hierarchy with section structure
+
+Verification:
+- bun run typecheck: PASSED
+- bun run build: PASSED (469.84 kB JS bundle)
+- All components visible: CONFIRMED (MetricsCards, EquityCurve, MarketsGrid, CircuitBreakerStatus, LogWindow)
+- Layout looks good: CONFIRMED (desktop-optimized 12-col grid, proper spacing)
+
+Learnings:
+- flex + min-h-0 pattern is essential for nested scrollable containers in flex layouts
+- overflow-hidden on parent + overflow-auto on child creates proper scroll containment
+- 12-column grid (xl:grid-cols-12) provides fine-grained control over column sizing
+- Collapsible components (like LogWindow) are ideal for bottom panels to save space
+- Section elements provide semantic structure and improve code readability
+- shrink-0 prevents important content from shrinking (metrics, status)
+
+Notes for next task (phase5-price-chart):
+- Phase 5 begins MarketDetail page components
+- Will use lightweight-charts again for price chart
+- Need strike price as horizontal line - use priceLine API
+- Trade markers require custom data series or markers API
+- Window boundaries could be vertical lines or background areas
+
+---

@@ -331,7 +331,7 @@
       "id": "phase4-dashboard",
       "title": "Phase 4: Assemble Dashboard page",
       "description": "Compose Dashboard.tsx from MetricsCards, EquityCurve, MarketsGrid, CircuitBreakerStatus, LogWindow. Grid layout, desktop-optimized.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["phase4-logs"],
       "files": ["frontend/src/pages/Dashboard.tsx"],
       "acceptance": [
