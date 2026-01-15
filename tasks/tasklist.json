@@ -402,7 +402,7 @@
       "id": "phase5-market-page",
       "title": "Phase 5: Assemble MarketDetail page",
       "description": "Compose MarketDetail.tsx from PriceChart, OrderBookDisplay, PositionPanel, TradesTable. Get eventId from URL params. Fetch market-specific data.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["phase5-trades"],
       "files": ["frontend/src/pages/MarketDetail.tsx"],
       "acceptance": [

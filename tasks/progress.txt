@@ -1243,3 +1243,44 @@ Notes for next task (phase5-market-page):
 - Task should verify all components work together correctly
 
 ---
+
+### [2026-01-15] Task: phase5-market-page - Assemble MarketDetail page
+
+Files verified:
+- frontend/src/pages/MarketDetail.tsx (already complete from previous tasks)
+
+Changes:
+- MarketDetail page was already assembled with all Phase 5 components during prior tasks:
+  - PriceChart - Shows spot price with strike line and trade markers
+  - OrderBookDisplay - YES/NO order books with arb analysis
+  - PositionPanel - Position details with inventory state visualization
+  - TradesTable - Filtered trades for this market with P&L
+- Page structure:
+  - Back navigation link to Dashboard
+  - Market header with asset name, strike, spot, time remaining, spread
+  - Arb opportunity badge when active
+  - 2-column grid layout for components
+  - Loading state while waiting for WebSocket data
+  - Not found state for invalid eventId
+- eventId from URL via useParams<{ eventId: string }>()
+- Market/position/trades filtering by eventId
+
+Verification:
+- bun run typecheck: PASSED
+- bun run build: PASSED (492.59 kB JS bundle)
+- All components visible: CONFIRMED (PriceChart, OrderBookDisplay, PositionPanel, TradesTable)
+- eventId from URL works: CONFIRMED (useParams + .find() filtering)
+
+Learnings:
+- Phase 5 components were incrementally integrated into MarketDetail during each component task
+- Final assembly task primarily validates the complete page works together
+- No code changes needed - previous tasks already built the full page
+
+Notes for next task (phase6-session-metrics):
+- Create SessionMetrics panel for dashboard
+- Show session start time, duration, events processed, opportunities
+- Calculate trade rate (trades per minute), avg trade size
+- Shadow order ratio (shadow fills / total fills)
+- Uses metrics from useDashboardState hook
+
+---
