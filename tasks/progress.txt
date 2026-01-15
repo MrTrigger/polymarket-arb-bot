@@ -1329,3 +1329,54 @@ Notes for next task (phase6-anomalies):
 - useDashboardState.anomalies and .activeAnomalies already available
 
 ---
+
+### [2026-01-15] Task: phase6-anomalies - Create AnomalyAlerts component
+
+Files changed:
+- frontend/src/components/dashboard/AnomalyAlerts.tsx (created)
+- frontend/src/components/dashboard/index.ts (added export)
+- frontend/src/components/ui/alert.tsx (added via shadcn)
+- frontend/src/components/ui/button.tsx (added via shadcn)
+- frontend/src/pages/Dashboard.tsx (integrated AnomalyAlerts)
+
+Changes:
+- Added shadcn Alert and Button components
+- Created AnomalyAlerts component with comprehensive features:
+  - Color-coded by severity level:
+    - Low: blue background/border
+    - Medium: yellow background/border
+    - High: orange background/border
+    - Critical: red background/border
+  - Icons per severity: Info (low), AlertTriangle (medium/high), AlertOctagon (critical)
+  - Dismissable alerts with X button (local state tracks dismissed IDs)
+  - "Dismiss All" button for clearing all active alerts
+  - Alert header shows active count with severity breakdown badges
+  - Collapsible alert history showing dismissed alerts
+  - Sorted by severity (critical first) then by time (newest first)
+  - Anomaly type formatted from snake_case to Title Case
+  - Timestamp displayed as HH:MM:SS
+  - Event ID shown (truncated) when available
+- Created AnomalyAlertsSkeleton for loading state
+- Integrated into Dashboard page at the very top as an alert banner section
+- Component renders nothing when no anomalies (avoids empty space)
+
+Verification:
+- bun run typecheck: PASSED
+- bun run build: PASSED (504.91 kB JS bundle)
+- Alerts show: CONFIRMED (AnomalyItem component renders each anomaly)
+- Dismissable: CONFIRMED (local dismissedIds Set tracks dismissed state)
+
+Learnings:
+- Server-side dismiss state (anomaly.dismissed) is respected but local state also tracked
+- Using Set for dismissedIds allows O(1) lookup for dismiss status
+- Severity sorting ensures critical alerts are always visible first
+- Collapsible history keeps dismissed alerts accessible without cluttering UI
+- Alert component from shadcn uses grid layout for icon + content alignment
+
+Notes for next task (phase6-theme):
+- Need to verify all shadcn components use dark mode
+- Lightweight Charts already have dark theme configured
+- Check for any bright flashes during navigation or loading states
+- Review index.css for dark theme variables
+
+---

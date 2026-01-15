@@ -430,7 +430,7 @@
       "id": "phase6-anomalies",
       "title": "Phase 6: Create AnomalyAlerts component",
       "description": "Alert banner when anomaly detected. Type, severity, message. Dismissable. Alert history. Critical anomalies highlighted.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["phase6-session-metrics"],
       "files": ["frontend/src/components/dashboard/AnomalyAlerts.tsx"],
       "acceptance": [

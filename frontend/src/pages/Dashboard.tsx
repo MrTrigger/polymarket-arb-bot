@@ -6,6 +6,7 @@ import {
   CircuitBreakerStatus,
   LogWindow,
   SessionMetrics,
+  AnomalyAlerts,
 } from "@/components/dashboard";
 import { TrendingUp } from "lucide-react";
 
@@ -33,6 +34,11 @@ export function Dashboard() {
 
   return (
     <div className="flex h-[calc(100vh-73px)] flex-col gap-4 overflow-hidden p-4">
+      {/* Alert banner section */}
+      <section className="shrink-0">
+        <AnomalyAlerts />
+      </section>
+
       {/* Top section: Metrics Cards */}
       <section className="shrink-0">
         <MetricsCards />
