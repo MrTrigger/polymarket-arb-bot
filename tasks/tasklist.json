@@ -259,7 +259,7 @@
       "id": "phase4-metrics",
       "title": "Phase 4: Create MetricsCards component",
       "description": "Display P&L, volume, trades executed/failed/skipped, win rate, exposure. Use shadcn Card. Color P&L green/red. Update in real-time.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["phase3-layout"],
       "files": ["frontend/src/components/dashboard/MetricsCards.tsx"],
       "acceptance": [

@@ -733,3 +733,48 @@ Notes for next task (phase4-metrics):
 - Will replace the placeholder metrics cards in Dashboard.tsx
 
 ---
+
+### [2026-01-15] Task: phase4-metrics - Create MetricsCards component
+
+Files changed:
+- frontend/src/components/dashboard/MetricsCards.tsx (created)
+- frontend/src/components/dashboard/index.ts (created)
+- frontend/src/components/ui/card.tsx (added via shadcn)
+- frontend/src/pages/Dashboard.tsx (updated to use MetricsCards)
+
+Changes:
+- Added shadcn Card component via `bun x shadcn@latest add card`
+- Created MetricsCards component displaying 8 metric cards:
+  - P&L (green when positive, red when negative)
+  - Volume (total trading volume)
+  - Trades (executed count with failed/skipped breakdown)
+  - Win Rate (percentage of winning trades)
+  - Opportunities (arbitrage opportunities detected)
+  - Events (market events processed)
+  - Shadow Orders (fired with fill percentage)
+  - Execution Rate (trades per opportunity)
+- Each card uses shadcn Card with CardHeader, CardTitle, CardContent
+- Lucide icons for visual distinction (TrendingUp/Down, DollarSign, Activity, Target, etc.)
+- Added MetricsCardsSkeleton for loading state with animated pulse placeholders
+- Updated Dashboard.tsx to use new MetricsCards component
+- Removed unused formatPercent import and metrics variable from Dashboard
+
+Verification:
+- bun run typecheck: PASSED
+- Shows all metrics: CONFIRMED (8 cards with all MetricsSnapshot fields)
+- P&L colored correctly: CONFIRMED (green-500 for positive, red-500 for negative)
+
+Learnings:
+- shadcn Card new-york style uses data-slot attributes for component composition
+- CardHeader/CardContent use gap-6 by default, customize with pb-2 for tighter header
+- useDashboardState hook returns null for metrics before first WebSocket message
+- Skeleton loader pattern with animate-pulse is simple and effective
+- Dashboard index.ts barrel export keeps imports clean
+
+Notes for next task (phase4-equity):
+- Create EquityCurve component using lightweight-charts
+- Dark theme configuration needed for charts
+- Time on X-axis, USDC on Y-axis
+- Consider how to get historical P&L data (WebSocket only sends current state)
+
+---

@@ -1,5 +1,6 @@
 import { useDashboardState } from "@/hooks";
-import { formatUsd, formatPercent } from "@/lib/types";
+import { formatUsd } from "@/lib/types";
+import { MetricsCards } from "@/components/dashboard";
 
 /**
  * Main dashboard page showing trading metrics, markets, and logs.
@@ -8,7 +9,6 @@ import { formatUsd, formatPercent } from "@/lib/types";
 export function Dashboard() {
   const {
     initialized,
-    metrics,
     markets,
     tradingEnabled,
     circuitBreakerTripped,
@@ -32,37 +32,9 @@ export function Dashboard() {
 
   return (
     <div className="p-6">
-      <div className="mb-6 grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
-        {/* Placeholder metrics cards - to be replaced by MetricsCards component */}
-        <div className="rounded-lg border border-border bg-card p-4">
-          <div className="text-sm text-muted-foreground">P&amp;L</div>
-          <div
-            className={`text-2xl font-semibold ${metrics && parseFloat(metrics.pnl_usdc) >= 0 ? "text-green-500" : "text-red-500"}`}
-          >
-            {metrics ? formatUsd(metrics.pnl_usdc) : "$0.00"}
-          </div>
-        </div>
-
-        <div className="rounded-lg border border-border bg-card p-4">
-          <div className="text-sm text-muted-foreground">Trades</div>
-          <div className="text-2xl font-semibold">
-            {metrics?.trades_executed ?? 0}
-          </div>
-        </div>
-
-        <div className="rounded-lg border border-border bg-card p-4">
-          <div className="text-sm text-muted-foreground">Volume</div>
-          <div className="text-2xl font-semibold">
-            {metrics ? formatUsd(metrics.volume_usdc) : "$0.00"}
-          </div>
-        </div>
-
-        <div className="rounded-lg border border-border bg-card p-4">
-          <div className="text-sm text-muted-foreground">Win Rate</div>
-          <div className="text-2xl font-semibold">
-            {metrics?.win_rate != null ? formatPercent(metrics.win_rate) : "—"}
-          </div>
-        </div>
+      {/* Metrics Cards */}
+      <div className="mb-6">
+        <MetricsCards />
       </div>
 
       {/* Status indicators */}
