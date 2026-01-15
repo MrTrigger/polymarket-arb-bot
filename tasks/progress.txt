@@ -113,3 +113,53 @@ Notes for next task (phase1-capture):
 - Must use try_send() to avoid blocking hot path
 
 ---
+
+### [2026-01-15] Task: phase1-capture - Implement DashboardCapture channel
+
+Files changed:
+- crates/poly-bot/src/dashboard/capture.rs (created)
+- crates/poly-bot/src/dashboard/mod.rs (added capture module export)
+
+Changes:
+- Created `DashboardCapture` struct following observability/capture.rs pattern exactly:
+  - `DashboardCaptureConfig` - configuration (enabled, capacity, log_drops, threshold)
+  - `DashboardCaptureStats` - atomic counters (captured, dropped, skipped)
+  - `DashboardCaptureStatsSnapshot` - point-in-time stats view
+  - `DashboardCapture` - main capture context with try_send() pattern
+- Key methods:
+  - `try_capture(event)` - hot path method, <10ns overhead when disabled
+  - `from_config()` - creates capture + receiver pair
+  - `disabled()` - creates no-op capture for testing
+  - `is_enabled()` / `enable()` / `disable()` - atomic toggle
+  - `stats_snapshot()` - get current stats
+- Fire-and-forget semantics:
+  - Uses try_send() which never blocks
+  - Drops events when channel full (backpressure)
+  - Logs drops periodically (configurable threshold)
+  - Auto-disables when channel is closed
+- Type aliases:
+  - `DashboardCaptureSender` / `DashboardCaptureReceiver` for mpsc channel
+  - `SharedDashboardCapture` for Arc wrapper
+- Helper functions:
+  - `create_dashboard_channel(capacity)` - creates bounded channel pair
+  - `create_shared_dashboard_capture(config)` - creates shareable capture
+
+Verification:
+- cargo clippy -p poly-bot -- -D warnings: PASSED
+- cargo test -p poly-bot dashboard: PASSED (35 tests - 22 capture tests + 13 types tests)
+- try_send() pattern confirmed (no blocking)
+- Backpressure drops confirmed via test_try_capture_channel_full
+
+Learnings:
+- Overhead tests include allocation cost from test events; actual hot path is faster
+- Clone impl shares Arc<stats> so all clones see same counters
+- AtomicBool with Acquire/Release ordering for enabled flag
+- compare_exchange for atomic drop log threshold update
+
+Notes for next task (phase1-processor):
+- Receiver is `DashboardCaptureReceiver` (mpsc::Receiver<DashboardEvent>)
+- Need to batch events by type for ClickHouse bulk inserts
+- Each event type has session_id() method for grouping
+- event_type() returns string for logging/metrics
+
+---

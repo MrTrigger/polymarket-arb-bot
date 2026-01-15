@@ -43,7 +43,7 @@
       "id": "phase1-capture",
       "title": "Phase 1: Implement DashboardCapture channel",
       "description": "Create fire-and-forget capture system following observability/capture.rs pattern. Bounded channel with try_send(), DashboardEvent enum, CaptureStats for monitoring. Must not block hot path.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["phase1-types"],
       "files": ["crates/poly-bot/src/dashboard/capture.rs"],
       "acceptance": [
