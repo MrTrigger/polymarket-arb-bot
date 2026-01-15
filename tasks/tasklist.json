@@ -240,7 +240,7 @@
       "id": "phase3-layout",
       "title": "Phase 3: Create app layout and routing",
       "description": "Create App.tsx with React Router. Routes: / (Dashboard), /market/:eventId (MarketDetail). Header with connection status. Dark theme wrapper.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["phase3-store"],
       "files": [
         "frontend/src/App.tsx",

@@ -676,3 +676,60 @@ Notes for next task (phase3-layout):
 - Apply dark theme wrapper (already configured via shadcn)
 
 ---
+
+### [2026-01-15] Task: phase3-layout - Create app layout and routing
+
+Files changed:
+- frontend/src/App.tsx (rewrote with React Router)
+- frontend/src/components/layout/Header.tsx (created)
+- frontend/src/components/layout/index.ts (created)
+- frontend/src/pages/Dashboard.tsx (created)
+- frontend/src/pages/MarketDetail.tsx (created)
+- frontend/src/pages/index.ts (created)
+- frontend/src/App.css (deleted - unused Vite template file)
+
+Changes:
+- Created Header component with connection status indicator:
+  - Shows connected (green), connecting (yellow/spinner), disconnected (gray), error (red)
+  - Clickable to connect/disconnect manually
+  - Clean button styling with rounded pill design
+- Created Dashboard page with placeholder components:
+  - Metrics cards row (P&L, Trades, Volume, Win Rate)
+  - Status indicators (Trading enabled/disabled, Circuit Breaker, Arb opportunities)
+  - Active markets table with asset, strike, time left, spot, arb spread
+  - Placeholder panels for Equity Curve and Recent Logs
+  - Uses useDashboardState hook for all data
+- Created MarketDetail page with placeholder components:
+  - Back navigation link
+  - Market header with asset, strike, spot, time remaining, spread
+  - Price chart placeholder
+  - Order book display showing YES/NO bid/ask/spread
+  - Position panel with shares, cost basis, P&L, exposure, imbalance, inventory state
+  - Recent trades table for this market
+  - Uses useParams for eventId routing parameter
+- Updated App.tsx with BrowserRouter and routes:
+  - Route "/" -> Dashboard
+  - Route "/market/:eventId" -> MarketDetail
+  - RootLayout wrapper with dark class and Header
+
+Verification:
+- bun run typecheck: PASSED
+- bun run dev: PASSED (starts on localhost:5173)
+- bun run build: PASSED (dist/ with hashed assets)
+- Routes work: / shows Dashboard, /market/:eventId shows MarketDetail
+- Header shows connection status: CONFIRMED (uses useDashboardState)
+
+Learnings:
+- react-router-dom v7 uses same API as v6 (BrowserRouter, Routes, Route, useParams)
+- Dark theme applied via `dark` class on root element (shadcn pattern)
+- useDashboardState is designed to be used at component level for efficient re-renders
+- Placeholder components use basic Tailwind styling - will be replaced by shadcn components later
+- Lucide-react icons (Wifi, WifiOff, AlertTriangle, Loader2, ArrowLeft) integrate well
+
+Notes for next task (phase4-metrics):
+- Create MetricsCards component using shadcn Card
+- Display all metrics from MetricsSnapshot type
+- P&L colored green/red based on value
+- Will replace the placeholder metrics cards in Dashboard.tsx
+
+---
