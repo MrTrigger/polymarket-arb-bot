@@ -631,3 +631,48 @@ Notes for next task (phase3-store):
 - Consider using shallow equality for performance
 
 ---
+
+### [2026-01-15] Task: phase3-store - Create dashboard state store
+
+Files changed:
+- frontend/src/lib/store.ts (created)
+- frontend/src/hooks/useDashboardState.ts (created)
+- frontend/src/hooks/index.ts (updated)
+
+Changes:
+- Created Zustand store for dashboard state with subscribeWithSelector middleware:
+  - `DashboardState` interface with snapshot, lastUpdate, initialized
+  - `DashboardActions` interface with updateFromSnapshot, reset
+  - `useDashboardStore` hook for accessing state
+- Added comprehensive selectors for efficient component subscriptions:
+  - `selectMetrics`, `selectMarkets`, `selectArbOpportunities`
+  - `selectPositions`, `selectRecentTrades`, `selectRecentLogs`
+  - `selectControlState`, `selectAnomalies`, `selectActiveAnomalies`
+  - `selectTradingEnabled`, `selectCircuitBreakerTripped`
+  - `selectPnl`, `selectVolume`, `selectTradeCounts`, `selectWinRate`
+  - `selectMarketById`, `selectPositionByEventId`, `selectTradesByEventId`
+- Created `useDashboardState` hook combining WebSocket and store:
+  - Connects to WebSocket and updates store from snapshots
+  - Exposes all connection state (status, error, connect/disconnect)
+  - Provides convenient access to all dashboard data slices
+  - Uses `useShallow` for array/object comparisons (Zustand v5 API)
+- Updated hooks index to export new hook
+
+Verification:
+- bun run typecheck: PASSED
+- State updates from WebSocket: CONFIRMED (useEffect updates store on wsSnapshot change)
+
+Learnings:
+- Zustand v5 uses `useShallow` from `zustand/react/shallow` instead of second argument
+- The old v4 pattern `useStore(selector, shallow)` doesn't work in v5
+- Use `useShallow((state) => state.foo)` to wrap the selector for shallow comparison
+- subscribeWithSelector enables programmatic subscriptions with custom equality
+- Arrays/objects need useShallow to prevent re-renders on every update
+
+Notes for next task (phase3-layout):
+- Create App.tsx with React Router (react-router-dom v7)
+- Routes: / (Dashboard), /market/:eventId (MarketDetail)
+- Add header component with connection status using useDashboardState
+- Apply dark theme wrapper (already configured via shadcn)
+
+---
