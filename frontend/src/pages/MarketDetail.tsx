@@ -2,7 +2,7 @@ import { useParams, Link } from "react-router-dom";
 import { ArrowLeft } from "lucide-react";
 import { useDashboardState } from "@/hooks";
 import { formatUsd, formatPercent, formatTimeRemaining } from "@/lib/types";
-import { PriceChart } from "@/components/market";
+import { PriceChart, OrderBookDisplay } from "@/components/market";
 
 /**
  * Market detail page showing price chart, order book, position, and trades.
@@ -91,58 +91,8 @@ export function MarketDetail() {
         {/* Price chart */}
         <PriceChart market={market} trades={marketTrades} />
 
-        {/* Order book placeholder */}
-        <div className="rounded-lg border border-border bg-card p-4">
-          <h3 className="mb-2 font-semibold">Order Book</h3>
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <h4 className="mb-2 text-sm text-muted-foreground">YES</h4>
-              {market.yes_book ? (
-                <div className="space-y-1 text-sm">
-                  <div className="flex justify-between">
-                    <span className="text-green-500">Bid:</span>
-                    <span>{formatUsd(market.yes_book.best_bid)}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-red-500">Ask:</span>
-                    <span>{formatUsd(market.yes_book.best_ask)}</span>
-                  </div>
-                  <div className="flex justify-between text-muted-foreground">
-                    <span>Spread:</span>
-                    <span>{market.yes_book.spread_bps} bps</span>
-                  </div>
-                </div>
-              ) : (
-                <div className="text-sm text-muted-foreground">
-                  No order book data
-                </div>
-              )}
-            </div>
-            <div>
-              <h4 className="mb-2 text-sm text-muted-foreground">NO</h4>
-              {market.no_book ? (
-                <div className="space-y-1 text-sm">
-                  <div className="flex justify-between">
-                    <span className="text-green-500">Bid:</span>
-                    <span>{formatUsd(market.no_book.best_bid)}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-red-500">Ask:</span>
-                    <span>{formatUsd(market.no_book.best_ask)}</span>
-                  </div>
-                  <div className="flex justify-between text-muted-foreground">
-                    <span>Spread:</span>
-                    <span>{market.no_book.spread_bps} bps</span>
-                  </div>
-                </div>
-              ) : (
-                <div className="text-sm text-muted-foreground">
-                  No order book data
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
+        {/* Order book display */}
+        <OrderBookDisplay market={market} />
 
         {/* Position panel */}
         <div className="rounded-lg border border-border bg-card p-4">

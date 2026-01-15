@@ -345,7 +345,7 @@
       "id": "phase5-price-chart",
       "title": "Phase 5: Create PriceChart component",
       "description": "Lightweight Charts for spot price history. Strike price as horizontal line. Trade markers: green triangles=buy, red=sell. Different markers for YES/NO. Window boundaries visible.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["phase4-dashboard"],
       "files": ["frontend/src/components/market/PriceChart.tsx"],
       "acceptance": [
@@ -360,7 +360,7 @@
       "id": "phase5-orderbook",
       "title": "Phase 5: Create OrderBookDisplay component",
       "description": "Show YES and NO order books side by side. Bid/ask with sizes. Spread for each. Combined arb calculation: YES_ask + NO_ask vs $1.00. Highlight when arb exists.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["phase5-price-chart"],
       "files": ["frontend/src/components/market/OrderBookDisplay.tsx"],
       "acceptance": [

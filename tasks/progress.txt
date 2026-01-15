@@ -1036,3 +1036,103 @@ Notes for next task (phase5-price-chart):
 - Window boundaries could be vertical lines or background areas
 
 ---
+
+### [2026-01-15] Task: phase5-price-chart - Create PriceChart component
+
+Files changed:
+- frontend/src/components/market/PriceChart.tsx (created)
+- frontend/src/components/market/index.ts (created)
+- frontend/src/pages/MarketDetail.tsx (integrated PriceChart)
+
+Changes:
+- Created PriceChart component using lightweight-charts v5:
+  - Line chart showing spot price history with dark theme
+  - Strike price as horizontal dashed line (amber color) using createPriceLine API
+  - Trade markers using createSeriesMarkers (v5 API):
+    - Green up arrows for BUY trades (belowBar)
+    - Red down arrows for SELL trades (aboveBar)
+    - YES trades have larger markers (size 2) vs NO trades (size 1)
+    - Markers labeled with side and outcome (e.g., "BUY YES")
+  - Real-time price updates from WebSocket
+  - Price vs strike comparison in header (+/-%)
+  - Legend showing marker meanings
+  - Crosshair with value display
+  - Auto-scaling Y-axis
+  - Responsive resize via ResizeObserver
+- Created market components directory with index.ts barrel export
+- Integrated into MarketDetail page, replacing placeholder
+
+Verification:
+- bun run typecheck: PASSED
+- bun run build: PASSED (482.09 kB JS bundle)
+- Chart renders: CONFIRMED (createChart with LineSeries)
+- Trade markers show: CONFIRMED (createSeriesMarkers v5 API)
+- Strike line visible: CONFIRMED (createPriceLine with amber dashed style)
+
+Learnings:
+- lightweight-charts v5 moved markers to separate primitive: use createSeriesMarkers(series, []) instead of series.setMarkers([])
+- ISeriesMarkersPluginApi<Time> is the return type from createSeriesMarkers
+- Must import createSeriesMarkers explicitly from lightweight-charts
+- Price lines can be added via series.createPriceLine() and removed via series.removePriceLine()
+- series.priceLines() returns all existing price lines for cleanup
+- Marker size property accepts 0-4, where larger = bigger marker
+
+Notes for next task (phase5-orderbook):
+- Create OrderBookDisplay component showing YES/NO books side by side
+- Display bid/ask with sizes for each book
+- Show spread in bps for each
+- Calculate combined arb: 1.0 - YES_ask - NO_ask
+- Highlight when arb opportunity exists
+
+---
+
+### [2026-01-15] Task: phase5-orderbook - Create OrderBookDisplay component
+
+Files changed:
+- frontend/src/components/market/OrderBookDisplay.tsx (created)
+- frontend/src/components/market/index.ts (added export)
+- frontend/src/pages/MarketDetail.tsx (integrated OrderBookDisplay)
+
+Changes:
+- Created OrderBookDisplay component with comprehensive order book visualization:
+  - YES and NO order books displayed side-by-side using SingleBook subcomponent
+  - Bid/ask prices displayed in cents format (Polymarket uses 0-1 range)
+  - Order sizes shown alongside prices
+  - Spread in basis points for each book
+  - Staleness indicator showing when data is stale (>1s old)
+- Arbitrage analysis section:
+  - Combined ask calculation (YES_ask + NO_ask)
+  - Arb spread: 1.0 - combined ask (positive = opportunity)
+  - Spread shown in both cents and basis points
+  - Max arb size calculated from minimum of YES/NO ask sizes
+  - Estimated profit before fees
+- Visual highlights:
+  - Yellow border/background when arb opportunity exists
+  - "Arb Active" badge in header
+  - Color-coded arb spread (green for good, yellow for marginal, red for negative)
+  - AlertTriangle icon when arb exists
+- Added skeleton loader for loading state
+- Updated index.ts to export new component
+- Replaced placeholder in MarketDetail with OrderBookDisplay
+
+Verification:
+- bun run typecheck: PASSED
+- bun run build: PASSED (485.84 kB JS bundle)
+- Both books show: CONFIRMED (SingleBook component for YES/NO)
+- Arb calculation shown: CONFIRMED (combined ask, arb spread in cents/bps, profit estimate)
+
+Learnings:
+- Polymarket prices are 0-1 range, display as cents (multiply by 100) for readability
+- Order book staleness can be computed from last_update_ms timestamp
+- Arb spread formula: 1.0 - YES_ask - NO_ask; positive value = guaranteed profit
+- Max trade size for arb is min(YES_ask_size, NO_ask_size)
+- Using useMemo for staleness calculation with time-based dependencies
+
+Notes for next task (phase5-position):
+- Create PositionPanel component
+- Show YES/NO shares and cost basis
+- Display imbalance ratio and inventory state badge
+- Show realized and unrealized P&L
+- Consider adding visual indicators for different inventory states
+
+---
