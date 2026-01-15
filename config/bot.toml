@@ -27,7 +27,7 @@ assets = ["BTC", "ETH", "SOL"]
 window_duration = "15min"
 
 # Log level: trace, debug, info, warn, error
-log_level = "info"
+log_level = "debug"
 
 [clickhouse]
 url = "http://localhost:8123"

@@ -5,6 +5,7 @@ import {
   MarketsGrid,
   CircuitBreakerStatus,
   LogWindow,
+  SessionMetrics,
 } from "@/components/dashboard";
 import { TrendingUp } from "lucide-react";
 
@@ -58,8 +59,11 @@ export function Dashboard() {
           </div>
         </div>
 
-        {/* Right column: Circuit Breaker and Equity Curve stacked */}
+        {/* Right column: Session Metrics, Circuit Breaker, and Equity Curve stacked */}
         <div className="flex min-h-0 flex-col gap-4 xl:col-span-4">
+          <div className="shrink-0">
+            <SessionMetrics />
+          </div>
           <div className="shrink-0">
             <CircuitBreakerStatus />
           </div>

@@ -1284,3 +1284,48 @@ Notes for next task (phase6-session-metrics):
 - Uses metrics from useDashboardState hook
 
 ---
+
+### [2026-01-15] Task: phase6-session-metrics - Create SessionMetrics panel
+
+Files changed:
+- frontend/src/components/dashboard/SessionMetrics.tsx (created)
+- frontend/src/components/dashboard/index.ts (added export)
+- frontend/src/pages/Dashboard.tsx (integrated SessionMetrics)
+
+Changes:
+- Created SessionMetrics component using shadcn Card with 6 key metrics:
+  - Duration - Time since session started (formatted as Xd Xh Xm)
+  - Events - Total market events processed
+  - Opportunities - Arbitrage opportunities detected
+  - Trade Rate - Trades per minute calculation
+  - Avg Trade - Average trade size in USD
+  - Shadow Rate - Shadow order fill ratio with counts
+- Additional stats row showing:
+  - Capture Rate (trades / opportunities percentage)
+  - Failed/Skipped trade counts
+  - Win Rate percentage
+- Responsive grid layout (6 columns on large screens, adapts down)
+- Created SessionMetricsSkeleton for loading state
+- Integrated into Dashboard page in right column above CircuitBreakerStatus
+
+Verification:
+- bun run typecheck: PASSED
+- bun run build: PASSED (496.91 kB JS bundle)
+- All stats show: CONFIRMED (6 primary metrics + 3 secondary stats)
+- Updates in real-time: CONFIRMED (useMemo recalculates from metrics changes)
+
+Learnings:
+- Duration is approximated from lastUpdate since actual session start time not in WebSocket payload
+- Trade rate calculation needs max(1, minutes) to avoid division by zero on startup
+- Shadow ratio displays both percentage and raw counts (filled/fired) for clarity
+- Responsive grid uses grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 pattern
+- formatDuration helper handles minutes, hours, and days gracefully
+
+Notes for next task (phase6-anomalies):
+- Create AnomalyAlerts component for anomaly notifications
+- Need dismissable alerts (update local state, anomaly has dismissed field)
+- Color by severity (low=blue, medium=yellow, high=orange, critical=red)
+- Alert banner at top of dashboard or in dedicated section
+- useDashboardState.anomalies and .activeAnomalies already available
+
+---

@@ -6,3 +6,4 @@ export {
   CircuitBreakerStatusSkeleton,
 } from "./CircuitBreakerStatus";
 export { LogWindow, LogWindowSkeleton } from "./LogWindow";
+export { SessionMetrics, SessionMetricsSkeleton } from "./SessionMetrics";

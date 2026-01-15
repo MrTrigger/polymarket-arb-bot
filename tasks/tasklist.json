@@ -416,7 +416,7 @@
       "id": "phase6-session-metrics",
       "title": "Phase 6: Create SessionMetrics panel",
       "description": "Panel showing: session start/duration, events processed, opportunities detected, trade rate, avg trade size, shadow order ratio. Real-time updates.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["phase5-market-page"],
       "files": ["frontend/src/components/dashboard/SessionMetrics.tsx"],
       "acceptance": [

@@ -1051,6 +1051,12 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                 continue;
             }
 
+            // Skip markets that haven't started yet (strike_price = 0)
+            if market.strike_price.is_zero() {
+                trace!("Skipping market {} - not started yet (strike=0)", event_id);
+                continue;
+            }
+
             // Update spot price in market state if we have it
             if let Some(&spot) = self.spot_prices.get(&market.state.asset) {
                 market.state.spot_price = Some(spot);
@@ -1081,10 +1087,14 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             let directional_opportunity = if self.engines_config.directional.enabled {
                 match self.directional_detector.detect(market_state) {
                     Ok(opp) => {
-                        // Only log at debug level to avoid spam - meaningful logging happens later
+                        // Log signal detection at trace level to reduce spam
+                        let mins = Decimal::from(market_state.seconds_remaining) / dec!(60);
+                        let thresholds = get_thresholds(mins);
                         trace!(
-                            "Directional {} {}: signal={:?} dist={:.4}%",
-                            event_id, asset, opp.signal, opp.distance * dec!(100)
+                            "🎯 Signal {} {}: {:?} dist={:.4}% | thresholds: lean={:.4}% strong={:.4}% | ratio=UP:{}/DOWN:{}",
+                            event_id, asset, opp.signal, opp.distance * dec!(100),
+                            thresholds.lean * dec!(100), thresholds.strong * dec!(100),
+                            opp.up_ratio, opp.down_ratio
                         );
                         Some(opp)
                     }
@@ -1250,23 +1260,35 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                     let atr = market.position_manager.atr();
                     let atr_mult = if atr > Decimal::ZERO { distance_dollars.abs() / atr } else { Decimal::ZERO };
 
+                    // Calculate time and distance confidence components for detailed logging (trace level)
+                    let time_conf = if mins > dec!(12) { dec!(0.40) }
+                        else if mins > dec!(9) { dec!(0.50) }
+                        else if mins > dec!(6) { dec!(0.60) }
+                        else if mins > dec!(3) { dec!(0.80) }
+                        else { dec!(1.00) };
+                    let dist_conf = if atr_mult > dec!(1.5) { dec!(1.00) }
+                        else if atr_mult > dec!(1.0) { dec!(0.85) }
+                        else if atr_mult > dec!(0.75) { dec!(0.70) }
+                        else if atr_mult > dec!(0.50) { dec!(0.55) }
+                        else if atr_mult > dec!(0.25) { dec!(0.40) }
+                        else { dec!(0.20) };
+
+                    trace!(
+                        "📈 Confidence {} {}: dist${:.2} atr${:.2} atr_mult={:.2} | time_conf={:.2} dist_conf={:.2} | combined={:.2} need={:.2} phase={}",
+                        event_id, asset, distance_dollars.abs(), atr, atr_mult,
+                        time_conf, dist_conf, pm_conf, phase.min_confidence(), phase
+                    );
+
                     // Check if we should trade based on phase, confidence, and budget
                     let trade_decision = market.should_trade(distance_dollars, seconds_remaining);
 
                     let (total_size, pm_confidence, phase) = match trade_decision {
                         position::TradeDecision::Skip(reason) => {
-                            // Log skips with confidence details (debug level for low confidence to reduce spam)
-                            if matches!(reason, position::SkipReason::LowConfidence) {
-                                debug!(
-                                    "⏭️ {} {} LowConf: signal={:?} dist=${:.2} atr_mult={:.2} conf={:.2} need={:.2} phase={}",
-                                    event_id, asset, opp.signal, distance_dollars, atr_mult, pm_conf, phase.min_confidence(), phase
-                                );
-                            } else {
-                                info!(
-                                    "⏭️ Position manager skip {} {}: {:?} (signal={:?} dist={:.4}%)",
-                                    event_id, asset, reason, opp.signal, opp.distance * dec!(100)
-                                );
-                            }
+                            // Log skips at debug level to reduce spam (low confidence is very common)
+                            debug!(
+                                "⏭️ SKIP {} {} {:?}: signal={:?} dist=${:.2} atr_mult={:.2} conf={:.2} need={:.2} phase={}",
+                                event_id, asset, reason, opp.signal, distance_dollars.abs(), atr_mult, pm_conf, phase.min_confidence(), phase
+                            );
                             // Only record decision for meaningful skips, not low confidence
                             if !matches!(reason, position::SkipReason::LowConfidence) {
                                 self.record_multi_decision(
@@ -1288,9 +1310,17 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                         }
                     };
 
-                    // Verify size is meaningful
-                    if total_size < Decimal::ONE {
-                        debug!("Directional size too small for {}: {}", event_id, total_size);
+                    // Verify size is meaningful - account for the split ratio
+                    // The dominant leg (larger ratio) must reach minimum order size of $1.00
+                    let dominant_ratio = opp.up_ratio.max(opp.down_ratio);
+                    let dominant_leg_size = total_size * dominant_ratio;
+                    if dominant_leg_size < Decimal::ONE {
+                        // Need at least $1.00 / dominant_ratio to place an order
+                        let min_needed = Decimal::ONE / dominant_ratio;
+                        debug!(
+                            "Directional size too small for {}: ${:.2} (dominant leg ${:.2} < $1, need ${:.2} total)",
+                            event_id, total_size, dominant_leg_size, min_needed
+                        );
                         self.record_multi_decision(
                             &event_id,
                             asset,
@@ -1306,8 +1336,8 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                     }
 
                     // Execute directional trade
-                    info!("Executing directional: {} signal={:?} size={:.2} phase={} conf={:.2} engine=Directional",
-                        event_id, opp.signal, total_size, phase, pm_confidence);
+                    info!("🚀 EXECUTE {} {}: signal={:?} size=${:.2} phase={} conf={:.2} up_ratio={} down_ratio={}",
+                        event_id, asset, opp.signal, total_size, phase, pm_confidence, opp.up_ratio, opp.down_ratio);
 
                     let action = self.execute_directional(opp, total_size).await?;
 
