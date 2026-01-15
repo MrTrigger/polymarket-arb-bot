@@ -292,6 +292,54 @@ impl PaperExecutor {
     }
 }
 
+impl PaperExecutor {
+    /// Settle a market and calculate realized PnL.
+    ///
+    /// For binary options:
+    /// - YES wins: YES shares pay $1.00 each, NO shares pay $0
+    /// - NO wins: NO shares pay $1.00 each, YES shares pay $0
+    ///
+    /// Returns realized PnL (payout - cost_basis).
+    pub fn settle_market_position(&mut self, event_id: &str, yes_wins: bool) -> Decimal {
+        let position = match self.positions.remove(event_id) {
+            Some(p) => p,
+            None => return Decimal::ZERO, // No position to settle
+        };
+
+        // Calculate payout
+        let payout = if yes_wins {
+            position.yes_shares // YES shares pay $1.00 each
+        } else {
+            position.no_shares // NO shares pay $1.00 each
+        };
+
+        // Calculate realized PnL
+        let realized_pnl = payout - position.cost_basis;
+
+        // Update balance with payout
+        self.balance += payout;
+
+        info!(
+            event_id = %event_id,
+            yes_wins = %yes_wins,
+            yes_shares = %position.yes_shares,
+            no_shares = %position.no_shares,
+            cost_basis = %position.cost_basis,
+            payout = %payout,
+            realized_pnl = %realized_pnl,
+            new_balance = %self.balance,
+            "Market settled"
+        );
+
+        realized_pnl
+    }
+
+    /// Get total realized PnL from all settled positions.
+    pub fn total_realized_pnl(&self) -> Decimal {
+        self.balance - self.config.initial_balance + self.total_position_value()
+    }
+}
+
 #[async_trait]
 impl Executor for PaperExecutor {
     async fn place_order(&mut self, order: OrderRequest) -> Result<OrderResult, ExecutorError> {
@@ -367,6 +415,10 @@ impl Executor for PaperExecutor {
 
     fn available_balance(&self) -> Decimal {
         self.balance
+    }
+
+    async fn settle_market(&mut self, event_id: &str, yes_wins: bool) -> Decimal {
+        self.settle_market_position(event_id, yes_wins)
     }
 
     async fn shutdown(&mut self) {
@@ -641,5 +693,96 @@ mod tests {
         assert_eq!(config.fill_latency_ms, 50);
         assert_eq!(config.fee_rate, dec!(0.001));
         assert!(config.enforce_balance);
+    }
+
+    #[tokio::test]
+    async fn test_paper_executor_settlement_yes_wins() {
+        let config = PaperExecutorConfig {
+            initial_balance: dec!(1000),
+            fill_latency_ms: 0,
+            fee_rate: Decimal::ZERO, // No fees for simpler math
+            enforce_balance: true,
+            max_position_per_market: Decimal::ZERO,
+            market_order_slippage: Decimal::ZERO,
+        };
+
+        let mut executor = PaperExecutor::new(config);
+
+        // Buy 100 YES shares at $0.40 = $40 cost
+        let buy_yes = OrderRequest::limit(
+            "req-1".to_string(),
+            "event-1".to_string(),
+            "token-yes".to_string(),
+            Outcome::Yes,
+            Side::Buy,
+            dec!(100),
+            dec!(0.40),
+        );
+        executor.place_order(buy_yes).await.unwrap();
+
+        // Buy 50 NO shares at $0.60 = $30 cost
+        let buy_no = OrderRequest::limit(
+            "req-2".to_string(),
+            "event-1".to_string(),
+            "token-no".to_string(),
+            Outcome::No,
+            Side::Buy,
+            dec!(50),
+            dec!(0.60),
+        );
+        executor.place_order(buy_no).await.unwrap();
+
+        // Total cost = $40 + $30 = $70
+        // Balance = $1000 - $70 = $930
+        assert_eq!(executor.balance(), dec!(930));
+
+        // Settle with YES winning
+        // YES shares (100) pay $1 each = $100 payout
+        // NO shares (50) pay $0 = $0 payout
+        // Total payout = $100
+        // Realized PnL = $100 - $70 = $30 profit
+        let realized_pnl = executor.settle_market_position("event-1", true);
+        assert_eq!(realized_pnl, dec!(30));
+
+        // Balance = $930 + $100 payout = $1030
+        assert_eq!(executor.balance(), dec!(1030));
+
+        // Position should be cleared
+        assert!(executor.position("event-1").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_paper_executor_settlement_no_wins() {
+        let config = PaperExecutorConfig {
+            initial_balance: dec!(1000),
+            fill_latency_ms: 0,
+            fee_rate: Decimal::ZERO,
+            enforce_balance: true,
+            max_position_per_market: Decimal::ZERO,
+            market_order_slippage: Decimal::ZERO,
+        };
+
+        let mut executor = PaperExecutor::new(config);
+
+        // Buy 100 YES shares at $0.80 = $80 cost
+        let buy_yes = OrderRequest::limit(
+            "req-1".to_string(),
+            "event-1".to_string(),
+            "token-yes".to_string(),
+            Outcome::Yes,
+            Side::Buy,
+            dec!(100),
+            dec!(0.80),
+        );
+        executor.place_order(buy_yes).await.unwrap();
+
+        // Settle with NO winning
+        // YES shares (100) pay $0 = $0 payout
+        // Realized PnL = $0 - $80 = -$80 loss
+        let realized_pnl = executor.settle_market_position("event-1", false);
+        assert_eq!(realized_pnl, dec!(-80));
+
+        // Balance = $920 + $0 payout = $920
+        assert_eq!(executor.balance(), dec!(920));
     }
 }

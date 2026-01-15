@@ -44,6 +44,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -392,8 +393,21 @@ impl TrackedMarket {
     /// 2. **Gate trades by confidence threshold** - stricter early, looser late
     /// 3. **Scale position size by confidence** - bigger when more certain
     /// 4. **Enforce position limits** - never go all-in on one side
-    fn should_trade(&self, distance_dollars: Decimal, seconds_remaining: i64) -> position::TradeDecision {
-        self.position_manager.should_trade(distance_dollars, seconds_remaining)
+    fn should_trade(
+        &self,
+        distance_dollars: Decimal,
+        seconds_remaining: i64,
+        favorable_price: Decimal,
+        max_edge_factor: Decimal,
+        window_duration_secs: i64,
+    ) -> position::TradeDecision {
+        self.position_manager.should_trade(
+            distance_dollars,
+            seconds_remaining,
+            favorable_price,
+            max_edge_factor,
+            window_duration_secs,
+        )
     }
 
     /// Record a completed trade in the position manager.
@@ -699,8 +713,9 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             MarketEvent::WindowOpen(e) => self.handle_window_open(e),
             MarketEvent::WindowClose(e) => self.handle_window_close(e),
             MarketEvent::Heartbeat(_) => {
-                // Heartbeat - just update time remaining on all markets
+                // Heartbeat - update time remaining and settle expired markets
                 self.update_all_market_times();
+                self.settle_expired_markets().await;
                 return Ok(());
             }
         }
@@ -998,25 +1013,64 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
 
     /// Update time remaining on all markets.
     fn update_all_market_times(&mut self) {
-        // Collect expired market IDs
-        let expired: Vec<String> = self.markets
-            .iter()
-            .filter(|(_, m)| m.is_expired())
-            .map(|(id, _)| id.clone())
-            .collect();
-
-        // Remove expired markets
-        for id in expired {
-            if let Some(market) = self.markets.remove(&id) {
-                self.token_to_event.remove(&market.yes_token_id);
-                self.token_to_event.remove(&market.no_token_id);
-                debug!("Removed expired market: {}", id);
-            }
-        }
-
         // Update remaining markets
         for market in self.markets.values_mut() {
             market.update_time();
+        }
+    }
+
+    /// Collect expired markets with settlement info.
+    /// Returns Vec of (event_id, yes_token_id, no_token_id, yes_wins, asset).
+    fn collect_expired_markets(&mut self) -> Vec<(String, String, String, bool, CryptoAsset)> {
+        let expired: Vec<_> = self.markets
+            .iter()
+            .filter(|(_, m)| m.is_expired())
+            .map(|(id, m)| {
+                // For Up/Down markets: YES wins if final_spot > strike
+                let final_spot = self.spot_prices.get(&m.asset).copied().unwrap_or(Decimal::ZERO);
+                let yes_wins = final_spot > m.strike_price;
+                (
+                    id.clone(),
+                    m.yes_token_id.clone(),
+                    m.no_token_id.clone(),
+                    yes_wins,
+                    m.asset,
+                )
+            })
+            .collect();
+
+        // Remove expired markets from tracking
+        for (id, yes_token_id, no_token_id, _, _) in &expired {
+            self.markets.remove(id);
+            self.token_to_event.remove(yes_token_id);
+            self.token_to_event.remove(no_token_id);
+        }
+
+        expired
+    }
+
+    /// Settle expired markets and update PnL.
+    async fn settle_expired_markets(&mut self) {
+        let expired = self.collect_expired_markets();
+
+        for (event_id, _, _, yes_wins, asset) in expired {
+            let realized_pnl = self.executor.settle_market(&event_id, yes_wins).await;
+
+            if realized_pnl != Decimal::ZERO {
+                // Update global state with realized PnL (convert to cents)
+                let pnl_cents = (realized_pnl * Decimal::new(100, 0)).to_i64().unwrap_or(0);
+                self.state.metrics.add_pnl_cents(pnl_cents);
+
+                info!(
+                    event_id = %event_id,
+                    asset = ?asset,
+                    yes_wins = %yes_wins,
+                    realized_pnl = %realized_pnl,
+                    "Market settled"
+                );
+            } else {
+                debug!("Removed expired market: {} (no position)", event_id);
+            }
         }
     }
 
@@ -1287,21 +1341,35 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                         else if atr_mult > dec!(0.25) { dec!(0.40) }
                         else { dec!(0.20) };
 
+                    // Calculate edge-based required confidence
+                    let favorable_price = opp.favorable_price();
+                    let max_edge_factor = self.engines_config.directional.max_edge_factor;
+                    let window_duration_secs: i64 = 900; // 15-minute windows
+                    let time_factor = Decimal::new(seconds_remaining, 0) / Decimal::new(window_duration_secs, 0);
+                    let min_edge = max_edge_factor * time_factor;
+                    let required_conf = favorable_price + min_edge;
+
                     trace!(
-                        "📈 Confidence {} {}: dist${:.2} atr${:.2} atr_mult={:.2} | time_conf={:.2} dist_conf={:.2} | combined={:.2} need={:.2} phase={}",
+                        "📈 Confidence {} {}: dist${:.2} atr${:.2} atr_mult={:.2} | time_conf={:.2} dist_conf={:.2} | combined={:.2} need={:.2} (price={:.2}+edge={:.2}) phase={}",
                         event_id, asset, distance_dollars.abs(), atr, atr_mult,
-                        time_conf, dist_conf, pm_conf, phase.min_confidence(), phase
+                        time_conf, dist_conf, pm_conf, required_conf, favorable_price, min_edge, phase
                     );
 
-                    // Check if we should trade based on phase, confidence, and budget
-                    let trade_decision = market.should_trade(distance_dollars, seconds_remaining);
+                    // Check if we should trade based on edge-based confidence threshold and budget
+                    let trade_decision = market.should_trade(
+                        distance_dollars,
+                        seconds_remaining,
+                        favorable_price,
+                        max_edge_factor,
+                        window_duration_secs,
+                    );
 
                     let (total_size, pm_confidence, phase) = match trade_decision {
                         position::TradeDecision::Skip(reason) => {
                             // Log skips at debug level to reduce spam (low confidence is very common)
                             debug!(
-                                "⏭️ SKIP {} {} {:?}: signal={:?} dist=${:.2} atr_mult={:.2} conf={:.2} need={:.2} phase={}",
-                                event_id, asset, reason, opp.signal, distance_dollars.abs(), atr_mult, pm_conf, phase.min_confidence(), phase
+                                "⏭️ SKIP {} {} {:?}: signal={:?} dist=${:.2} atr_mult={:.2} conf={:.2} need={:.2} (price={:.2}+edge={:.2}) phase={}",
+                                event_id, asset, reason, opp.signal, distance_dollars.abs(), atr_mult, pm_conf, required_conf, favorable_price, min_edge, phase
                             );
                             // Only record decision for meaningful skips, not low confidence
                             if !matches!(reason, position::SkipReason::LowConfidence) {

@@ -108,6 +108,20 @@ impl DirectionalOpportunity {
         Decimal::ONE - self.combined_cost
     }
 
+    /// Get the price of the favorable (dominant) side based on signal.
+    ///
+    /// For UP signals: we're buying more YES, so yes_ask is the favorable price.
+    /// For DOWN signals: we're buying more NO, so no_ask is the favorable price.
+    /// For Neutral: use the average.
+    #[inline]
+    pub fn favorable_price(&self) -> Decimal {
+        match self.signal {
+            Signal::StrongUp | Signal::LeanUp => self.yes_ask,
+            Signal::StrongDown | Signal::LeanDown => self.no_ask,
+            Signal::Neutral => (self.yes_ask + self.no_ask) / Decimal::TWO,
+        }
+    }
+
     /// Check if this is a strong signal opportunity.
     #[inline]
     pub fn is_strong(&self) -> bool {

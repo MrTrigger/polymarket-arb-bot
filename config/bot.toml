@@ -173,6 +173,12 @@ strong_up_ratio = 0.90         # Strong UP signal: 90% YES, 10% NO
 lean_up_ratio = 0.55           # Lean UP signal: 55% YES, 45% NO (low ratio since lean signals marginal)
 neutral_ratio = 0.50           # Neutral signal: 50/50
 
+# Dynamic edge requirement (replaces fixed phase thresholds)
+# Required confidence = favorable_price + (max_edge_factor * time_remaining / window_duration)
+# At window start: need price + 20% edge. At window end: need price + 0% edge.
+# Example: price=0.80, 7.5min left in 15min window -> need 0.80 + 0.20*0.5 = 0.90 confidence
+max_edge_factor = 0.20         # 20% edge required at window start, decays linearly to 0
+
 [engines.maker]
 # Maker engine: Passive limit orders for rebates
 enabled = false                # Disabled for initial paper trading

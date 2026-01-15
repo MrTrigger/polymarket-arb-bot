@@ -754,6 +754,49 @@ impl DirectionalEngineConfig {
         Decimal::ONE - up_ratio
     }
 
+    /// Calculate the minimum edge required at the given time.
+    ///
+    /// The edge requirement decays linearly from `max_edge_factor` at window start
+    /// to 0 at window end.
+    ///
+    /// Formula: `min_edge = max_edge_factor * (seconds_remaining / window_duration_secs)`
+    ///
+    /// # Arguments
+    /// * `seconds_remaining` - Seconds left in the market window
+    /// * `window_duration_secs` - Total window duration in seconds (e.g., 900 for 15min)
+    ///
+    /// # Returns
+    /// The minimum edge required as a decimal (e.g., 0.10 = 10% edge)
+    #[inline]
+    pub fn min_edge(&self, seconds_remaining: i64, window_duration_secs: i64) -> Decimal {
+        if window_duration_secs <= 0 || seconds_remaining <= 0 {
+            return Decimal::ZERO;
+        }
+        let time_factor = Decimal::new(seconds_remaining, 0) / Decimal::new(window_duration_secs, 0);
+        self.max_edge_factor * time_factor
+    }
+
+    /// Calculate the required confidence for a trade at the given price and time.
+    ///
+    /// Formula: `required_confidence = price + min_edge(time)`
+    ///
+    /// # Arguments
+    /// * `favorable_price` - The price of the side we're buying (0-1)
+    /// * `seconds_remaining` - Seconds left in the market window
+    /// * `window_duration_secs` - Total window duration in seconds
+    ///
+    /// # Returns
+    /// The minimum confidence required to trade (may exceed 1.0, meaning no trade possible)
+    #[inline]
+    pub fn required_confidence(
+        &self,
+        favorable_price: Decimal,
+        seconds_remaining: i64,
+        window_duration_secs: i64,
+    ) -> Decimal {
+        favorable_price + self.min_edge(seconds_remaining, window_duration_secs)
+    }
+
     /// Get allocation ratios for StrongUp signal.
     #[inline]
     pub fn strong_up_allocation(&self) -> (Decimal, Decimal) {
@@ -1360,6 +1403,7 @@ impl Default for DirectionalEngineToml {
             strong_up_ratio: 0.78,
             lean_up_ratio: 0.60,
             neutral_ratio: 0.50,
+            max_edge_factor: 0.20,
         }
     }
 }
@@ -1536,6 +1580,7 @@ impl From<TomlConfig> for BotConfig {
                     strong_up_ratio: f64_to_decimal(toml.engines.directional.strong_up_ratio),
                     lean_up_ratio: f64_to_decimal(toml.engines.directional.lean_up_ratio),
                     neutral_ratio: f64_to_decimal(toml.engines.directional.neutral_ratio),
+                    max_edge_factor: f64_to_decimal(toml.engines.directional.max_edge_factor),
                 },
                 maker: MakerEngineConfig {
                     enabled: toml.engines.maker.enabled,

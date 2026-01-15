@@ -385,6 +385,23 @@ pub trait Executor: Send + Sync {
     /// For paper trading, returns simulated balance.
     fn available_balance(&self) -> Decimal;
 
+    /// Settle a market position when it expires.
+    ///
+    /// For binary options, this determines the payout based on the winning outcome:
+    /// - YES wins: YES shares pay $1, NO shares pay $0
+    /// - NO wins: NO shares pay $1, YES shares pay $0
+    ///
+    /// Returns the realized PnL from the settlement (positive = profit, negative = loss).
+    ///
+    /// # Arguments
+    /// * `event_id` - The market event ID
+    /// * `yes_wins` - True if YES outcome won, false if NO won
+    ///
+    /// Default implementation returns 0 (no-op for live execution).
+    async fn settle_market(&mut self, _event_id: &str, _yes_wins: bool) -> Decimal {
+        Decimal::ZERO
+    }
+
     /// Shutdown the executor gracefully.
     async fn shutdown(&mut self);
 }
