@@ -176,7 +176,7 @@
       "id": "phase3-scaffold",
       "title": "Phase 3: Scaffold frontend project",
       "description": "Create frontend/ directory. Initialize with bun create vite. Add TypeScript, React, TailwindCSS. Configure path aliases. Add shadcn/ui. Install lightweight-charts, zustand, react-query, react-router-dom.",
-      "status": "pending",
+      "status": "completed",
       "depends": [],
       "files": [
         "frontend/package.json",
