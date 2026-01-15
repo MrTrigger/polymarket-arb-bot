@@ -210,7 +210,7 @@
       "id": "phase3-websocket",
       "title": "Phase 3: Implement WebSocket hook",
       "description": "Create useWebSocket hook with: connect to configurable URL, auto-reconnect with exponential backoff, parse JSON, expose connection status, handle errors gracefully.",
-      "status": "pending",
+      "status": "completed",
       "depends": ["phase3-types"],
       "files": ["frontend/src/hooks/useWebSocket.ts"],
       "acceptance": [

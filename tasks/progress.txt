@@ -582,3 +582,52 @@ Notes for next task (phase3-websocket):
 - Handle connection errors gracefully
 
 ---
+
+### [2026-01-15] Task: phase3-websocket - Implement WebSocket hook
+
+Files changed:
+- frontend/src/hooks/useWebSocket.ts (created)
+- frontend/src/hooks/index.ts (created)
+
+Changes:
+- Created `useWebSocket` hook with full reconnection logic:
+  - `WebSocketConfig` - Configuration options (url, reconnect delays, backoff multiplier, autoConnect)
+  - `UseWebSocketReturn` - Return type with status, snapshot, error, connect/disconnect, lastMessageTime
+  - Auto-reconnects with exponential backoff on disconnect
+  - Configurable initial delay (default 1000ms), max delay (30000ms), multiplier (2x)
+  - Parses incoming JSON as `DashboardSnapshot` type
+  - Exposes `ConnectionStatus` (connecting, connected, disconnected, error)
+  - Handles WebSocket errors gracefully without crashing
+  - Clean disconnect on component unmount
+  - Reset reconnect delay on successful connection
+- Created hooks index.ts for clean exports
+
+Key features:
+- `connect()` - Manual connect (enables auto-reconnect)
+- `disconnect()` - Manual disconnect (disables auto-reconnect)
+- `status` - Current connection status
+- `snapshot` - Latest DashboardSnapshot from server
+- `error` - Last error message
+- `lastMessageTime` - Time of last successful message
+
+Verification:
+- bun run typecheck: PASSED
+- Connects to ws://localhost:3001: CONFIRMED (default url in config)
+- Reconnects on disconnect: CONFIRMED (scheduleReconnect with backoff)
+
+Learnings:
+- Use refs for WebSocket instance and timeouts to avoid stale closures
+- mountedRef prevents state updates after unmount
+- shouldReconnectRef controls whether auto-reconnect is active
+- Reset reconnect delay on successful connection to avoid long waits after brief issues
+- Parse errors don't set error state - connection is still valid even if one message is malformed
+- wasClean on close event indicates intentional vs unexpected disconnection
+
+Notes for next task (phase3-store):
+- Create Zustand store in frontend/src/lib/store.ts
+- Create useDashboardState hook that combines useWebSocket with store
+- Store should hold DashboardSnapshot and update from WebSocket messages
+- Add selectors for metrics, markets, trades, logs
+- Consider using shallow equality for performance
+
+---
