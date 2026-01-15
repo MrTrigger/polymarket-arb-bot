@@ -2,6 +2,7 @@ import { useParams, Link } from "react-router-dom";
 import { ArrowLeft } from "lucide-react";
 import { useDashboardState } from "@/hooks";
 import { formatUsd, formatPercent, formatTimeRemaining } from "@/lib/types";
+import { PriceChart } from "@/components/market";
 
 /**
  * Market detail page showing price chart, order book, position, and trades.
@@ -87,13 +88,8 @@ export function MarketDetail() {
 
       {/* Main content grid */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-        {/* Price chart placeholder */}
-        <div className="rounded-lg border border-border bg-card p-4">
-          <h3 className="mb-2 font-semibold">Price Chart</h3>
-          <div className="flex h-64 items-center justify-center text-muted-foreground">
-            Chart component coming soon
-          </div>
-        </div>
+        {/* Price chart */}
+        <PriceChart market={market} trades={marketTrades} />
 
         {/* Order book placeholder */}
         <div className="rounded-lg border border-border bg-card p-4">
