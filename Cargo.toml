@@ -20,6 +20,7 @@ tokio = { version = "1.43", features = ["full"] }
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+serde_urlencoded = "0.7"
 
 # Financial math - NEVER use f64 for prices
 rust_decimal = { version = "1.36", features = ["serde", "serde-with-str"] }
@@ -59,7 +60,10 @@ reqwest = { version = "0.12", features = ["json"] }
 # Crypto for signing
 ethers-core = "2.0"
 sha3 = "0.10"
+sha2 = "0.10"
+hmac = "0.12"
 hex = "0.4"
+base64 = "0.22"
 
 # UUID generation
 uuid = { version = "1.11", features = ["v4", "serde"] }

@@ -184,6 +184,13 @@ impl LiveMode {
         self
     }
 
+    /// Use an existing GlobalState (for sharing with dashboard).
+    pub fn with_state(mut self, state: Arc<GlobalState>) -> Self {
+        tracing::info!("LiveMode using shared GlobalState at {:p}", Arc::as_ptr(&state));
+        self.state = state;
+        self
+    }
+
     /// Get a shutdown signal receiver.
     pub fn shutdown_signal(&self) -> broadcast::Receiver<()> {
         self.shutdown_tx.subscribe()
@@ -242,13 +249,14 @@ impl LiveMode {
             discovery_shutdown,
         ));
 
-        // Create executor
+        // Create executor (derives API credentials if not provided)
         let executor = LiveExecutor::new(
             self.config.executor.clone(),
             &self.bot_config.wallet,
             Some(&self.bot_config.shadow),
             self.config.initial_balance,
         )
+        .await
         .context("Failed to create live executor")?;
 
         // Fetch real balance from Polymarket

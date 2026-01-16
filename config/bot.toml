@@ -69,6 +69,8 @@ price_offset_bps = 50
 max_wait_ms = 2000
 
 [execution]
+# Order execution mode: "limit" (maker with chase) or "market" (taker)
+execution_mode = "limit"
 chase_enabled = true
 chase_step_size = 0.001
 chase_check_interval_ms = 100

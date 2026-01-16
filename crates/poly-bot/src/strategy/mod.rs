@@ -165,6 +165,7 @@ use crate::data_source::{
     SpotPriceEvent, WindowCloseEvent, WindowOpenEvent,
 };
 use crate::executor::{Executor, ExecutorError, OrderRequest, OrderResult, OrderType};
+use crate::executor::chase::PriceChaser;
 use crate::state::{ActiveWindow, GlobalState};
 use crate::types::{EngineType, Inventory, MarketState, OrderBook};
 
@@ -502,6 +503,9 @@ pub struct StrategyConfig {
     pub strong_up_ratio: Decimal,
     /// Lean UP signal allocation ratio (0.0-1.0).
     pub lean_up_ratio: Decimal,
+
+    /// Execution configuration (order mode, chase settings).
+    pub execution: crate::config::ExecutionConfig,
 }
 
 impl Default for StrategyConfig {
@@ -527,6 +531,7 @@ impl Default for StrategyConfig {
             // Allocation ratios (optimized via param sweep)
             strong_up_ratio: dec!(0.82),
             lean_up_ratio: dec!(0.65),
+            execution: crate::config::ExecutionConfig::default(),
         }
     }
 }
@@ -561,6 +566,7 @@ impl StrategyConfig {
             // Allocation ratios (optimized via param sweep)
             strong_up_ratio: dec!(0.82),
             lean_up_ratio: dec!(0.65),
+            execution: crate::config::ExecutionConfig::default(),
         }
     }
 
@@ -599,12 +605,19 @@ impl StrategyConfig {
             // Allocation ratios (optimized via param sweep)
             strong_up_ratio: dec!(0.82),
             lean_up_ratio: dec!(0.65),
+            execution: crate::config::ExecutionConfig::default(),
         }
     }
 
     /// Set the window duration on an existing config.
     pub fn with_window_duration(mut self, window_duration_secs: i64) -> Self {
         self.window_duration_secs = window_duration_secs;
+        self
+    }
+
+    /// Set the execution configuration.
+    pub fn with_execution(mut self, execution: crate::config::ExecutionConfig) -> Self {
+        self.execution = execution;
         self
     }
 }
@@ -663,6 +676,8 @@ pub struct StrategyLoop<D: DataSource, E: Executor> {
     atr_tracker: atr::AtrTracker,
     /// Simulated time for backtest mode (uses event timestamps instead of wall-clock time).
     simulated_time: DateTime<Utc>,
+    /// Price chaser for maker execution with fill polling.
+    chaser: PriceChaser,
 }
 
 impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
@@ -724,6 +739,7 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             last_status_log: std::time::Instant::now(),
             atr_tracker: atr::AtrTracker::default(),
             simulated_time: Utc::now(),
+            chaser: PriceChaser::with_defaults(),
         }
     }
 
@@ -1955,8 +1971,6 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
 
     /// Execute a directional trade based on signal.
     ///
-    /// Places maker orders (GTC/post-only) to capture the directional signal
-    /// while earning maker rebates. The UP/DOWN allocation follows the signal
     /// ratios from the directional opportunity.
     ///
     /// # Arguments
@@ -2078,6 +2092,12 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
         let mut down_filled_size = Decimal::ZERO;
         let mut down_filled_cost = Decimal::ZERO;
 
+        // Determine order type based on execution mode
+        let (order_type, use_chase) = match self.config.execution.execution_mode {
+            crate::config::ExecutionMode::Limit => (OrderType::Gtc, self.config.execution.chase_enabled),
+            crate::config::ExecutionMode::Market => (OrderType::Ioc, false),
+        };
+
         // Place UP (YES) order if size is significant
         if up_size >= Decimal::ONE {
             let up_order = OrderRequest {
@@ -2088,12 +2108,39 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                 side: Side::Buy,
                 size: up_size,
                 price: Some(up_price),
-                order_type: OrderType::Gtc, // Good-till-cancelled for maker
+                order_type,
                 timeout_ms: None,
                 timestamp: Utc::now(),
             };
 
-            let up_result = self.executor.place_order(up_order).await;
+            // Use chaser for limit orders if chase is enabled
+            // The other_leg_price is the NO price (for arb ceiling calculation)
+            let other_leg_price = down_price;
+            let up_result = if use_chase {
+                match self.chaser.chase_order(&mut self.executor, up_order, other_leg_price).await {
+                    Ok(chase_result) => {
+                        if chase_result.success || chase_result.filled_size > Decimal::ZERO {
+                            Ok(OrderResult::Filled(crate::executor::OrderFill {
+                                request_id: format!("dir-{}-up", req_id_base),
+                                order_id: "chased".to_string(),
+                                size: chase_result.filled_size,
+                                price: chase_result.avg_price,
+                                fee: chase_result.total_fee,
+                                timestamp: Utc::now(),
+                            }))
+                        } else {
+                            Ok(OrderResult::Pending(crate::executor::PendingOrder {
+                                request_id: format!("dir-{}-up", req_id_base),
+                                order_id: "chase_failed".to_string(),
+                                timestamp: Utc::now(),
+                            }))
+                        }
+                    }
+                    Err(e) => Err(e),
+                }
+            } else {
+                self.executor.place_order(up_order).await
+            };
             match up_result {
                 Ok(result) if result.is_filled() => {
                     up_filled_size = result.filled_size();
@@ -2124,12 +2171,39 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                 side: Side::Buy,
                 size: down_size,
                 price: Some(down_price),
-                order_type: OrderType::Gtc, // Good-till-cancelled for maker
+                order_type,
                 timeout_ms: None,
                 timestamp: Utc::now(),
             };
 
-            let down_result = self.executor.place_order(down_order).await;
+            // Use chaser for limit orders if chase is enabled
+            // The other_leg_price is the YES price (for arb ceiling calculation)
+            let other_leg_price = up_price;
+            let down_result = if use_chase {
+                match self.chaser.chase_order(&mut self.executor, down_order, other_leg_price).await {
+                    Ok(chase_result) => {
+                        if chase_result.success || chase_result.filled_size > Decimal::ZERO {
+                            Ok(OrderResult::Filled(crate::executor::OrderFill {
+                                request_id: format!("dir-{}-down", req_id_base),
+                                order_id: "chased".to_string(),
+                                size: chase_result.filled_size,
+                                price: chase_result.avg_price,
+                                fee: chase_result.total_fee,
+                                timestamp: Utc::now(),
+                            }))
+                        } else {
+                            Ok(OrderResult::Pending(crate::executor::PendingOrder {
+                                request_id: format!("dir-{}-down", req_id_base),
+                                order_id: "chase_failed".to_string(),
+                                timestamp: Utc::now(),
+                            }))
+                        }
+                    }
+                    Err(e) => Err(e),
+                }
+            } else {
+                self.executor.place_order(down_order).await
+            };
             match down_result {
                 Ok(result) if result.is_filled() => {
                     down_filled_size = result.filled_size();

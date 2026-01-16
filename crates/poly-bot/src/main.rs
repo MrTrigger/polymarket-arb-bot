@@ -253,17 +253,17 @@ async fn start_dashboard_servers(
 async fn run_live_mode(
     config: BotConfig,
     clickhouse: ClickHouseClient,
-    _shared_state: Arc<poly_bot::state::GlobalState>,
+    shared_state: Arc<poly_bot::state::GlobalState>,
 ) -> Result<()> {
     info!("Initializing live trading mode");
 
     // Create mode config
     let mode_config = LiveModeConfig::from_bot_config(&config);
 
-    // Create live mode runner
-    // TODO: Wire shared_state to LiveMode once it supports with_state
+    // Create live mode runner with shared state (for dashboard integration)
     let mut mode = LiveMode::new(mode_config, config)
         .context("Failed to create live mode")?
+        .with_state(shared_state)
         .with_clickhouse(clickhouse);
 
     // Set up shutdown handler

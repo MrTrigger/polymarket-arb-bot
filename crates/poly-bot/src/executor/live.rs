@@ -124,9 +124,54 @@ impl std::fmt::Debug for Wallet {
     }
 }
 
+/// API credentials derived from private key.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApiCredentials {
+    #[serde(rename = "apiKey")]
+    pub api_key: String,
+    pub secret: String,
+    pub passphrase: String,
+}
+
 impl Wallet {
-    /// Create a new wallet from private key hex string.
+    /// Create a new wallet from private key hex string with provided credentials.
     pub fn from_private_key(private_key_hex: &str, api_key: String, api_secret: String, api_passphrase: String) -> Result<Self, ExecutorError> {
+        let (address, private_key) = Self::parse_private_key(private_key_hex)?;
+
+        Ok(Self {
+            address,
+            private_key,
+            api_key,
+            api_secret,
+            api_passphrase,
+        })
+    }
+
+    /// Create a wallet from private key only (credentials will be derived).
+    pub fn from_private_key_only(private_key_hex: &str) -> Result<(Self, [u8; 32]), ExecutorError> {
+        let (address, private_key) = Self::parse_private_key(private_key_hex)?;
+
+        // Return wallet with empty credentials - they'll be filled after derivation
+        let wallet = Self {
+            address,
+            private_key,
+            api_key: String::new(),
+            api_secret: String::new(),
+            api_passphrase: String::new(),
+        };
+
+        Ok((wallet, private_key))
+    }
+
+    /// Set API credentials after derivation.
+    pub fn set_credentials(&mut self, creds: ApiCredentials) {
+        self.api_key = creds.api_key;
+        self.api_secret = creds.secret;
+        self.api_passphrase = creds.passphrase;
+    }
+
+    /// Parse private key hex string into address and key bytes.
+    fn parse_private_key(private_key_hex: &str) -> Result<(Address, [u8; 32]), ExecutorError> {
         // Remove 0x prefix if present
         let key_str = private_key_hex.strip_prefix("0x").unwrap_or(private_key_hex);
 
@@ -146,13 +191,144 @@ impl Wallet {
         // Derive address from private key
         let address = Self::derive_address(&private_key)?;
 
-        Ok(Self {
-            address,
-            private_key,
-            api_key,
-            api_secret,
-            api_passphrase,
-        })
+        Ok((address, private_key))
+    }
+
+    /// Derive API credentials from Polymarket using EIP-712 signed message.
+    pub async fn derive_api_credentials(
+        address: Address,
+        private_key: &[u8; 32],
+    ) -> Result<ApiCredentials, ExecutorError> {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            .to_string();
+        let nonce = "0";
+        let message = "This message attests that I control the given wallet";
+
+        // Compute EIP-712 struct hash for ClobAuth
+        let auth_hash = Self::compute_clob_auth_hash(address, &timestamp, nonce, message);
+
+        // Compute domain separator for ClobAuthDomain
+        let domain_separator = Self::compute_auth_domain_separator();
+
+        // Final EIP-712 hash: keccak256("\x19\x01" || domainSeparator || structHash)
+        let mut final_msg = Vec::with_capacity(66);
+        final_msg.extend_from_slice(b"\x19\x01");
+        final_msg.extend_from_slice(domain_separator.as_bytes());
+        final_msg.extend_from_slice(auth_hash.as_bytes());
+        let final_hash = H256::from_slice(&Keccak256::digest(&final_msg));
+
+        // Sign the hash
+        let signature = Self::sign_hash_with_key(private_key, final_hash)?;
+        let mut r_bytes = [0u8; 32];
+        let mut s_bytes = [0u8; 32];
+        signature.r.to_big_endian(&mut r_bytes);
+        signature.s.to_big_endian(&mut s_bytes);
+        let sig_hex = format!(
+            "0x{}{}{}",
+            hex::encode(r_bytes),
+            hex::encode(s_bytes),
+            hex::encode([signature.v as u8])
+        );
+
+        // Call derive-api-key endpoint
+        let client = Client::new();
+        let resp = client
+            .get(format!("{}/auth/derive-api-key", endpoints::CLOB_REST))
+            .header("POLY_ADDRESS", format!("{:?}", address))
+            .header("POLY_SIGNATURE", &sig_hex)
+            .header("POLY_TIMESTAMP", &timestamp)
+            .header("POLY_NONCE", nonce)
+            .send()
+            .await
+            .map_err(|e| ExecutorError::Internal(format!("Failed to derive API key: {}", e)))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(ExecutorError::Internal(format!(
+                "Failed to derive API key: HTTP {} - {}",
+                status, body
+            )));
+        }
+
+        let creds: ApiCredentials = resp
+            .json()
+            .await
+            .map_err(|e| ExecutorError::Internal(format!("Failed to parse API credentials: {}", e)))?;
+
+        info!("Successfully derived API credentials");
+        Ok(creds)
+    }
+
+    /// Compute the EIP-712 domain separator for ClobAuthDomain.
+    fn compute_auth_domain_separator() -> H256 {
+        // EIP-712 domain: keccak256("EIP712Domain(string name,string version,uint256 chainId)")
+        let domain_type_hash = Keccak256::digest(
+            b"EIP712Domain(string name,string version,uint256 chainId)"
+        );
+        let name_hash = Keccak256::digest(b"ClobAuthDomain");
+        let version_hash = Keccak256::digest(b"1");
+
+        let mut encoded = Vec::with_capacity(128);
+        encoded.extend_from_slice(&domain_type_hash);
+        encoded.extend_from_slice(&name_hash);
+        encoded.extend_from_slice(&version_hash);
+        // chainId = 137
+        let mut chain_id_bytes = [0u8; 32];
+        chain_id_bytes[31] = 137u8;
+        encoded.extend_from_slice(&chain_id_bytes);
+
+        H256::from_slice(&Keccak256::digest(&encoded))
+    }
+
+    /// Compute the EIP-712 struct hash for ClobAuth.
+    fn compute_clob_auth_hash(address: Address, timestamp: &str, nonce: &str, message: &str) -> H256 {
+        // Type hash: keccak256("ClobAuth(address address,string timestamp,uint256 nonce,string message)")
+        let type_hash = Keccak256::digest(
+            b"ClobAuth(address address,string timestamp,uint256 nonce,string message)"
+        );
+
+        let timestamp_hash = Keccak256::digest(timestamp.as_bytes());
+        let nonce_value: u64 = nonce.parse().unwrap_or(0);
+        let message_hash = Keccak256::digest(message.as_bytes());
+
+        let mut encoded = Vec::with_capacity(160);
+        encoded.extend_from_slice(&type_hash);
+        // Address is padded to 32 bytes
+        let mut addr_bytes = [0u8; 32];
+        addr_bytes[12..].copy_from_slice(address.as_bytes());
+        encoded.extend_from_slice(&addr_bytes);
+        encoded.extend_from_slice(&timestamp_hash);
+        // Nonce as uint256
+        let mut nonce_bytes = [0u8; 32];
+        nonce_bytes[24..].copy_from_slice(&nonce_value.to_be_bytes());
+        encoded.extend_from_slice(&nonce_bytes);
+        encoded.extend_from_slice(&message_hash);
+
+        H256::from_slice(&Keccak256::digest(&encoded))
+    }
+
+    /// Sign a hash with the given private key.
+    fn sign_hash_with_key(private_key: &[u8; 32], hash: H256) -> Result<Signature, ExecutorError> {
+        use ethers_core::k256::ecdsa::{SigningKey, signature::hazmat::PrehashSigner};
+
+        let signing_key = SigningKey::from_bytes(private_key.into())
+            .map_err(|e| ExecutorError::Internal(format!("Invalid signing key: {}", e)))?;
+
+        let (sig, recovery_id): (ethers_core::k256::ecdsa::Signature, _) = signing_key
+            .sign_prehash(hash.as_bytes())
+            .map_err(|e| ExecutorError::Internal(format!("Signing failed: {}", e)))?;
+
+        let r = U256::from_big_endian(&sig.r().to_bytes());
+        let s = U256::from_big_endian(&sig.s().to_bytes());
+        let v = recovery_id.to_byte() as u64 + 27;
+
+        Ok(Signature { r, s, v })
     }
 
     /// Derive Ethereum address from private key.
@@ -185,6 +361,45 @@ impl Wallet {
     /// Get the wallet address.
     pub fn address(&self) -> Address {
         self.address
+    }
+
+    /// Create L2 HMAC signature for API requests.
+    ///
+    /// The signature is computed as: HMAC-SHA256(base64_decode(secret), message)
+    /// where message = timestamp + method + path + body
+    pub fn sign_l2_request(
+        &self,
+        timestamp: &str,
+        method: &str,
+        path: &str,
+        body: Option<&str>,
+    ) -> Result<String, ExecutorError> {
+        use base64::{engine::general_purpose::URL_SAFE, Engine};
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        type HmacSha256 = Hmac<Sha256>;
+
+        // Decode the base64 secret
+        let secret_bytes = URL_SAFE
+            .decode(&self.api_secret)
+            .map_err(|e| ExecutorError::Internal(format!("Failed to decode API secret: {}", e)))?;
+
+        // Construct message: timestamp + method + path + body
+        let mut message = format!("{}{}{}", timestamp, method, path);
+        if let Some(b) = body {
+            // Replace single quotes with double quotes for compatibility
+            message.push_str(&b.replace('\'', "\""));
+        }
+
+        // Create HMAC-SHA256
+        let mut mac = HmacSha256::new_from_slice(&secret_bytes)
+            .map_err(|e| ExecutorError::Internal(format!("Failed to create HMAC: {}", e)))?;
+        mac.update(message.as_bytes());
+        let result = mac.finalize();
+
+        // Return base64-encoded signature
+        Ok(URL_SAFE.encode(result.into_bytes()))
     }
 
     /// Sign a message hash with the private key.
@@ -242,12 +457,16 @@ mod api {
 
     /// Order creation request body.
     #[derive(Debug, Serialize)]
+    #[serde(rename_all = "camelCase")]
     pub struct CreateOrderRequest {
         pub order: SignedOrder,
+        pub owner: String,
+        pub order_type: String,
     }
 
     /// Signed order for submission.
     #[derive(Debug, Serialize)]
+    #[serde(rename_all = "camelCase")]
     pub struct SignedOrder {
         pub salt: String,
         pub maker: String,
@@ -365,35 +584,43 @@ impl LiveExecutor {
     /// # Arguments
     ///
     /// * `config` - Executor configuration
-    /// * `wallet_config` - Wallet credentials (must have private_key, api_key, api_secret, api_passphrase)
+    /// * `wallet_config` - Wallet credentials (requires private_key; api credentials will be derived if not provided)
     /// * `shadow_config` - Optional shadow bid configuration
     /// * `initial_balance` - Starting USDC balance
     ///
     /// # Errors
     ///
     /// Returns an error if wallet credentials are missing or invalid.
-    pub fn new(
+    pub async fn new(
         config: LiveExecutorConfig,
         wallet_config: &WalletConfig,
         shadow_config: Option<&ShadowConfig>,
         initial_balance: Decimal,
     ) -> Result<Self, ExecutorError> {
-        // Validate wallet credentials
-        let private_key = wallet_config.private_key.as_ref()
+        // Validate private key is present
+        let private_key_hex = wallet_config.private_key.as_ref()
             .ok_or_else(|| ExecutorError::Internal("POLY_PRIVATE_KEY not set".to_string()))?;
-        let api_key = wallet_config.api_key.as_ref()
-            .ok_or_else(|| ExecutorError::Internal("POLY_API_KEY not set".to_string()))?;
-        let api_secret = wallet_config.api_secret.as_ref()
-            .ok_or_else(|| ExecutorError::Internal("POLY_API_SECRET not set".to_string()))?;
-        let api_passphrase = wallet_config.api_passphrase.as_ref()
-            .ok_or_else(|| ExecutorError::Internal("POLY_API_PASSPHRASE not set".to_string()))?;
 
-        let wallet = Wallet::from_private_key(
-            private_key,
-            api_key.clone(),
-            api_secret.clone(),
-            api_passphrase.clone(),
-        )?;
+        // Check if API credentials are provided or need to be derived
+        let wallet = if wallet_config.api_key.is_some()
+            && wallet_config.api_secret.is_some()
+            && wallet_config.api_passphrase.is_some()
+        {
+            // Use provided credentials
+            Wallet::from_private_key(
+                private_key_hex,
+                wallet_config.api_key.clone().unwrap(),
+                wallet_config.api_secret.clone().unwrap(),
+                wallet_config.api_passphrase.clone().unwrap(),
+            )?
+        } else {
+            // Derive credentials from private key
+            info!("Deriving API credentials from private key...");
+            let (mut wallet, pk_bytes) = Wallet::from_private_key_only(private_key_hex)?;
+            let creds = Wallet::derive_api_credentials(wallet.address(), &pk_bytes).await?;
+            wallet.set_credentials(creds);
+            wallet
+        };
 
         info!(
             address = %wallet.address(),
@@ -666,21 +893,33 @@ impl LiveExecutor {
     }
 
     /// Submit order to CLOB API.
-    async fn submit_order(&self, signed_order: api::SignedOrder) -> Result<String, ExecutorError> {
+    async fn submit_order(&self, signed_order: api::SignedOrder, order_type: &str) -> Result<String, ExecutorError> {
         let url = format!("{}/order", self.config.api_endpoint);
 
         let request_body = api::CreateOrderRequest {
             order: signed_order,
+            owner: self.wallet.api_key.clone(),
+            order_type: order_type.to_string(),
         };
+
+        // Serialize body for HMAC signing
+        let body_json = serde_json::to_string(&request_body)
+            .map_err(|e| ExecutorError::Internal(format!("Failed to serialize order: {}", e)))?;
+
+        // Create L2 HMAC signature
+        let timestamp = Utc::now().timestamp().to_string();
+        let path = "/order";
+        let signature = self.wallet.sign_l2_request(&timestamp, "POST", path, Some(&body_json))?;
 
         let response = self.client
             .post(&url)
-            .header("POLY-ADDRESS", format!("{:?}", self.wallet.address()))
-            .header("POLY-SIGNATURE", &self.wallet.api_secret)
-            .header("POLY-TIMESTAMP", Utc::now().timestamp().to_string())
-            .header("POLY-API-KEY", &self.wallet.api_key)
-            .header("POLY-PASSPHRASE", &self.wallet.api_passphrase)
-            .json(&request_body)
+            .header("POLY_ADDRESS", format!("{:?}", self.wallet.address()))
+            .header("POLY_SIGNATURE", signature)
+            .header("POLY_TIMESTAMP", &timestamp)
+            .header("POLY_API_KEY", &self.wallet.api_key)
+            .header("POLY_PASSPHRASE", &self.wallet.api_passphrase)
+            .header("Content-Type", "application/json")
+            .body(body_json)
             .send()
             .await
             .map_err(|e| ExecutorError::Connection(format!("Failed to submit order: {}", e)))?;
@@ -713,12 +952,20 @@ impl LiveExecutor {
 
     /// Poll order status from API.
     async fn poll_order_status(&self, order_id: &str) -> Result<api::OrderStatusResponse, ExecutorError> {
-        let url = format!("{}/order/{}", self.config.api_endpoint, order_id);
+        let path = format!("/order/{}", order_id);
+        let url = format!("{}{}", self.config.api_endpoint, path);
+        let timestamp = Utc::now().timestamp().to_string();
+
+        // Create HMAC signature for L2 auth
+        let signature = self.wallet.sign_l2_request(&timestamp, "GET", &path, None)?;
 
         let response = self.client
             .get(&url)
-            .header("POLY-ADDRESS", format!("{:?}", self.wallet.address()))
-            .header("POLY-API-KEY", &self.wallet.api_key)
+            .header("POLY_ADDRESS", format!("{:?}", self.wallet.address()))
+            .header("POLY_SIGNATURE", signature)
+            .header("POLY_TIMESTAMP", &timestamp)
+            .header("POLY_API_KEY", &self.wallet.api_key)
+            .header("POLY_PASSPHRASE", &self.wallet.api_passphrase)
             .send()
             .await
             .map_err(|e| ExecutorError::Connection(format!("Failed to poll status: {}", e)))?;
@@ -737,20 +984,30 @@ impl LiveExecutor {
 
     /// Cancel order via API.
     async fn cancel_order_api(&self, order_id: &str) -> Result<api::CancelOrderResponse, ExecutorError> {
-        let url = format!("{}/order", self.config.api_endpoint);
+        let path = "/order";
+        let url = format!("{}{}", self.config.api_endpoint, path);
 
         let request_body = api::CancelOrderRequest {
             order_id: order_id.to_string(),
         };
 
+        // Serialize body for HMAC signing
+        let body_json = serde_json::to_string(&request_body)
+            .map_err(|e| ExecutorError::Internal(format!("Failed to serialize cancel request: {}", e)))?;
+
+        // Create L2 HMAC signature
+        let timestamp = Utc::now().timestamp().to_string();
+        let signature = self.wallet.sign_l2_request(&timestamp, "DELETE", path, Some(&body_json))?;
+
         let response = self.client
             .delete(&url)
-            .header("POLY-ADDRESS", format!("{:?}", self.wallet.address()))
-            .header("POLY-SIGNATURE", &self.wallet.api_secret)
-            .header("POLY-TIMESTAMP", Utc::now().timestamp().to_string())
-            .header("POLY-API-KEY", &self.wallet.api_key)
-            .header("POLY-PASSPHRASE", &self.wallet.api_passphrase)
-            .json(&request_body)
+            .header("POLY_ADDRESS", format!("{:?}", self.wallet.address()))
+            .header("POLY_SIGNATURE", signature)
+            .header("POLY_TIMESTAMP", &timestamp)
+            .header("POLY_API_KEY", &self.wallet.api_key)
+            .header("POLY_PASSPHRASE", &self.wallet.api_passphrase)
+            .header("Content-Type", "application/json")
+            .body(body_json)
             .send()
             .await
             .map_err(|e| ExecutorError::Connection(format!("Failed to cancel order: {}", e)))?;
@@ -771,20 +1028,30 @@ impl LiveExecutor {
     ///
     /// Returns the collateral (USDC) balance for the authenticated wallet.
     pub async fn fetch_balance(&self) -> Result<Decimal, ExecutorError> {
-        let url = format!("{}/balance-allowance", self.config.api_endpoint);
+        let path = "/balance-allowance";
+        let url = format!("{}{}", self.config.api_endpoint, path);
+        let timestamp = Utc::now().timestamp().to_string();
 
         let request_body = api::BalanceAllowanceRequest {
             asset_type: "COLLATERAL".to_string(),
             token_id: None,
         };
 
+        // For GET requests with query params, include them in the path for signing
+        let query_string = serde_urlencoded::to_string(&request_body)
+            .map_err(|e| ExecutorError::Internal(format!("Failed to encode query: {}", e)))?;
+        let full_path = format!("{}?{}", path, query_string);
+
+        // Create HMAC signature for L2 auth
+        let signature = self.wallet.sign_l2_request(&timestamp, "GET", &full_path, None)?;
+
         let response = self.client
             .get(&url)
-            .header("POLY-ADDRESS", format!("{:?}", self.wallet.address()))
-            .header("POLY-SIGNATURE", &self.wallet.api_secret)
-            .header("POLY-TIMESTAMP", Utc::now().timestamp().to_string())
-            .header("POLY-API-KEY", &self.wallet.api_key)
-            .header("POLY-PASSPHRASE", &self.wallet.api_passphrase)
+            .header("POLY_ADDRESS", format!("{:?}", self.wallet.address()))
+            .header("POLY_SIGNATURE", &signature)
+            .header("POLY_TIMESTAMP", &timestamp)
+            .header("POLY_API_KEY", &self.wallet.api_key)
+            .header("POLY_PASSPHRASE", &self.wallet.api_passphrase)
             .query(&request_body)
             .send()
             .await
@@ -954,8 +1221,15 @@ impl Executor for LiveExecutor {
         // Create signed order
         let signed_order = self.create_signed_order(&request)?;
 
+        // Map order type to API format
+        let api_order_type = match request.order_type {
+            OrderType::Gtc | OrderType::Limit => "GTC",
+            OrderType::Ioc => "FOK", // Fill-Or-Kill
+            OrderType::Market => unreachable!(), // Validated above
+        };
+
         // Submit to exchange
-        let order_id = self.submit_order(signed_order).await?;
+        let order_id = self.submit_order(signed_order, api_order_type).await?;
 
         info!(
             request_id = %request.request_id,
@@ -1437,7 +1711,8 @@ mod tests {
             &wallet_config,
             None,
             dec!(1000),
-        );
+        )
+        .await;
 
         assert!(result.is_err());
     }

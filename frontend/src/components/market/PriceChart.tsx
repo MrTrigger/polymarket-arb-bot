@@ -221,10 +221,10 @@ export function PriceChart({ market, trades }: PriceChartProps) {
     if (!confChartContainerRef.current) return;
 
     const chart = createChart(confChartContainerRef.current, {
-      ...getChartOptions(120),
+      ...getChartOptions(180),
       rightPriceScale: {
         borderColor: "#27272a",
-        scaleMargins: { top: 0.1, bottom: 0.1 },
+        scaleMargins: { top: 0.05, bottom: 0.05 },
       },
       // Hide time scale on indicator chart (shared with price chart above)
       timeScale: {
@@ -473,14 +473,18 @@ export function PriceChart({ market, trades }: PriceChartProps) {
     confSeriesRef.current.setData(confDataRef.current as LineData<Time>[]);
     thresholdSeriesRef.current.setData(thresholdDataRef.current as LineData<Time>[]);
 
-    // Force the confidence chart to show both confidence and threshold in visible range
-    const maxValue = Math.max(confidenceData.confidence, thresholdLevel) + 0.05;
-    const minValue = Math.min(confidenceData.confidence, thresholdLevel, 0) - 0.05;
+    // Auto-scale the confidence chart to zoom in on the data range
+    // Don't force start at 0 - let it focus on the actual confidence/threshold values
+    const dataMax = Math.max(confidenceData.confidence, thresholdLevel);
+    const dataMin = Math.min(confidenceData.confidence, thresholdLevel);
+    const dataRange = dataMax - dataMin;
+    // Add 20% padding on each side for visual breathing room
+    const padding = Math.max(dataRange * 0.2, 0.05);
     confSeriesRef.current.applyOptions({
       autoscaleInfoProvider: () => ({
         priceRange: {
-          minValue: Math.max(0, minValue),
-          maxValue: Math.min(1.5, maxValue), // Cap at 150% for readability
+          minValue: Math.max(0, dataMin - padding),
+          maxValue: Math.min(1.0, dataMax + padding),
         },
       }),
     });
@@ -603,7 +607,7 @@ export function PriceChart({ market, trades }: PriceChartProps) {
         <div
           ref={confChartContainerRef}
           className="w-full"
-          style={{ height: 120 }}
+          style={{ height: 180 }}
         />
 
         {/* Legend */}
@@ -656,8 +660,8 @@ export function PriceChartSkeleton() {
         <div className="flex h-72 w-full items-center justify-center">
           <div className="h-64 w-full animate-pulse rounded bg-muted/50" />
         </div>
-        <div className="mt-2 flex h-32 w-full items-center justify-center">
-          <div className="h-28 w-full animate-pulse rounded bg-muted/50" />
+        <div className="mt-2 flex h-44 w-full items-center justify-center">
+          <div className="h-40 w-full animate-pulse rounded bg-muted/50" />
         </div>
       </CardContent>
     </Card>

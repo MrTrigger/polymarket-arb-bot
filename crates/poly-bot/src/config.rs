@@ -319,10 +319,45 @@ impl Default for ShadowConfig {
     }
 }
 
+/// Order execution mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExecutionMode {
+    /// Use limit orders with price chasing (maker-first, then chase to fill).
+    /// Places GTC order, waits for fill, bumps price incrementally if needed.
+    #[default]
+    Limit,
+
+    /// Use market orders (taker, crosses spread immediately).
+    /// Faster fills but pays taker fees.
+    Market,
+}
+
+impl ExecutionMode {
+    fn from_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "limit" | "maker" | "chase" => Some(ExecutionMode::Limit),
+            "market" | "taker" | "ioc" => Some(ExecutionMode::Market),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for ExecutionMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ExecutionMode::Limit => write!(f, "limit"),
+            ExecutionMode::Market => write!(f, "market"),
+        }
+    }
+}
+
 /// Execution configuration.
 #[derive(Debug, Clone)]
 pub struct ExecutionConfig {
-    /// Enable price chasing.
+    /// Order execution mode: "limit" (maker with chase) or "market" (taker).
+    pub execution_mode: ExecutionMode,
+
+    /// Enable price chasing (only applies to Limit mode).
     pub chase_enabled: bool,
 
     /// Chase step size (price increment per iteration).
@@ -344,6 +379,7 @@ pub struct ExecutionConfig {
 impl Default for ExecutionConfig {
     fn default() -> Self {
         Self {
+            execution_mode: ExecutionMode::Limit,
             chase_enabled: true,
             chase_step_size: Decimal::new(1, 3), // 0.001
             chase_check_interval_ms: 100,
@@ -1078,9 +1114,8 @@ impl BotConfig {
             if self.wallet.private_key.is_none() {
                 bail!("Live mode requires POLY_PRIVATE_KEY environment variable");
             }
-            if self.wallet.api_key.is_none() {
-                bail!("Live mode requires POLY_API_KEY environment variable");
-            }
+            // Note: API credentials (api_key, api_secret, api_passphrase) are optional.
+            // If not provided, they will be derived from the private key at startup.
         }
 
         if self.mode == TradingMode::Backtest
@@ -1449,6 +1484,8 @@ impl Default for ShadowToml {
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 struct ExecutionToml {
+    /// Order execution mode: "limit" or "market"
+    execution_mode: String,
     chase_enabled: bool,
     chase_step_size: f64,
     chase_check_interval_ms: u64,
@@ -1460,6 +1497,7 @@ struct ExecutionToml {
 impl Default for ExecutionToml {
     fn default() -> Self {
         Self {
+            execution_mode: "limit".to_string(),
             chase_enabled: true,
             chase_step_size: 0.001,
             chase_check_interval_ms: 100,
@@ -1781,6 +1819,8 @@ impl From<TomlConfig> for BotConfig {
                 max_wait_ms: toml.shadow.max_wait_ms,
             },
             execution: ExecutionConfig {
+                execution_mode: ExecutionMode::from_str(&toml.execution.execution_mode)
+                    .unwrap_or(ExecutionMode::Limit),
                 chase_enabled: toml.execution.chase_enabled,
                 chase_step_size: f64_to_decimal(toml.execution.chase_step_size),
                 chase_check_interval_ms: toml.execution.chase_check_interval_ms,
