@@ -1242,6 +1242,8 @@ mod tests {
             volume_usdc: dec!(5000),
             shadow_orders_fired: 0,
             shadow_orders_filled: 0,
+            allocated_balance: dec!(10000),
+            current_balance: dec!(10250),
         };
 
         let result = BacktestResult::new(

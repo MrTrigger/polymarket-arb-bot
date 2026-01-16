@@ -16,9 +16,11 @@ use axum::{
     routing::get,
     Json, Router,
 };
+use chrono::{Duration, Utc};
 use clickhouse::Row;
+use reqwest::Client as HttpClient;
 use serde::{Deserialize, Serialize};
-use tracing::{error, info};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use poly_common::ClickHouseClient;
@@ -565,6 +567,165 @@ async fn health_check() -> impl IntoResponse {
 }
 
 // ============================================================================
+// Spot Prices API
+// ============================================================================
+
+/// Spot price data point for charts.
+#[derive(Debug, Clone, Serialize, Deserialize, Row)]
+pub struct SpotPriceApiRow {
+    pub price: f64,
+    #[serde(with = "clickhouse::serde::time::datetime64::millis")]
+    pub timestamp: time::OffsetDateTime,
+}
+
+/// Query parameters for spot prices.
+#[derive(Debug, Deserialize)]
+pub struct SpotPricesParams {
+    /// Number of minutes of history to fetch (default: 60, max: 480 = 8 hours).
+    #[serde(default = "default_minutes")]
+    pub minutes: u32,
+}
+
+fn default_minutes() -> u32 {
+    60
+}
+
+/// Binance API URL for klines.
+const BINANCE_KLINES_URL: &str = "https://api.binance.com/api/v3/klines";
+
+/// Convert asset symbol to Binance trading pair.
+fn asset_to_binance_symbol(asset: &str) -> &'static str {
+    match asset.to_uppercase().as_str() {
+        "BTC" => "BTCUSDT",
+        "ETH" => "ETHUSDT",
+        "SOL" => "SOLUSDT",
+        "XRP" => "XRPUSDT",
+        _ => "BTCUSDT",
+    }
+}
+
+/// Fetch historical prices from Binance as fallback.
+async fn fetch_binance_prices(asset: &str, minutes: u32) -> Result<Vec<SpotPriceApiRow>, String> {
+    let client = HttpClient::new();
+    let symbol = asset_to_binance_symbol(asset);
+
+    let now = Utc::now();
+    let start_time = (now - Duration::minutes(minutes as i64)).timestamp_millis();
+    let end_time = now.timestamp_millis();
+
+    let url = format!(
+        "{}?symbol={}&interval=1m&startTime={}&endTime={}&limit={}",
+        BINANCE_KLINES_URL, symbol, start_time, end_time, minutes.min(1000)
+    );
+
+    debug!("Fetching Binance prices for {}: {}", asset, url);
+
+    let response = client.get(&url).send().await
+        .map_err(|e| format!("HTTP request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("Binance API error: HTTP {}", response.status()));
+    }
+
+    let data: Vec<Vec<serde_json::Value>> = response.json().await
+        .map_err(|e| format!("JSON parse failed: {}", e))?;
+
+    // Convert klines to SpotPriceApiRow
+    // Kline format: [open_time, open, high, low, close, volume, close_time, ...]
+    let prices: Vec<SpotPriceApiRow> = data
+        .iter()
+        .filter_map(|kline| {
+            let timestamp_ms = kline.first()?.as_i64()?;
+            let close_price = kline.get(4)?.as_str()?.parse::<f64>().ok()?;
+
+            // Convert timestamp to OffsetDateTime
+            let timestamp = time::OffsetDateTime::from_unix_timestamp(timestamp_ms / 1000).ok()?;
+
+            Some(SpotPriceApiRow {
+                price: close_price,
+                timestamp,
+            })
+        })
+        .collect();
+
+    info!("Fetched {} prices from Binance for {}", prices.len(), asset);
+    Ok(prices)
+}
+
+/// GET /api/prices/:asset - Historical spot prices for an asset.
+/// First tries ClickHouse, then falls back to Binance if no data.
+async fn get_spot_prices(
+    State(state): State<Arc<ApiState>>,
+    Path(asset): Path<String>,
+    Query(params): Query<SpotPricesParams>,
+) -> Result<Json<Vec<SpotPriceApiRow>>, (StatusCode, Json<ApiError>)> {
+    // Validate asset
+    let asset_upper = asset.to_uppercase();
+    if !["BTC", "ETH", "SOL", "XRP"].contains(&asset_upper.as_str()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiError::bad_request(format!("Unknown asset: {}", asset))),
+        ));
+    }
+
+    // Limit minutes to reasonable range (max 8 hours = 480 minutes)
+    let minutes = params.minutes.min(480).max(1);
+
+    // Try ClickHouse first
+    let query = r#"
+        SELECT
+            toFloat64(price) as price,
+            timestamp
+        FROM spot_prices
+        WHERE asset = ?
+          AND timestamp >= now() - INTERVAL ? MINUTE
+        ORDER BY timestamp ASC
+    "#;
+
+    let clickhouse_result = state
+        .clickhouse
+        .inner()
+        .query(query)
+        .bind(&asset_upper)
+        .bind(minutes)
+        .fetch_all::<SpotPriceApiRow>()
+        .await;
+
+    match clickhouse_result {
+        Ok(prices) if !prices.is_empty() => {
+            debug!("Serving {} prices from ClickHouse for {}", prices.len(), asset_upper);
+            Ok(Json(prices))
+        }
+        Ok(_) => {
+            // ClickHouse returned empty - fallback to Binance
+            warn!("ClickHouse has no price data for {}, falling back to Binance", asset_upper);
+            match fetch_binance_prices(&asset_upper, minutes).await {
+                Ok(prices) => Ok(Json(prices)),
+                Err(e) => {
+                    error!(error = %e, asset = %asset, "Binance fallback also failed");
+                    // Return empty array rather than error for charts
+                    Ok(Json(vec![]))
+                }
+            }
+        }
+        Err(e) => {
+            // ClickHouse error - try Binance
+            warn!(error = %e, asset = %asset, "ClickHouse query failed, trying Binance fallback");
+            match fetch_binance_prices(&asset_upper, minutes).await {
+                Ok(prices) => Ok(Json(prices)),
+                Err(binance_err) => {
+                    error!(clickhouse_error = %e, binance_error = %binance_err, asset = %asset, "Both ClickHouse and Binance failed");
+                    Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ApiError::internal(format!("Database error: {}", e))),
+                    ))
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
 // Router Configuration
 // ============================================================================
 
@@ -610,6 +771,7 @@ pub fn create_api_router(state: Arc<ApiState>) -> Router {
         .route("/api/sessions/{id}/trades", get(get_session_trades))
         .route("/api/sessions/{id}/logs", get(get_session_logs))
         .route("/api/sessions/{id}/markets", get(get_session_markets))
+        .route("/api/prices/{asset}", get(get_spot_prices))
         .with_state(state)
 }
 

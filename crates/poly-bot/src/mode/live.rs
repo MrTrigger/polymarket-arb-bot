@@ -22,7 +22,8 @@ use rust_decimal::Decimal;
 use tokio::sync::broadcast;
 use tracing::{error, info, warn};
 
-use poly_common::ClickHouseClient;
+use poly_common::{ClickHouseClient, CryptoAsset};
+use poly_market::MarketDiscovery;
 
 use crate::config::{BotConfig, DashboardConfig, ObservabilityConfig, TradingMode};
 use crate::dashboard::{
@@ -54,6 +55,8 @@ pub struct LiveModeConfig {
     pub dashboard: DashboardConfig,
     /// Initial USDC balance.
     pub initial_balance: Decimal,
+    /// Assets to trade (for ATR warmup).
+    pub discovery_assets: Vec<CryptoAsset>,
     /// Graceful shutdown timeout (seconds).
     pub shutdown_timeout_secs: u64,
 }
@@ -67,6 +70,7 @@ impl Default for LiveModeConfig {
             observability: ObservabilityConfig::default(),
             dashboard: DashboardConfig::default(),
             initial_balance: Decimal::new(1000, 0), // $1000 default
+            discovery_assets: vec![CryptoAsset::Btc, CryptoAsset::Eth, CryptoAsset::Sol],
             shutdown_timeout_secs: 30,
         }
     }
@@ -75,13 +79,30 @@ impl Default for LiveModeConfig {
 impl LiveModeConfig {
     /// Create config from BotConfig.
     pub fn from_bot_config(config: &BotConfig) -> Self {
+        // Use allocated balance from config (trading.sizing.available_balance)
+        let allocated_balance = config.trading.sizing.available_balance;
+
+        // Convert string assets to CryptoAsset enum
+        let discovery_assets: Vec<CryptoAsset> = config
+            .assets
+            .iter()
+            .filter_map(|s| match s.to_uppercase().as_str() {
+                "BTC" | "BITCOIN" => Some(CryptoAsset::Btc),
+                "ETH" | "ETHEREUM" => Some(CryptoAsset::Eth),
+                "SOL" | "SOLANA" => Some(CryptoAsset::Sol),
+                "XRP" | "RIPPLE" => Some(CryptoAsset::Xrp),
+                _ => None,
+            })
+            .collect();
+
         Self {
             data_source: LiveDataSourceConfig::default(),
             executor: LiveExecutorConfig::from_execution_config(&config.execution),
             strategy: StrategyConfig::from_trading_config(&config.trading, (config.window_duration.minutes() * 60) as i64),
             observability: config.observability.clone(),
             dashboard: config.dashboard.clone(),
-            initial_balance: Decimal::new(1000, 0),
+            initial_balance: allocated_balance,
+            discovery_assets,
             shutdown_timeout_secs: 30,
         }
     }
@@ -194,6 +215,24 @@ impl LiveMode {
         )
         .context("Failed to create live executor")?;
 
+        // Fetch real balance from Polymarket
+        let real_balance = match executor.fetch_balance().await {
+            Ok(balance) => {
+                info!(balance = %balance, "Fetched Polymarket account balance");
+                balance
+            }
+            Err(e) => {
+                warn!(error = %e, "Failed to fetch Polymarket balance, using configured balance");
+                self.config.initial_balance
+            }
+        };
+
+        // Set balance info in global state for dashboard
+        // allocated_balance = configured trading capital
+        // current_balance = actual Polymarket account balance
+        self.state.metrics.set_allocated_balance(self.config.initial_balance);
+        self.state.metrics.set_current_balance(real_balance);
+
         // Set up observability
         let (capture, obs_tasks) = self.setup_observability().await?;
 
@@ -224,6 +263,30 @@ impl LiveMode {
             self.state.clone(),
             self.config.strategy.clone(),
         );
+
+        // Warm up ATR tracker with recent historical prices
+        // This ensures accurate ATR from the first trade instead of waiting for data to accumulate
+        info!("Warming up ATR tracker with recent prices...");
+        let warmup_discovery = MarketDiscovery::with_assets(self.config.discovery_assets.clone());
+        for asset in &self.config.discovery_assets {
+            match warmup_discovery.fetch_recent_prices(*asset, 10).await {
+                Ok(prices) if !prices.is_empty() => {
+                    strategy.warmup_atr(*asset, &prices);
+                    info!(
+                        "Warmed up ATR for {} with {} recent prices",
+                        asset,
+                        prices.len()
+                    );
+                }
+                Ok(_) => {
+                    warn!("No recent prices available for {} warmup, using default ATR", asset);
+                }
+                Err(e) => {
+                    warn!("Failed to fetch warmup prices for {}: {}, using default ATR", asset, e);
+                }
+            }
+        }
+        info!("ATR warmup complete");
 
         // Add observability sender if capture is enabled
         if let Some(ref cap) = capture

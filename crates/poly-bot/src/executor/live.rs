@@ -315,6 +315,21 @@ mod api {
         pub error: Option<String>,
         pub message: Option<String>,
     }
+
+    /// Balance and allowance request parameters.
+    #[derive(Debug, Serialize)]
+    pub struct BalanceAllowanceRequest {
+        pub asset_type: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub token_id: Option<String>,
+    }
+
+    /// Balance and allowance response from Polymarket API.
+    #[derive(Debug, Deserialize)]
+    pub struct BalanceAllowanceResponse {
+        pub balance: String,
+        pub allowance: String,
+    }
 }
 
 /// Live executor for real order submission.
@@ -750,6 +765,52 @@ impl LiveExecutor {
 
         serde_json::from_str(&body)
             .map_err(|e| ExecutorError::Internal(format!("Failed to parse cancel response: {} - {}", e, body)))
+    }
+
+    /// Fetch USDC balance from Polymarket API.
+    ///
+    /// Returns the collateral (USDC) balance for the authenticated wallet.
+    pub async fn fetch_balance(&self) -> Result<Decimal, ExecutorError> {
+        let url = format!("{}/balance-allowance", self.config.api_endpoint);
+
+        let request_body = api::BalanceAllowanceRequest {
+            asset_type: "COLLATERAL".to_string(),
+            token_id: None,
+        };
+
+        let response = self.client
+            .get(&url)
+            .header("POLY-ADDRESS", format!("{:?}", self.wallet.address()))
+            .header("POLY-SIGNATURE", &self.wallet.api_secret)
+            .header("POLY-TIMESTAMP", Utc::now().timestamp().to_string())
+            .header("POLY-API-KEY", &self.wallet.api_key)
+            .header("POLY-PASSPHRASE", &self.wallet.api_passphrase)
+            .query(&request_body)
+            .send()
+            .await
+            .map_err(|e| ExecutorError::Connection(format!("Failed to fetch balance: {}", e)))?;
+
+        let status = response.status();
+        let body = response.text().await
+            .map_err(|e| ExecutorError::Connection(format!("Failed to read balance response: {}", e)))?;
+
+        if !status.is_success() {
+            return Err(ExecutorError::Connection(format!("HTTP {}: {}", status, body)));
+        }
+
+        let balance_response: api::BalanceAllowanceResponse = serde_json::from_str(&body)
+            .map_err(|e| ExecutorError::Internal(format!("Failed to parse balance response: {} - {}", e, body)))?;
+
+        // Parse balance string to Decimal
+        let balance: Decimal = balance_response.balance.parse()
+            .map_err(|e| ExecutorError::Internal(format!("Failed to parse balance value '{}': {}", balance_response.balance, e)))?;
+
+        // Balance is in wei (6 decimals for USDC), convert to USDC
+        let usdc_balance = balance / Decimal::new(1_000_000, 0);
+
+        info!(balance_wei = %balance_response.balance, balance_usdc = %usdc_balance, "Fetched Polymarket balance");
+
+        Ok(usdc_balance)
     }
 
     /// Fire shadow bid for a filled primary order.

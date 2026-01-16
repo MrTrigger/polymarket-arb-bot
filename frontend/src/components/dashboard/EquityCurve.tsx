@@ -196,7 +196,7 @@ export function EquityCurve() {
       <CardContent className="p-0 pb-4 pr-4">
         <div
           ref={chartContainerRef}
-          className="h-48 w-full"
+          className="h-80 w-full"
         />
       </CardContent>
     </Card>
@@ -214,8 +214,8 @@ export function EquityCurveSkeleton() {
         <div className="h-4 w-4 animate-pulse rounded bg-muted" />
       </CardHeader>
       <CardContent className="p-0 pb-4 pr-4">
-        <div className="flex h-48 w-full items-center justify-center">
-          <div className="h-32 w-full animate-pulse rounded bg-muted/50" />
+        <div className="flex h-80 w-full items-center justify-center">
+          <div className="h-64 w-full animate-pulse rounded bg-muted/50" />
         </div>
       </CardContent>
     </Card>

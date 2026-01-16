@@ -79,7 +79,8 @@ const INVENTORY_STATE_CONFIG: Record<string, InventoryStateConfig> = {
  * - Visual indicators for different inventory states
  */
 export function PositionPanel({ position, market }: PositionPanelProps) {
-  // Calculate unrealized P&L based on current market prices
+  // Calculate unrealized P&L based on binary outcome if settled now
+  // For binary options: YES wins if spot > strike, NO wins if spot <= strike
   const unrealizedPnl = useMemo(() => {
     if (!position || !market) return null;
 
@@ -87,14 +88,20 @@ export function PositionPanel({ position, market }: PositionPanelProps) {
     const noShares = parseDecimal(position.no_shares);
     const yesCost = parseDecimal(position.yes_cost_basis);
     const noCost = parseDecimal(position.no_cost_basis);
+    const spotPrice = parseDecimal(market.spot_price);
+    const strikePrice = parseDecimal(market.strike_price);
 
-    // Get current best bids to estimate liquidation value
-    const yesBid = market.yes_book ? parseDecimal(market.yes_book.best_bid) : 0;
-    const noBid = market.no_book ? parseDecimal(market.no_book.best_bid) : 0;
+    // Skip if strike is not set yet (shows as 0)
+    if (strikePrice === 0) return null;
 
-    // Unrealized = (current value) - (cost basis)
-    const yesValue = yesShares * yesBid;
-    const noValue = noShares * noBid;
+    // Determine settlement values based on binary outcome
+    // YES shares worth $1 if spot > strike, else $0
+    // NO shares worth $1 if spot <= strike, else $0
+    const yesWins = spotPrice > strikePrice;
+    const yesValue = yesWins ? yesShares : 0;
+    const noValue = yesWins ? 0 : noShares;
+
+    // Unrealized P&L = settlement value - cost basis
     const totalValue = yesValue + noValue;
     const totalCost = yesCost + noCost;
 
@@ -105,15 +112,19 @@ export function PositionPanel({ position, market }: PositionPanelProps) {
   const imbalanceViz = useMemo(() => {
     if (!position) return null;
 
+    const yesShares = parseDecimal(position.yes_shares);
+    const noShares = parseDecimal(position.no_shares);
+    const total = yesShares + noShares;
     const ratio = parseDecimal(position.imbalance_ratio);
-    // Convert to percentage bar width (0.5 = centered, 0 = all NO, 1 = all YES)
-    const yesWeight = ratio;
-    const noWeight = 1 - ratio;
+
+    // Calculate actual share distribution (not imbalance ratio)
+    const yesPercent = total > 0 ? Math.round((yesShares / total) * 100) : 50;
+    const noPercent = total > 0 ? Math.round((noShares / total) * 100) : 50;
 
     return {
-      yesPercent: Math.round(yesWeight * 100),
-      noPercent: Math.round(noWeight * 100),
-      ratio,
+      yesPercent,
+      noPercent,
+      ratio, // imbalance ratio (0 = balanced, 1 = fully one-sided)
     };
   }, [position]);
 

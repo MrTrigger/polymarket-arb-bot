@@ -33,6 +33,8 @@ fn default_metrics() -> MetricsSnapshot {
         volume_usdc: Decimal::ZERO,
         shadow_orders_fired: 0,
         shadow_orders_filled: 0,
+        allocated_balance: Decimal::ZERO,
+        current_balance: Decimal::ZERO,
     }
 }
 
@@ -66,6 +68,8 @@ fn test_pnl_calculation_basic() {
         volume_usdc: dec!(1000),
         shadow_orders_fired: 0,
         shadow_orders_filled: 0,
+        allocated_balance: initial,
+        current_balance: final_balance,
     };
 
     let result = BacktestResult::new(

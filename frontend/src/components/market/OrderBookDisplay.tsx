@@ -174,6 +174,27 @@ export function OrderBookDisplay({ market }: OrderBookDisplayProps) {
     };
   }, [market.yes_book, market.no_book]);
 
+  // Calculate price distribution for visual bar
+  const priceDistribution = useMemo(() => {
+    const yesAsk = market.yes_book ? parseDecimal(market.yes_book.best_ask) : null;
+    const noAsk = market.no_book ? parseDecimal(market.no_book.best_ask) : null;
+
+    if (yesAsk === null || noAsk === null || (yesAsk + noAsk) === 0) {
+      return null;
+    }
+
+    const total = yesAsk + noAsk;
+    const yesPercent = Math.round((yesAsk / total) * 100);
+    const noPercent = Math.round((noAsk / total) * 100);
+
+    return {
+      yesPercent,
+      noPercent,
+      yesPrice: yesAsk,
+      noPrice: noAsk,
+    };
+  }, [market.yes_book, market.no_book]);
+
   // Get arb spread color
   const getArbColor = (bps: number | null) => {
     if (bps === null) return "text-muted-foreground";
@@ -210,6 +231,40 @@ export function OrderBookDisplay({ market }: OrderBookDisplayProps) {
             nowMs={nowMs}
           />
         </div>
+
+        {/* Price distribution bar */}
+        {priceDistribution && (
+          <div className="space-y-2">
+            <div className="flex items-center justify-between text-xs text-muted-foreground">
+              <span>Market Implied Probability</span>
+              <span className="font-mono">
+                {(priceDistribution.yesPrice * 100).toFixed(0)}¢ / {(priceDistribution.noPrice * 100).toFixed(0)}¢
+              </span>
+            </div>
+            <div className="flex h-3 overflow-hidden rounded-full bg-muted">
+              <div
+                className="bg-green-500 transition-all flex items-center justify-center"
+                style={{ width: `${priceDistribution.yesPercent}%` }}
+              >
+                {priceDistribution.yesPercent >= 15 && (
+                  <span className="text-[10px] font-medium text-white/90">YES</span>
+                )}
+              </div>
+              <div
+                className="bg-red-500 transition-all flex items-center justify-center"
+                style={{ width: `${priceDistribution.noPercent}%` }}
+              >
+                {priceDistribution.noPercent >= 15 && (
+                  <span className="text-[10px] font-medium text-white/90">NO</span>
+                )}
+              </div>
+            </div>
+            <div className="flex justify-between text-xs">
+              <span className="text-green-500">YES {priceDistribution.yesPercent}%</span>
+              <span className="text-red-500">NO {priceDistribution.noPercent}%</span>
+            </div>
+          </div>
+        )}
 
         {/* Combined arbitrage calculation */}
         <div

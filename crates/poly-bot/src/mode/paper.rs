@@ -84,8 +84,11 @@ impl Default for PaperModeConfig {
 impl PaperModeConfig {
     /// Create config from BotConfig.
     pub fn from_bot_config(config: &BotConfig) -> Self {
+        // Use allocated balance from config (trading.sizing.available_balance)
+        let allocated_balance = config.trading.sizing.available_balance;
+
         let mut executor_config = SimulatedExecutorConfig::paper();
-        executor_config.initial_balance = Decimal::new(10000, 0);
+        executor_config.initial_balance = allocated_balance;
         executor_config.latency_ms = config.execution.paper_fill_latency_ms;
         executor_config.fee_rate = Decimal::ZERO; // Polymarket has 0% maker fees
         executor_config.enforce_balance = true;
@@ -118,7 +121,7 @@ impl PaperModeConfig {
             engines: config.engines.clone(),
             discovery: discovery_config,
             dashboard: config.dashboard.clone(),
-            initial_balance: Decimal::new(10000, 0),
+            initial_balance: allocated_balance,
             shutdown_timeout_secs: 30,
         }
     }
@@ -257,6 +260,10 @@ impl PaperMode {
         executor_config.initial_balance = self.config.initial_balance;
         let executor = SimulatedExecutor::new(executor_config);
 
+        // Set balance info in global state for dashboard
+        self.state.metrics.set_allocated_balance(self.config.initial_balance);
+        self.state.metrics.set_current_balance(self.config.initial_balance);
+
         // Set up observability
         let (capture, obs_tasks) = self.setup_observability().await?;
 
@@ -288,6 +295,30 @@ impl PaperMode {
             self.config.strategy.clone(),
             self.config.engines.clone(),
         );
+
+        // Warm up ATR tracker with recent historical prices
+        // This ensures accurate ATR from the first trade instead of waiting for data to accumulate
+        info!("Warming up ATR tracker with recent prices...");
+        let warmup_discovery = MarketDiscovery::with_assets(self.config.discovery.assets.clone());
+        for asset in &self.config.discovery.assets {
+            match warmup_discovery.fetch_recent_prices(*asset, 10).await {
+                Ok(prices) if !prices.is_empty() => {
+                    strategy.warmup_atr(*asset, &prices);
+                    info!(
+                        "Warmed up ATR for {} with {} recent prices",
+                        asset,
+                        prices.len()
+                    );
+                }
+                Ok(_) => {
+                    warn!("No recent prices available for {} warmup, using default ATR", asset);
+                }
+                Err(e) => {
+                    warn!("Failed to fetch warmup prices for {}: {}, using default ATR", asset, e);
+                }
+            }
+        }
+        info!("ATR warmup complete");
 
         // Add observability sender if capture is enabled
         if let Some(ref cap) = capture

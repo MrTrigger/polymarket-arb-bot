@@ -205,6 +205,65 @@ impl MarketDiscovery {
         }
     }
 
+    /// Fetch recent spot prices from Binance for ATR warmup.
+    ///
+    /// Returns the last `minutes` worth of 1-minute close prices for the given asset.
+    /// Used to warm up ATR trackers before trading starts.
+    ///
+    /// # Arguments
+    /// * `asset` - The crypto asset to fetch prices for
+    /// * `minutes` - Number of minutes of history to fetch (default 10)
+    ///
+    /// # Returns
+    /// Vec of prices in chronological order (oldest first)
+    pub async fn fetch_recent_prices(
+        &self,
+        asset: CryptoAsset,
+        minutes: usize,
+    ) -> Result<Vec<Decimal>, DiscoveryError> {
+        let symbol = asset.binance_symbol().to_uppercase();
+        let now = Utc::now();
+        let start_time = (now - chrono::Duration::minutes(minutes as i64)).timestamp_millis();
+        let end_time = now.timestamp_millis();
+
+        let url = format!(
+            "{}/api/v3/klines?symbol={}&interval=1m&startTime={}&endTime={}&limit={}",
+            BINANCE_API_URL, symbol, start_time, end_time, minutes
+        );
+
+        debug!(
+            "Fetching recent prices for {} ({} minutes): {}",
+            asset, minutes, url
+        );
+
+        let response = self.http.get(&url).send().await?;
+
+        if !response.status().is_success() {
+            warn!(
+                "Failed to fetch recent prices for {}: HTTP {}",
+                asset,
+                response.status()
+            );
+            return Ok(Vec::new());
+        }
+
+        let klines: Vec<BinanceKline> = response.json().await?;
+
+        // Extract close prices (index 4 in kline array)
+        let prices: Vec<Decimal> = klines
+            .iter()
+            .filter_map(|k| k.0.get(4)?.as_str()?.parse().ok())
+            .collect();
+
+        info!(
+            "Fetched {} recent prices for {} for ATR warmup",
+            prices.len(),
+            asset
+        );
+
+        Ok(prices)
+    }
+
     /// Discover active 15-minute markets.
     /// Returns newly discovered markets (not seen before).
     ///

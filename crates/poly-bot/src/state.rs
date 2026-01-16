@@ -14,9 +14,12 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
+use parking_lot::RwLock;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 
 use poly_common::types::{CryptoAsset, Outcome};
+use crate::dashboard::types::TradeRecord;
 
 /// Global shared state for the trading bot.
 ///
@@ -156,6 +159,14 @@ pub struct SharedMarketData {
     /// Key: event_id
     /// Value: ActiveWindow
     pub active_windows: DashMap<String, ActiveWindow>,
+
+    /// Latest confidence snapshots for dashboard display.
+    /// Key: event_id
+    /// Value: ConfidenceSnapshot
+    pub confidence_snapshots: DashMap<String, ConfidenceSnapshot>,
+
+    /// Recent trades for dashboard display (ring buffer, max 100).
+    pub recent_trades: RwLock<Vec<TradeRecord>>,
 }
 
 impl SharedMarketData {
@@ -167,6 +178,8 @@ impl SharedMarketData {
             inventory: DashMap::new(),
             shadow_orders: DashMap::new(),
             active_windows: DashMap::new(),
+            confidence_snapshots: DashMap::new(),
+            recent_trades: RwLock::new(Vec::with_capacity(100)),
         }
     }
 
@@ -226,6 +239,38 @@ impl SharedMarketData {
             .iter()
             .map(|r| r.value().total_exposure())
             .sum()
+    }
+
+    /// Update confidence snapshot for a market.
+    #[inline]
+    pub fn update_confidence(&self, event_id: &str, snapshot: ConfidenceSnapshot) {
+        self.confidence_snapshots.insert(event_id.to_string(), snapshot);
+    }
+
+    /// Get confidence snapshot for a market.
+    #[inline]
+    pub fn get_confidence(&self, event_id: &str) -> Option<ConfidenceSnapshot> {
+        self.confidence_snapshots.get(event_id).map(|r| r.value().clone())
+    }
+
+    /// Remove confidence snapshot for a market.
+    #[inline]
+    pub fn remove_confidence(&self, event_id: &str) {
+        self.confidence_snapshots.remove(event_id);
+    }
+
+    /// Add a trade to recent trades (ring buffer, max 100).
+    pub fn add_trade(&self, trade: TradeRecord) {
+        let mut trades = self.recent_trades.write();
+        trades.insert(0, trade);
+        if trades.len() > 100 {
+            trades.truncate(100);
+        }
+    }
+
+    /// Get recent trades for dashboard.
+    pub fn get_recent_trades(&self) -> Vec<TradeRecord> {
+        self.recent_trades.read().clone()
     }
 }
 
@@ -319,6 +364,15 @@ pub struct MetricsCounters {
 
     /// Shadow orders filled.
     pub shadow_orders_filled: AtomicU64,
+
+    /// Allocated balance for the bot in cents (configured trading capital).
+    /// Divide by 100 for USDC value.
+    pub allocated_balance_cents: AtomicI64,
+
+    /// Current/real account balance in cents (may differ from allocated).
+    /// For paper trading, this equals allocated. For live, fetched from exchange.
+    /// Divide by 100 for USDC value.
+    pub current_balance_cents: AtomicI64,
 }
 
 impl MetricsCounters {
@@ -334,6 +388,8 @@ impl MetricsCounters {
             volume_cents: AtomicU64::new(0),
             shadow_orders_fired: AtomicU64::new(0),
             shadow_orders_filled: AtomicU64::new(0),
+            allocated_balance_cents: AtomicI64::new(0),
+            current_balance_cents: AtomicI64::new(0),
         }
     }
 
@@ -379,6 +435,30 @@ impl MetricsCounters {
         Decimal::new(cents, 2)
     }
 
+    /// Set the allocated balance (trading capital) in USDC.
+    pub fn set_allocated_balance(&self, usdc: Decimal) {
+        let cents = (usdc * Decimal::ONE_HUNDRED).to_i64().unwrap_or(0);
+        self.allocated_balance_cents.store(cents, Ordering::Relaxed);
+    }
+
+    /// Set the current/real account balance in USDC.
+    pub fn set_current_balance(&self, usdc: Decimal) {
+        let cents = (usdc * Decimal::ONE_HUNDRED).to_i64().unwrap_or(0);
+        self.current_balance_cents.store(cents, Ordering::Relaxed);
+    }
+
+    /// Get allocated balance in USDC.
+    pub fn allocated_balance_usdc(&self) -> Decimal {
+        let cents = self.allocated_balance_cents.load(Ordering::Relaxed);
+        Decimal::new(cents, 2)
+    }
+
+    /// Get current balance in USDC.
+    pub fn current_balance_usdc(&self) -> Decimal {
+        let cents = self.current_balance_cents.load(Ordering::Relaxed);
+        Decimal::new(cents, 2)
+    }
+
     /// Get a snapshot of all metrics.
     pub fn snapshot(&self) -> MetricsSnapshot {
         MetricsSnapshot {
@@ -391,6 +471,8 @@ impl MetricsCounters {
             volume_usdc: self.volume_usdc(),
             shadow_orders_fired: self.shadow_orders_fired.load(Ordering::Relaxed),
             shadow_orders_filled: self.shadow_orders_filled.load(Ordering::Relaxed),
+            allocated_balance: self.allocated_balance_usdc(),
+            current_balance: self.current_balance_usdc(),
         }
     }
 }
@@ -413,6 +495,8 @@ pub struct MetricsSnapshot {
     pub volume_usdc: Decimal,
     pub shadow_orders_fired: u64,
     pub shadow_orders_filled: u64,
+    pub allocated_balance: Decimal,
+    pub current_balance: Decimal,
 }
 
 /// Live order book state for a single token.
@@ -622,6 +706,67 @@ pub enum WindowPhase {
     Mid,
     /// <2 minutes remaining (lower threshold).
     Late,
+}
+
+/// Confidence snapshot for dashboard display.
+///
+/// Captures the current confidence calculation state for a market
+/// so the dashboard can display confidence graphs and thresholds.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ConfidenceSnapshot {
+    /// Event ID this snapshot belongs to.
+    pub event_id: String,
+    /// Current combined confidence (0.0 to 1.0).
+    pub confidence: Decimal,
+    /// Time confidence component (0.0 to 1.0).
+    pub time_confidence: Decimal,
+    /// Distance confidence component (0.0 to 1.0).
+    pub distance_confidence: Decimal,
+    /// Current threshold for trading (min_edge, decays over time).
+    pub threshold: Decimal,
+    /// Expected value (confidence - favorable_price).
+    pub ev: Decimal,
+    /// Whether this would qualify for a trade.
+    pub would_trade: bool,
+    /// Distance from strike in dollars.
+    pub distance_dollars: Decimal,
+    /// ATR multiple (distance / ATR).
+    pub atr_multiple: Decimal,
+    /// Favorable price for the dominant side.
+    pub favorable_price: Decimal,
+    /// Snapshot timestamp (milliseconds since epoch).
+    pub timestamp_ms: i64,
+}
+
+impl ConfidenceSnapshot {
+    /// Create a new confidence snapshot.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        event_id: String,
+        confidence: Decimal,
+        time_confidence: Decimal,
+        distance_confidence: Decimal,
+        threshold: Decimal,
+        ev: Decimal,
+        would_trade: bool,
+        distance_dollars: Decimal,
+        atr_multiple: Decimal,
+        favorable_price: Decimal,
+    ) -> Self {
+        Self {
+            event_id,
+            confidence,
+            time_confidence,
+            distance_confidence,
+            threshold,
+            ev,
+            would_trade,
+            distance_dollars,
+            atr_multiple,
+            favorable_price,
+            timestamp_ms: Utc::now().timestamp_millis(),
+        }
+    }
 }
 
 #[cfg(test)]

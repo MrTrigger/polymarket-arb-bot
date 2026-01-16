@@ -291,6 +291,8 @@ mod tests {
             events_processed: 10000,
             shadow_orders_fired: 5,
             shadow_orders_filled: 3,
+            allocated_balance: dec!(1000.00),
+            current_balance: dec!(1000.00),
         }
     }
 

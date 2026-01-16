@@ -8,3 +8,4 @@ export {
 export { LogWindow, LogWindowSkeleton } from "./LogWindow";
 export { SessionMetrics, SessionMetricsSkeleton } from "./SessionMetrics";
 export { AnomalyAlerts, AnomalyAlertsSkeleton } from "./AnomalyAlerts";
+export { AccountInfo, AccountInfoSkeleton } from "./AccountInfo";

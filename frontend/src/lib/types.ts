@@ -63,6 +63,10 @@ export interface MetricsSnapshot {
   shadow_orders_filled: number;
   /** Win rate (0.0-1.0), null if no trades. */
   win_rate: number | null;
+  /** Allocated balance for the bot (configured trading capital) in USDC. */
+  allocated_balance: string;
+  /** Current/real account balance in USDC. */
+  current_balance: string;
 }
 
 // ============================================================================
@@ -93,6 +97,33 @@ export interface ActiveMarket {
   arb_spread: string;
   /** Whether there's currently an arb opportunity. */
   has_arb_opportunity: boolean;
+  /** Confidence data for chart display. */
+  confidence: ConfidenceData | null;
+}
+
+/**
+ * Confidence data for dashboard chart display.
+ * Shows current trading confidence and thresholds.
+ */
+export interface ConfidenceData {
+  /** Current combined confidence (0.0 to 1.0). */
+  confidence: string;
+  /** Time confidence component (0.0 to 1.0). */
+  time_confidence: string;
+  /** Distance confidence component (0.0 to 1.0). */
+  distance_confidence: string;
+  /** Current threshold for trading (min_edge, decays over time). */
+  threshold: string;
+  /** Expected value (confidence - favorable_price). */
+  ev: string;
+  /** Whether this would qualify for a trade. */
+  would_trade: boolean;
+  /** Distance from strike in dollars. */
+  distance_dollars: string;
+  /** ATR multiple (distance / ATR). */
+  atr_multiple: string;
+  /** Favorable price for the dominant side. */
+  favorable_price: string;
 }
 
 /**

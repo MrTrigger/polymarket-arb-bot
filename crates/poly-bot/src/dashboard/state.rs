@@ -79,8 +79,13 @@ impl DashboardState {
         Self {
             timestamp: Utc::now(),
             metrics: MetricsSnapshotJson::from_counters(&state.metrics),
-            markets: Self::collect_markets(&state.market_data.active_windows, &state.market_data.order_books, &state.market_data.spot_prices),
-            recent_trades: Vec::new(), // Populated separately via capture channel
+            markets: Self::collect_markets(
+                &state.market_data.active_windows,
+                &state.market_data.order_books,
+                &state.market_data.spot_prices,
+                &state.market_data.confidence_snapshots,
+            ),
+            recent_trades: state.market_data.get_recent_trades(), // From GlobalState
             positions: Self::collect_positions(&state.market_data.inventory),
             control: ControlState::from_flags(&state.control),
             recent_logs: Vec::new(), // Populated separately via capture channel
@@ -93,6 +98,7 @@ impl DashboardState {
         windows: &dashmap::DashMap<String, ActiveWindow>,
         order_books: &dashmap::DashMap<String, LiveOrderBook>,
         spot_prices: &dashmap::DashMap<String, (Decimal, i64)>,
+        confidence_snapshots: &dashmap::DashMap<String, crate::state::ConfidenceSnapshot>,
     ) -> Vec<ActiveMarketState> {
         let mut markets = Vec::new();
 
@@ -119,6 +125,21 @@ impl DashboardState {
                 _ => (Decimal::ZERO, false),
             };
 
+            // Get confidence snapshot if available
+            let confidence = confidence_snapshots
+                .get(&window.event_id)
+                .map(|snap| ConfidenceData {
+                    confidence: snap.confidence,
+                    time_confidence: snap.time_confidence,
+                    distance_confidence: snap.distance_confidence,
+                    threshold: snap.threshold,
+                    ev: snap.ev,
+                    would_trade: snap.would_trade,
+                    distance_dollars: snap.distance_dollars,
+                    atr_multiple: snap.atr_multiple,
+                    favorable_price: snap.favorable_price,
+                });
+
             markets.push(ActiveMarketState {
                 event_id: window.event_id.clone(),
                 asset: window.asset.as_str().to_string(),
@@ -130,6 +151,7 @@ impl DashboardState {
                 no_book: no_book.map(OrderBookSummary::from),
                 arb_spread,
                 has_arb_opportunity: has_arb,
+                confidence,
             });
         }
 
@@ -215,6 +237,12 @@ pub struct MetricsSnapshotJson {
 
     /// Win rate (0.0-1.0).
     pub win_rate: Option<f64>,
+
+    /// Allocated balance for the bot (configured trading capital) in USDC.
+    pub allocated_balance: String,
+
+    /// Current/real account balance in USDC.
+    pub current_balance: String,
 }
 
 impl MetricsSnapshotJson {
@@ -246,6 +274,8 @@ impl From<MetricsSnapshot> for MetricsSnapshotJson {
             shadow_orders_fired: m.shadow_orders_fired,
             shadow_orders_filled: m.shadow_orders_filled,
             win_rate,
+            allocated_balance: m.allocated_balance.to_string(),
+            current_balance: m.current_balance.to_string(),
         }
     }
 }
@@ -287,6 +317,32 @@ pub struct ActiveMarketState {
 
     /// Whether there's currently an arb opportunity.
     pub has_arb_opportunity: bool,
+
+    /// Confidence data for chart display.
+    pub confidence: Option<ConfidenceData>,
+}
+
+/// Confidence data for dashboard chart display.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfidenceData {
+    /// Current combined confidence (0.0 to 1.0).
+    pub confidence: Decimal,
+    /// Time confidence component (0.0 to 1.0).
+    pub time_confidence: Decimal,
+    /// Distance confidence component (0.0 to 1.0).
+    pub distance_confidence: Decimal,
+    /// Current threshold for trading (min_edge, decays over time).
+    pub threshold: Decimal,
+    /// Expected value (confidence - favorable_price).
+    pub ev: Decimal,
+    /// Whether this would qualify for a trade.
+    pub would_trade: bool,
+    /// Distance from strike in dollars.
+    pub distance_dollars: Decimal,
+    /// ATR multiple (distance / ATR).
+    pub atr_multiple: Decimal,
+    /// Favorable price for the dominant side.
+    pub favorable_price: Decimal,
 }
 
 // ============================================================================

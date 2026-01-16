@@ -86,13 +86,18 @@ export function MarketDetail() {
         </div>
       </div>
 
+      {/* Price chart - full width */}
+      <div className="mb-6">
+        <PriceChart market={market} trades={marketTrades} />
+      </div>
+
       {/* Main content grid */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-        {/* Price chart */}
-        <PriceChart market={market} trades={marketTrades} />
-
         {/* Order book display */}
         <OrderBookDisplay market={market} />
+
+        {/* Arbitrage Analysis placeholder - right side */}
+        <div /> {/* Empty placeholder for grid alignment */}
 
         {/* Position panel */}
         <PositionPanel position={position ?? null} market={market} />

@@ -159,6 +159,7 @@ impl ActiveMakerOrder {
 }
 
 use crate::config::{EnginesConfig, TradingConfig};
+use crate::dashboard::types::{DashboardOrderType, TradeRecord, TradeSide, TradeStatus};
 use crate::data_source::{
     BookDeltaEvent, BookSnapshotEvent, DataSource, DataSourceError, FillEvent, MarketEvent,
     SpotPriceEvent, WindowCloseEvent, WindowOpenEvent,
@@ -914,6 +915,60 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                     );
                     market.state.strike_price = event.price;
                     market.strike_price = event.price; // Also update the TrackedMarket field
+
+                    // Also update ActiveWindow in GlobalState for dashboard display
+                    if let Some(mut window) = self.state.market_data.active_windows.get_mut(&market.event_id) {
+                        window.strike_price = event.price;
+                    }
+                }
+
+                // Sync confidence data for dashboard display (if strike is set)
+                if !market.strike_price.is_zero() {
+                    let distance_dollars = (event.price - market.strike_price).abs();
+                    let seconds_remaining = market.state.seconds_remaining;
+                    let window_duration_secs = self.config.window_duration_secs;
+                    let atr = market.position_manager.atr();
+
+                    // Calculate confidence components
+                    let pm_conf = market.position_manager.calculate_confidence(
+                        distance_dollars,
+                        seconds_remaining,
+                        window_duration_secs,
+                    );
+                    let atr_mult = if atr > Decimal::ZERO { distance_dollars / atr } else { Decimal::ZERO };
+                    let time_ratio = Decimal::new(seconds_remaining, 0) / Decimal::new(window_duration_secs, 0);
+                    let time_conf = dec!(0.30) + dec!(0.70) * (Decimal::ONE - time_ratio);
+                    let dist_conf = (dec!(0.20) + dec!(0.50) * atr_mult).min(Decimal::ONE);
+
+                    // Calculate threshold
+                    let max_edge_factor = self.engines_config.directional.max_edge_factor;
+                    let min_edge = max_edge_factor * time_ratio;
+
+                    // Use best ask as favorable price estimate (conservative)
+                    let favorable_price = if event.price > market.strike_price {
+                        // Price above strike - YES is favorable
+                        market.state.yes_book.best_ask().unwrap_or(dec!(0.50))
+                    } else {
+                        // Price below strike - NO is favorable
+                        market.state.no_book.best_ask().unwrap_or(dec!(0.50))
+                    };
+
+                    let ev = pm_conf - favorable_price;
+                    let would_trade = ev >= min_edge;
+
+                    let snapshot = crate::state::ConfidenceSnapshot::new(
+                        market.event_id.clone(),
+                        pm_conf,
+                        time_conf,
+                        dist_conf,
+                        min_edge,
+                        ev,
+                        would_trade,
+                        distance_dollars,
+                        atr_mult,
+                        favorable_price,
+                    );
+                    self.state.market_data.update_confidence(&market.event_id, snapshot);
                 }
             }
         }
@@ -1018,6 +1073,17 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             event.timestamp.timestamp_millis(),
         );
 
+        // Sync to GlobalState for dashboard display
+        let live_book = crate::state::LiveOrderBook {
+            token_id: event.token_id.clone(),
+            best_bid: book.best_bid().unwrap_or(Decimal::ZERO),
+            best_bid_size: book.best_bid_size().unwrap_or(Decimal::ZERO),
+            best_ask: book.best_ask().unwrap_or(Decimal::ZERO),
+            best_ask_size: book.best_ask_size().unwrap_or(Decimal::ZERO),
+            last_update_ms: book.last_update_ms,
+        };
+        self.state.market_data.update_order_book(&event.token_id, live_book);
+
         // Record for toxic flow tracking and store warning
         if let Some(best_ask_size) = book.best_ask_size() {
             let warning = self.toxic_detector.check_order(
@@ -1089,6 +1155,17 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             event.timestamp.timestamp_millis(),
         );
 
+        // Sync to GlobalState for dashboard display
+        let live_book = crate::state::LiveOrderBook {
+            token_id: event.token_id.clone(),
+            best_bid: book.best_bid().unwrap_or(Decimal::ZERO),
+            best_bid_size: book.best_bid_size().unwrap_or(Decimal::ZERO),
+            best_ask: book.best_ask().unwrap_or(Decimal::ZERO),
+            best_ask_size: book.best_ask_size().unwrap_or(Decimal::ZERO),
+            last_update_ms: book.last_update_ms,
+        };
+        self.state.market_data.update_order_book(&event.token_id, live_book);
+
         // Store toxic warning if detected
         if warning.is_some()
             && let Some(market) = self.markets.get_mut(&event_id)
@@ -1123,6 +1200,42 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                 realized_pnl: market.inventory.realized_pnl,
             };
             self.state.market_data.update_inventory(&event.event_id, pos);
+
+            // Create and store trade record for dashboard
+            let spot_price = self.spot_prices
+                .get(&market.asset)
+                .copied()
+                .unwrap_or(Decimal::ZERO);
+
+            // Calculate arb margin from order books
+            let arb_margin = match (market.state.yes_book.best_ask(), market.state.no_book.best_ask()) {
+                (Some(yes_ask), Some(no_ask)) if yes_ask > Decimal::ZERO && no_ask > Decimal::ZERO => {
+                    Decimal::ONE - yes_ask - no_ask
+                }
+                _ => Decimal::ZERO,
+            };
+
+            let mut trade = TradeRecord::new(
+                uuid::Uuid::new_v4(), // session_id - use a placeholder for now
+                0, // decision_id - not tracked per trade currently
+                event.event_id.clone(),
+                event.token_id.clone(),
+                event.outcome,
+                TradeSide::from(event.side),
+                DashboardOrderType::Market,
+                event.price,
+                event.size,
+            );
+            trade.fill_price = event.price;
+            trade.fill_size = event.size;
+            trade.fees = event.fee;
+            trade.total_cost = cost;
+            trade.fill_time = event.timestamp;
+            trade.spot_price_at_fill = spot_price;
+            trade.arb_margin_at_fill = arb_margin;
+            trade.status = TradeStatus::Filled;
+
+            self.state.market_data.add_trade(trade);
 
             // Record success
             self.state.record_success();
@@ -1217,6 +1330,7 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
 
         // Remove from global state (dashboard display)
         self.state.market_data.active_windows.remove(&event.event_id);
+        self.state.market_data.remove_confidence(&event.event_id);
     }
 
     /// Update time remaining on all markets.
@@ -1570,6 +1684,22 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                         time_conf, dist_conf, pm_conf, ev, min_edge,
                         if max_edge_factor > Decimal::ZERO { "EV-based" } else { "phase-based" },
                     );
+
+                    // Sync confidence data to GlobalState for dashboard display
+                    let would_trade = ev >= min_edge;
+                    let snapshot = crate::state::ConfidenceSnapshot::new(
+                        event_id.clone(),
+                        pm_conf,
+                        time_conf,
+                        dist_conf,
+                        min_edge,
+                        ev,
+                        would_trade,
+                        distance_dollars.abs(),
+                        atr_mult,
+                        favorable_price,
+                    );
+                    self.state.market_data.update_confidence(&event_id, snapshot);
 
                     // Check if we should trade based on EV-based threshold and budget
                     let trade_decision = market.should_trade(

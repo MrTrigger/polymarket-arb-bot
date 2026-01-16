@@ -80,7 +80,7 @@ export function SessionMetrics() {
         </CardTitle>
       </CardHeader>
       <CardContent>
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
           {/* Session Duration */}
           <div className="space-y-1">
             <div className="flex items-center gap-1 text-xs text-muted-foreground">
@@ -211,7 +211,7 @@ export function SessionMetricsSkeleton() {
         </div>
       </CardHeader>
       <CardContent>
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
           {Array.from({ length: 6 }).map((_, i) => (
             <div key={i} className="space-y-1">
               <div className="h-3 w-16 animate-pulse rounded bg-muted" />

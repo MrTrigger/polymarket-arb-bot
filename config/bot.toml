@@ -36,6 +36,11 @@ early_threshold_secs = 300
 mid_threshold_secs = 120
 min_time_remaining_secs = 30
 
+[trading.sizing]
+# Bot capital allocation (USDC)
+# This is the amount allocated for the bot to trade with
+available_balance = 100.0
+
 [risk]
 max_daily_loss = 500.0            # Stop trading if daily loss exceeds this
 # Defaults below
