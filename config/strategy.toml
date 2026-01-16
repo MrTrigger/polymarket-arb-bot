@@ -21,25 +21,38 @@ build_threshold = 0.60    # 5-10 min remaining
 core_threshold = 0.50     # 2-5 min remaining
 final_threshold = 0.40    # <2 min remaining
 
-# Edge mode (alternative to phase thresholds)
-# Set > 0 to use edge-based mode, = 0 for phase-based (recommended)
-max_edge_factor = 0.0
+# EV-based mode settings
+# Trade if: (confidence - price) >= min_edge
+# min_edge decays from max_edge_factor at window start to 0 at end
+max_edge_factor = 0.10    # 10% EV required at window start
+
+# Confidence calculation params (EV-based mode)
+# time_conf = time_conf_floor + (1 - time_conf_floor) * (1 - time_ratio)
+# dist_conf = clamp(dist_conf_floor + dist_conf_per_atr * atr_multiple, floor, 1.0)
+time_conf_floor = 0.30    # Min confidence from time at window start
+dist_conf_floor = 0.20    # Min confidence for tiny moves
+dist_conf_per_atr = 0.50  # Confidence gained per ATR of movement
 
 [sweep]
 # Parameter sweep configuration
 # Run: cargo run -p poly-bot --release -- --mode backtest
 #
-# NOTE: edge_factors and phase thresholds are MUTUALLY EXCLUSIVE
-# Comment out whichever mode you're NOT testing
+# EV-based mode: sweep edge_factors and confidence params
+# Legacy phase mode: set max_edge_factor = 0 and sweep thresholds
 
 # Always swept
 #strong_ratios = [0.75, 0.78, 0.80, 0.82, 0.85, 0.88, 0.90]
 #lean_ratios = [0.55, 0.60, 0.65, 0.70]
 
-# Edge mode sweep (comment out for phase mode)
-edge_factors = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30]
+# EV-based mode sweep (minimum EV required at window start)
+edge_factors = [0.05, 0.10, 0.15, 0.20]
 
-# Phase mode sweep (uncomment for phase mode, comment out edge_factors)
+# Confidence calculation params sweep
+time_conf_floors = [0.20, 0.30, 0.40]
+dist_conf_floors = [0.15, 0.20, 0.25]
+dist_conf_per_atrs = [0.40, 0.50, 0.60]
+
+# Legacy phase mode sweep (uncomment and set max_edge_factor = 0)
 # early_thresholds = [0.75, 0.80, 0.85]
 # final_thresholds = [0.35, 0.40, 0.45]
 

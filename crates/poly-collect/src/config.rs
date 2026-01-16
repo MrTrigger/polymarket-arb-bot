@@ -539,8 +539,10 @@ mod tests {
         let toml = r#"
             [general]
             assets = ["BTC", "ETH"]
-            discovery_interval_secs = 600
             log_level = "debug"
+
+            [live]
+            discovery_interval_secs = 600
 
             [clickhouse]
             url = "http://db:8123"

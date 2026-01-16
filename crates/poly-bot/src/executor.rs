@@ -16,22 +16,22 @@
 //! ## Implementations
 //!
 //! - `LiveExecutor`: Real order submission (stubbed, requires wallet)
-//! - `PaperExecutor`: Simulated fills with configurable latency
-//! - `BacktestExecutor`: Simulates fills against historical order book
+//! - `SimulatedExecutor`: Unified executor for paper trading and backtesting
+//!   - Paper mode: Real-time timestamps, optional latency, simple fills
+//!   - Backtest mode: Simulated time, order book fills, no latency
 //!
 //! ## Shadow Bidding
 //!
 //! The `shadow` module provides pre-hashed order support for fast secondary
 //! order submission (<2ms) when a primary order fills.
 
-pub mod backtest;
 pub mod chase;
 pub mod fill;
 pub mod interval;
 pub mod live;
 pub mod noop;
-pub mod paper;
 pub mod shadow;
+pub mod simulated;
 
 use std::fmt;
 
@@ -351,8 +351,7 @@ pub struct OrderCancellation {
 ///
 /// Implementations provide different execution modes:
 /// - `LiveExecutor`: Real order submission via Polymarket API
-/// - `PaperExecutor`: Simulated fills with configurable latency
-/// - `BacktestExecutor`: Historical simulation against order book
+/// - `SimulatedExecutor`: Unified paper trading and backtesting
 #[async_trait]
 pub trait Executor: Send + Sync {
     /// Place an order and wait for initial result.

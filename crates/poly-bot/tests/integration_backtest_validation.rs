@@ -14,7 +14,7 @@ use chrono::{Duration, Utc};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
-use poly_bot::executor::backtest::{BacktestExecutor, BacktestExecutorConfig, BacktestStats};
+use poly_bot::executor::simulated::{SimulatedExecutor, SimulatedExecutorConfig, SimulatedStats};
 use poly_bot::mode::backtest::{BacktestResult, PnLReport, SweepParameter};
 use poly_bot::state::MetricsSnapshot;
 use poly_bot::types::{OrderBook, PriceLevel};
@@ -47,14 +47,13 @@ fn test_pnl_calculation_basic() {
     let expected_pnl = dec!(500);
     let expected_return = dec!(5); // 5%
 
-    let stats = BacktestStats {
+    let stats = SimulatedStats {
         orders_placed: 10,
         orders_filled: 10,
         orders_partial: 0,
         orders_rejected: 0,
         volume_traded: dec!(1000),
         fees_paid: dec!(1),
-        realized_pnl: expected_pnl,
     };
 
     let metrics = MetricsSnapshot {
@@ -92,7 +91,7 @@ fn test_pnl_calculation_loss() {
     let expected_pnl = dec!(-500);
     let expected_return = dec!(-5); // -5%
 
-    let stats = BacktestStats::default();
+    let stats = SimulatedStats::default();
     let metrics = default_metrics();
 
     let result = BacktestResult::new(
@@ -115,7 +114,7 @@ fn test_pnl_calculation_zero_initial_balance() {
     let initial = Decimal::ZERO;
     let final_balance = dec!(100);
 
-    let stats = BacktestStats::default();
+    let stats = SimulatedStats::default();
     let metrics = default_metrics();
 
     let result = BacktestResult::new(
@@ -140,7 +139,7 @@ fn test_pnl_calculation_large_numbers() {
     let expected_pnl = dec!(100_000_000); // $100 million profit
     let expected_return = dec!(10); // 10%
 
-    let stats = BacktestStats::default();
+    let stats = SimulatedStats::default();
     let metrics = default_metrics();
 
     let result = BacktestResult::new(
@@ -163,7 +162,7 @@ fn test_pnl_calculation_fractional_returns() {
     let final_balance = dec!(10033.33); // $33.33 profit
     let expected_pnl = dec!(33.33);
 
-    let stats = BacktestStats::default();
+    let stats = SimulatedStats::default();
     let metrics = default_metrics();
 
     let result = BacktestResult::new(
@@ -263,16 +262,11 @@ fn test_order_book_state_consistency() {
 
 #[tokio::test]
 async fn test_executor_balance_never_negative_after_fees() {
-    let config = BacktestExecutorConfig {
-        initial_balance: dec!(100),
-        fee_rate: dec!(0.001), // 0.1% fee
-        latency_ms: 0,
-        enforce_balance: true,
-        max_position_per_market: Decimal::ZERO,
-        min_fill_ratio: dec!(0.5),
-    };
+    let mut config = SimulatedExecutorConfig::backtest();
+    config.initial_balance = dec!(100);
+    config.fee_rate = dec!(0.001); // 0.1% fee
 
-    let mut executor = BacktestExecutor::new(config);
+    let mut executor = SimulatedExecutor::new(config);
 
     // Create order book with reasonable prices
     let mut book = OrderBook::new("token-yes".to_string());
@@ -303,16 +297,11 @@ async fn test_executor_balance_never_negative_after_fees() {
 
 #[tokio::test]
 async fn test_executor_rejects_when_insufficient_funds() {
-    let config = BacktestExecutorConfig {
-        initial_balance: dec!(10), // Only $10
-        fee_rate: dec!(0.001),
-        latency_ms: 0,
-        enforce_balance: true,
-        max_position_per_market: Decimal::ZERO,
-        min_fill_ratio: dec!(0.5),
-    };
+    let mut config = SimulatedExecutorConfig::backtest();
+    config.initial_balance = dec!(10); // Only $10
+    config.fee_rate = dec!(0.001);
 
-    let mut executor = BacktestExecutor::new(config);
+    let mut executor = SimulatedExecutor::new(config);
 
     // Create order book
     let mut book = OrderBook::new("token-yes".to_string());
@@ -340,14 +329,13 @@ async fn test_executor_rejects_when_insufficient_funds() {
 
 #[test]
 fn test_backtest_result_trades_sum() {
-    let stats = BacktestStats {
+    let stats = SimulatedStats {
         orders_placed: 100,
         orders_filled: 80,
         orders_partial: 10,
         orders_rejected: 10,
         volume_traded: dec!(5000),
         fees_paid: dec!(5),
-        realized_pnl: dec!(250),
     };
 
     // filled + partial + rejected should equal or be less than placed
@@ -360,14 +348,13 @@ fn test_backtest_result_trades_sum() {
 
 #[test]
 fn test_backtest_result_fees_bounded() {
-    let stats = BacktestStats {
+    let stats = SimulatedStats {
         orders_placed: 100,
         orders_filled: 100,
         orders_partial: 0,
         orders_rejected: 0,
         volume_traded: dec!(5000),
         fees_paid: dec!(5),
-        realized_pnl: dec!(250),
     };
 
     // Fees should be non-negative and less than volume traded
@@ -382,7 +369,7 @@ fn test_backtest_result_fees_bounded() {
 
 #[test]
 fn test_backtest_result_duration_positive() {
-    let stats = BacktestStats::default();
+    let stats = SimulatedStats::default();
     let metrics = default_metrics();
 
     let result = BacktestResult::new(
@@ -403,7 +390,7 @@ fn test_backtest_result_time_range_valid() {
     let start = Utc::now() - Duration::hours(24);
     let end = Utc::now();
 
-    let stats = BacktestStats::default();
+    let stats = SimulatedStats::default();
     let metrics = default_metrics();
 
     let result = BacktestResult::new(
@@ -568,7 +555,7 @@ fn test_pnl_report_formats_negative_pnl_correctly() {
 
 #[tokio::test]
 async fn test_executor_zero_size_order_rejected() {
-    let mut executor = BacktestExecutor::with_defaults();
+    let mut executor = SimulatedExecutor::backtest();
 
     let order = OrderRequest::limit(
         "req-1".to_string(),
@@ -586,7 +573,7 @@ async fn test_executor_zero_size_order_rejected() {
 
 #[tokio::test]
 async fn test_executor_handles_empty_book() {
-    let mut executor = BacktestExecutor::with_defaults();
+    let mut executor = SimulatedExecutor::backtest();
 
     // Create empty order book
     let book = OrderBook::new("token-yes".to_string());
@@ -608,16 +595,11 @@ async fn test_executor_handles_empty_book() {
 
 #[tokio::test]
 async fn test_executor_position_tracking_accuracy() {
-    let config = BacktestExecutorConfig {
-        initial_balance: dec!(1000),
-        fee_rate: Decimal::ZERO, // No fees for simpler math
-        latency_ms: 0,
-        enforce_balance: true,
-        max_position_per_market: Decimal::ZERO,
-        min_fill_ratio: dec!(0.5),
-    };
+    let mut config = SimulatedExecutorConfig::backtest();
+    config.initial_balance = dec!(1000);
+    config.fee_rate = Decimal::ZERO; // No fees for simpler math
 
-    let mut executor = BacktestExecutor::new(config);
+    let mut executor = SimulatedExecutor::new(config);
 
     // Create order book
     let mut book = OrderBook::new("token-yes".to_string());
@@ -669,16 +651,11 @@ async fn test_executor_position_tracking_accuracy() {
 
 #[tokio::test]
 async fn test_executor_stats_consistency() {
-    let config = BacktestExecutorConfig {
-        initial_balance: dec!(1000),
-        fee_rate: dec!(0.001),
-        latency_ms: 0,
-        enforce_balance: true,
-        max_position_per_market: Decimal::ZERO,
-        min_fill_ratio: dec!(0.5),
-    };
+    let mut config = SimulatedExecutorConfig::backtest();
+    config.initial_balance = dec!(1000);
+    config.fee_rate = dec!(0.001);
 
-    let mut executor = BacktestExecutor::new(config);
+    let mut executor = SimulatedExecutor::new(config);
 
     // Create order book
     let mut book = OrderBook::new("token-yes".to_string());

@@ -717,7 +717,7 @@ fn build_result(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::executor::paper::{PaperExecutor, PaperExecutorConfig};
+    use crate::executor::simulated::{SimulatedExecutor, SimulatedExecutorConfig};
     use poly_common::types::Outcome;
     use rust_decimal_macros::dec;
 
@@ -908,15 +908,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_chase_order_immediate_fill() {
-        let config = PaperExecutorConfig {
-            initial_balance: dec!(1000),
-            fill_latency_ms: 0,
-            fee_rate: dec!(0.001),
-            enforce_balance: true,
-            max_position_per_market: Decimal::ZERO,
-            market_order_slippage: Decimal::ZERO,
-        };
-        let mut executor = PaperExecutor::new(config);
+        let mut config = SimulatedExecutorConfig::paper();
+        config.initial_balance = dec!(1000);
+        config.latency_ms = 0;
+        config.fee_rate = dec!(0.001);
+        let mut executor = SimulatedExecutor::new(config);
 
         let chase_config = test_config();
         let chaser = PriceChaser::new(chase_config);
@@ -943,13 +939,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_chase_disabled() {
-        let config = PaperExecutorConfig {
-            initial_balance: dec!(1000),
-            fill_latency_ms: 0,
-            fee_rate: dec!(0.001),
-            ..Default::default()
-        };
-        let mut executor = PaperExecutor::new(config);
+        let mut config = SimulatedExecutorConfig::paper();
+        config.initial_balance = dec!(1000);
+        config.latency_ms = 0;
+        config.fee_rate = dec!(0.001);
+        let mut executor = SimulatedExecutor::new(config);
 
         let chase_config = ChaseConfig {
             enabled: false,
@@ -974,22 +968,18 @@ mod tests {
             .await
             .unwrap();
 
-        // Should still fill (paper executor fills immediately)
+        // Should still fill (simulated executor fills immediately in paper mode)
         assert!(result.success);
         assert_eq!(result.iterations, 1);
     }
 
     #[tokio::test]
     async fn test_chase_order_insufficient_funds() {
-        let config = PaperExecutorConfig {
-            initial_balance: dec!(10), // Low balance
-            fill_latency_ms: 0,
-            fee_rate: dec!(0.001),
-            enforce_balance: true,
-            max_position_per_market: Decimal::ZERO,
-            market_order_slippage: Decimal::ZERO,
-        };
-        let mut executor = PaperExecutor::new(config);
+        let mut config = SimulatedExecutorConfig::paper();
+        config.initial_balance = dec!(10); // Low balance
+        config.latency_ms = 0;
+        config.fee_rate = dec!(0.001);
+        let mut executor = SimulatedExecutor::new(config);
 
         let chase_config = test_config();
         let chaser = PriceChaser::new(chase_config);

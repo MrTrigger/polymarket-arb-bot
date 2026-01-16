@@ -1126,12 +1126,21 @@ pub struct SweepConfig {
     pub strong_ratios: Vec<f64>,
     /// Lean UP ratio values to sweep.
     pub lean_ratios: Vec<f64>,
-    /// Edge factor values to sweep.
+    /// Edge factor values to sweep (minimum EV required at window start).
     pub edge_factors: Vec<f64>,
-    /// Early threshold values to sweep.
+    /// Early threshold values to sweep (legacy phase-based mode).
     pub early_thresholds: Vec<f64>,
-    /// Final threshold values to sweep.
+    /// Final threshold values to sweep (legacy phase-based mode).
     pub final_thresholds: Vec<f64>,
+    /// Time confidence floor values to sweep (EV-based mode).
+    /// This is the minimum confidence from time at window start.
+    pub time_conf_floors: Vec<f64>,
+    /// Distance confidence floor values to sweep (EV-based mode).
+    /// This is the minimum confidence for tiny moves.
+    pub dist_conf_floors: Vec<f64>,
+    /// Distance confidence per ATR values to sweep (EV-based mode).
+    /// This is the confidence gained per ATR of movement.
+    pub dist_conf_per_atrs: Vec<f64>,
     /// Output file for sweep results.
     pub results_file: String,
 }
@@ -1154,6 +1163,9 @@ impl SweepConfig {
             edge_factors: toml.sweep.edge_factors,
             early_thresholds: toml.sweep.early_thresholds,
             final_thresholds: toml.sweep.final_thresholds,
+            time_conf_floors: toml.sweep.time_conf_floors,
+            dist_conf_floors: toml.sweep.dist_conf_floors,
+            dist_conf_per_atrs: toml.sweep.dist_conf_per_atrs,
             results_file: toml.sweep.results_file,
         })
     }
@@ -1191,8 +1203,19 @@ impl SweepConfig {
             params.push(p);
         }
 
-        // Edge factor
+        // Edge factor (minimum EV required)
         if let Some(p) = make_param("max_edge_factor", &self.edge_factors) {
+            params.push(p);
+        }
+
+        // Confidence calculation params (EV-based mode)
+        if let Some(p) = make_param("time_conf_floor", &self.time_conf_floors) {
+            params.push(p);
+        }
+        if let Some(p) = make_param("dist_conf_floor", &self.dist_conf_floors) {
+            params.push(p);
+        }
+        if let Some(p) = make_param("dist_conf_per_atr", &self.dist_conf_per_atrs) {
             params.push(p);
         }
 
@@ -1216,6 +1239,9 @@ struct SweepToml {
     edge_factors: Vec<f64>,
     early_thresholds: Vec<f64>,
     final_thresholds: Vec<f64>,
+    time_conf_floors: Vec<f64>,
+    dist_conf_floors: Vec<f64>,
+    dist_conf_per_atrs: Vec<f64>,
     results_file: String,
 }
 
@@ -1228,6 +1254,9 @@ impl Default for SweepToml {
             edge_factors: Vec::new(),
             early_thresholds: Vec::new(),
             final_thresholds: Vec::new(),
+            time_conf_floors: Vec::new(),
+            dist_conf_floors: Vec::new(),
+            dist_conf_per_atrs: Vec::new(),
             results_file: "sweep_results.json".to_string(),
         }
     }

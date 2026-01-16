@@ -36,7 +36,7 @@ use crate::config::{BacktestConfig, BotConfig, EnginesConfig, ObservabilityConfi
 use crate::data_source::csv_replay::{CsvReplayConfig, CsvReplayDataSource};
 use crate::data_source::replay::{ReplayConfig, ReplayDataSource};
 use crate::data_source::DataSource;
-use crate::executor::backtest::{BacktestExecutor, BacktestExecutorConfig, BacktestStats};
+use crate::executor::simulated::{SimulatedExecutor, SimulatedExecutorConfig, SimulatedStats};
 use crate::observability::{
     create_shared_analyzer, create_shared_detector_with_capture, AnomalyConfig, CaptureConfig,
     CounterfactualConfig, InMemoryIdLookup, ObservabilityCapture, ProcessorConfig,
@@ -52,7 +52,7 @@ pub struct BacktestModeConfig {
     /// CSV data directory (if set, uses CSV instead of ClickHouse).
     pub csv_data_dir: Option<String>,
     /// Executor configuration.
-    pub executor: BacktestExecutorConfig,
+    pub executor: SimulatedExecutorConfig,
     /// Strategy configuration.
     pub strategy: StrategyConfig,
     /// Engines configuration (arbitrage, directional, maker).
@@ -74,7 +74,7 @@ impl Default for BacktestModeConfig {
         Self {
             data_source: ReplayConfig::default(),
             csv_data_dir: None,
-            executor: BacktestExecutorConfig::default(),
+            executor: SimulatedExecutorConfig::backtest(),
             strategy: StrategyConfig::default(),
             engines: EnginesConfig::default(),
             observability: ObservabilityConfig::default(),
@@ -89,14 +89,13 @@ impl Default for BacktestModeConfig {
 impl BacktestModeConfig {
     /// Create config from BotConfig.
     pub fn from_bot_config(config: &BotConfig, _clickhouse: &ClickHouseClient) -> Result<Self> {
-        let executor_config = BacktestExecutorConfig {
-            initial_balance: dec!(10000),
-            fee_rate: Decimal::ZERO, // Polymarket has 0% maker fees
-            latency_ms: config.execution.paper_fill_latency_ms,
-            enforce_balance: true,
-            max_position_per_market: config.trading.max_position_per_market,
-            min_fill_ratio: dec!(0.5),
-        };
+        let mut executor_config = SimulatedExecutorConfig::backtest();
+        executor_config.initial_balance = dec!(10000);
+        executor_config.fee_rate = Decimal::ZERO; // Polymarket has 0% maker fees
+        executor_config.latency_ms = config.execution.paper_fill_latency_ms;
+        executor_config.enforce_balance = true;
+        executor_config.max_position_per_market = config.trading.max_position_per_market;
+        executor_config.min_fill_ratio = dec!(0.5);
 
         // Parse date range from config
         let (start_time, end_time) = parse_date_range(&config.backtest)?;
@@ -231,7 +230,7 @@ impl BacktestResult {
         end_time: DateTime<Utc>,
         initial_balance: Decimal,
         final_balance: Decimal,
-        stats: &BacktestStats,
+        stats: &SimulatedStats,
         metrics: &crate::state::MetricsSnapshot,
         duration_secs: f64,
     ) -> Self {
@@ -504,10 +503,10 @@ impl BacktestMode {
         };
         let data_source = CsvReplayDataSource::new(csv_config);
 
-        // Create backtest executor
+        // Create backtest executor (using SimulatedExecutor in backtest mode)
         let mut executor_config = self.config.executor.clone();
         executor_config.initial_balance = self.config.initial_balance;
-        let executor = BacktestExecutor::new(executor_config);
+        let executor = SimulatedExecutor::new(executor_config);
 
         // Run the common backtest logic
         self.run_backtest_common(data_source, executor, shutdown_rx, start_instant).await
@@ -534,10 +533,10 @@ impl BacktestMode {
 
         let data_source = ReplayDataSource::new(self.config.data_source.clone(), self.clickhouse.clone());
 
-        // Create backtest executor
+        // Create backtest executor (using SimulatedExecutor in backtest mode)
         let mut executor_config = self.config.executor.clone();
         executor_config.initial_balance = self.config.initial_balance;
-        let executor = BacktestExecutor::new(executor_config);
+        let executor = SimulatedExecutor::new(executor_config);
 
         // Run the common backtest logic
         self.run_backtest_common(data_source, executor, shutdown_rx, start_instant).await
@@ -547,7 +546,7 @@ impl BacktestMode {
     async fn run_backtest_common<D: DataSource>(
         &mut self,
         data_source: D,
-        executor: BacktestExecutor,
+        executor: SimulatedExecutor,
         mut shutdown_rx: broadcast::Receiver<()>,
         start_instant: std::time::Instant,
     ) -> Result<BacktestResult> {
@@ -658,7 +657,7 @@ impl BacktestMode {
 
         // Generate result using default stats (detailed stats tracked in metrics)
         let duration_secs = start_instant.elapsed().as_secs_f64();
-        let default_stats = BacktestStats::default();
+        let default_stats = SimulatedStats::default();
 
         let backtest_result = BacktestResult::new(
             self.config.data_source.start_time,
@@ -977,9 +976,22 @@ fn apply_parameter(config: &mut BacktestModeConfig, name: &str, value: f64) {
             config.strategy.final_threshold =
                 Decimal::from_f64_retain(value).unwrap_or_default();
         }
-        // Edge-based mode (alternative to phase-based)
+        // Edge-based mode (minimum EV required at window start)
         "max_edge_factor" => {
             config.strategy.max_edge_factor =
+                Decimal::from_f64_retain(value).unwrap_or_default();
+        }
+        // Confidence calculation params (EV-based mode)
+        "time_conf_floor" => {
+            config.strategy.time_conf_floor =
+                Decimal::from_f64_retain(value).unwrap_or_default();
+        }
+        "dist_conf_floor" => {
+            config.strategy.dist_conf_floor =
+                Decimal::from_f64_retain(value).unwrap_or_default();
+        }
+        "dist_conf_per_atr" => {
+            config.strategy.dist_conf_per_atr =
                 Decimal::from_f64_retain(value).unwrap_or_default();
         }
         // Allocation ratios
@@ -1040,14 +1052,13 @@ mod tests {
 
     #[test]
     fn test_backtest_result() {
-        let stats = BacktestStats {
+        let stats = SimulatedStats {
             orders_placed: 100,
             orders_filled: 90,
             orders_partial: 5,
             orders_rejected: 5,
             volume_traded: dec!(5000),
             fees_paid: dec!(5),
-            realized_pnl: dec!(250),
         };
 
         let metrics = crate::state::MetricsSnapshot {

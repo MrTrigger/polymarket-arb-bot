@@ -114,7 +114,7 @@ pub struct PositionConfig {
     /// Distance confidence is measured in ATR multiples.
     pub atr: Decimal,
 
-    // Phase-based thresholds (configurable via strategy.toml)
+    // Phase-based thresholds (legacy mode, used when max_edge_factor = 0)
     /// Minimum confidence for early phase (>10 min remaining).
     pub early_threshold: Decimal,
     /// Minimum confidence for build phase (5-10 min remaining).
@@ -123,6 +123,27 @@ pub struct PositionConfig {
     pub core_threshold: Decimal,
     /// Minimum confidence for final phase (<2 min remaining).
     pub final_threshold: Decimal,
+
+    // --- Confidence calculation parameters (EV-based mode) ---
+    // Time confidence formula: time_conf = time_conf_floor + (1 - time_conf_floor) * (1 - time_ratio)
+    // Where time_ratio = seconds_remaining / window_duration
+    // At window start: time_conf = time_conf_floor
+    // At window end: time_conf = 1.0
+
+    /// Minimum time confidence at window start (default 0.30).
+    /// Higher values make early trading more likely.
+    pub time_conf_floor: Decimal,
+
+    // Distance confidence formula: dist_conf = clamp(dist_conf_floor + dist_conf_per_atr * atr_multiple, floor, 1.0)
+    // This replaces the step function with a linear formula.
+
+    /// Minimum distance confidence for tiny moves (default 0.20).
+    pub dist_conf_floor: Decimal,
+
+    /// Confidence gained per ATR of movement (default 0.50).
+    /// At 1.5 ATR: 0.20 + 0.50 * 1.5 = 0.95
+    /// At 2.0 ATR: 0.20 + 0.50 * 2.0 = 1.20 → clamped to 1.0
+    pub dist_conf_per_atr: Decimal,
 }
 
 impl Default for PositionConfig {
@@ -134,11 +155,15 @@ impl Default for PositionConfig {
             min_hedge_ratio: dec!(0.20),
             trades_per_phase: 15,
             atr: dec!(100), // Default ATR suitable for BTC
-            // Optimized thresholds from param sweep (18.2% ROI)
+            // Legacy phase-based thresholds (used when max_edge_factor = 0)
             early_threshold: dec!(0.80),
             build_threshold: dec!(0.60),
             core_threshold: dec!(0.50),
             final_threshold: dec!(0.40),
+            // EV-based confidence calculation params
+            time_conf_floor: dec!(0.30),     // 30% confidence at window start
+            dist_conf_floor: dec!(0.20),     // 20% minimum for tiny moves
+            dist_conf_per_atr: dec!(0.50),   // +50% per ATR of movement
         }
     }
 }
@@ -292,14 +317,24 @@ impl PositionManager {
         self.config.atr
     }
 
-    /// Calculate confidence based on time and distance.
+    /// Calculate confidence based on time and distance using configurable params.
     ///
     /// Formula: sqrt(time_confidence * distance_confidence)
     /// With boost when BOTH factors are strong.
     ///
     /// Distance is normalized by ATR to account for different asset volatilities.
-    pub fn calculate_confidence(&self, distance_dollars: Decimal, minutes_remaining: Decimal) -> Decimal {
-        let time_conf = Self::time_confidence(minutes_remaining);
+    ///
+    /// # Arguments
+    /// * `distance_dollars` - Absolute distance from strike in dollars
+    /// * `seconds_remaining` - Seconds left in the window
+    /// * `window_duration_secs` - Total window duration (e.g., 900 for 15min)
+    pub fn calculate_confidence(
+        &self,
+        distance_dollars: Decimal,
+        seconds_remaining: i64,
+        window_duration_secs: i64,
+    ) -> Decimal {
+        let time_conf = self.time_confidence(seconds_remaining, window_duration_secs);
 
         // Normalize distance by ATR
         let atr_multiple = if self.config.atr > Decimal::ZERO {
@@ -307,7 +342,7 @@ impl PositionManager {
         } else {
             Decimal::ZERO
         };
-        let dist_conf = Self::distance_confidence(atr_multiple);
+        let dist_conf = self.distance_confidence(atr_multiple);
 
         // Geometric mean
         let product = time_conf * dist_conf;
@@ -321,55 +356,54 @@ impl PositionManager {
         }
     }
 
-    /// Time confidence based on minutes remaining.
-    fn time_confidence(minutes: Decimal) -> Decimal {
-        if minutes > dec!(12) {
-            dec!(0.40)
-        } else if minutes > dec!(9) {
-            dec!(0.50)
-        } else if minutes > dec!(6) {
-            dec!(0.60)
-        } else if minutes > dec!(3) {
-            dec!(0.80)
+    /// Time confidence using configurable floor parameter.
+    ///
+    /// Formula: time_conf = floor + (1 - floor) * (1 - time_ratio)
+    /// Where time_ratio = seconds_remaining / window_duration
+    ///
+    /// At window start (ratio=1): returns floor (e.g., 0.30)
+    /// At window end (ratio=0): returns 1.0
+    fn time_confidence(&self, seconds_remaining: i64, window_duration_secs: i64) -> Decimal {
+        let time_ratio = if window_duration_secs > 0 {
+            Decimal::new(seconds_remaining.max(0), 0) / Decimal::new(window_duration_secs, 0)
         } else {
-            dec!(1.00)
-        }
+            Decimal::ZERO
+        };
+        // Clamp ratio to [0, 1]
+        let time_ratio = time_ratio.min(Decimal::ONE).max(Decimal::ZERO);
+
+        let floor = self.config.time_conf_floor;
+        // floor + (1 - floor) * (1 - time_ratio)
+        floor + (Decimal::ONE - floor) * (Decimal::ONE - time_ratio)
     }
 
-    /// Distance confidence based on ATR multiples from strike.
+    /// Distance confidence using configurable floor and slope parameters.
+    ///
+    /// Formula: dist_conf = clamp(floor + per_atr * atr_multiple, floor, 1.0)
     ///
     /// Using ATR-normalized distance ensures consistent behavior across
     /// assets with different volatilities (BTC vs ETH vs SOL).
-    ///
-    /// Thresholds:
-    /// - 0.25 ATR: 0.40 (small move, might be noise)
-    /// - 0.50 ATR: 0.55 (moderate move)
-    /// - 0.75 ATR: 0.70 (significant move)
-    /// - 1.00 ATR: 0.85 (large move, likely real)
-    /// - 1.50 ATR: 1.00 (very large move, high conviction)
-    fn distance_confidence(atr_multiple: Decimal) -> Decimal {
-        if atr_multiple > dec!(1.5) {
-            dec!(1.00)
-        } else if atr_multiple > dec!(1.0) {
-            dec!(0.85)
-        } else if atr_multiple > dec!(0.75) {
-            dec!(0.70)
-        } else if atr_multiple > dec!(0.50) {
-            dec!(0.55)
-        } else if atr_multiple > dec!(0.25) {
-            dec!(0.40)
-        } else {
-            dec!(0.20)
-        }
+    fn distance_confidence(&self, atr_multiple: Decimal) -> Decimal {
+        let floor = self.config.dist_conf_floor;
+        let per_atr = self.config.dist_conf_per_atr;
+
+        // Linear formula clamped to [floor, 1.0]
+        (floor + per_atr * atr_multiple).min(Decimal::ONE).max(floor)
     }
 
     /// Decide whether to trade and with what size.
     ///
+    /// Uses EV-based decision logic when max_edge_factor > 0:
+    ///   EV = confidence - favorable_price
+    ///   Trade if EV >= min_edge (which decays from max_edge_factor to 0)
+    ///
+    /// Falls back to legacy phase-based thresholds when max_edge_factor == 0.
+    ///
     /// # Arguments
     /// * `distance_dollars` - Distance from strike in dollars (for confidence calculation)
     /// * `seconds_remaining` - Seconds left in the market window
-    /// * `favorable_price` - Price of the dominant side we're buying (for edge calculation)
-    /// * `max_edge_factor` - Maximum edge required at window start (from config)
+    /// * `favorable_price` - Price of the dominant side we're buying (for EV calculation)
+    /// * `max_edge_factor` - Minimum EV required at window start (decays to 0)
     /// * `window_duration_secs` - Total window duration in seconds (e.g., 900 for 15min)
     pub fn should_trade(
         &self,
@@ -381,27 +415,32 @@ impl PositionManager {
     ) -> TradeDecision {
         let minutes = Decimal::new(seconds_remaining, 0) / dec!(60);
         let phase = Phase::from_minutes(minutes);
-        let confidence = self.calculate_confidence(distance_dollars, minutes);
+        let confidence = self.calculate_confidence(distance_dollars, seconds_remaining, window_duration_secs);
 
-        // 1. Check confidence threshold
-        // When max_edge_factor > 0: use edge-based (required = price + edge)
-        // When max_edge_factor == 0: use phase-based (legacy mode, best in backtest)
-        let required_confidence = if max_edge_factor > Decimal::ZERO {
-            // Edge-based: required confidence = favorable_price + min_edge
-            // min_edge = max_edge_factor * (seconds_remaining / window_duration_secs)
+        // 1. Check EV threshold (or legacy phase-based threshold)
+        // When max_edge_factor > 0: use EV-based (EV = confidence - price >= min_edge)
+        // When max_edge_factor == 0: use phase-based (legacy mode)
+        let should_skip = if max_edge_factor > Decimal::ZERO {
+            // EV-based: expected value must exceed minimum edge
+            // EV = P(win) * profit - P(lose) * loss = confidence - price
+            let ev = confidence - favorable_price;
+
+            // min_edge decays linearly: max_edge_factor at start, 0 at end
             let time_factor = if window_duration_secs > 0 {
                 Decimal::new(seconds_remaining, 0) / Decimal::new(window_duration_secs, 0)
             } else {
                 Decimal::ZERO
             };
             let min_edge = max_edge_factor * time_factor;
-            favorable_price + min_edge
+
+            ev < min_edge
         } else {
             // Legacy phase-based thresholds (configurable via PositionConfig)
-            self.config.threshold_for_phase(phase)
+            let required_confidence = self.config.threshold_for_phase(phase);
+            confidence < required_confidence
         };
 
-        if confidence < required_confidence {
+        if should_skip {
             return TradeDecision::Skip(SkipReason::LowConfidence);
         }
 
@@ -603,42 +642,70 @@ mod tests {
 
     #[test]
     fn test_time_confidence() {
-        assert_eq!(PositionManager::time_confidence(dec!(14)), dec!(0.40));
-        assert_eq!(PositionManager::time_confidence(dec!(10)), dec!(0.50));
-        assert_eq!(PositionManager::time_confidence(dec!(7)), dec!(0.60));
-        assert_eq!(PositionManager::time_confidence(dec!(4)), dec!(0.80));
-        assert_eq!(PositionManager::time_confidence(dec!(2)), dec!(1.00));
+        // Time confidence formula: floor + (1 - floor) * (1 - time_ratio)
+        // Default floor is 0.30, window is 900 seconds
+        let pm = PositionManager::with_budget(dec!(1000));
+
+        // At window start (900 secs): time_ratio=1, conf = 0.30 + 0.70 * 0 = 0.30
+        let conf_start = pm.time_confidence(900, 900);
+        assert_eq!(conf_start, dec!(0.30), "At start should be floor");
+
+        // At window end (0 secs): time_ratio=0, conf = 0.30 + 0.70 * 1 = 1.0
+        let conf_end = pm.time_confidence(0, 900);
+        assert_eq!(conf_end, dec!(1.0), "At end should be 1.0");
+
+        // At midpoint (450 secs): time_ratio=0.5, conf = 0.30 + 0.70 * 0.5 = 0.65
+        let conf_mid = pm.time_confidence(450, 900);
+        assert_eq!(conf_mid, dec!(0.65), "At midpoint should be 0.65");
     }
 
     #[test]
     fn test_distance_confidence() {
-        // Now takes ATR multiples instead of raw dollar amounts
-        assert_eq!(PositionManager::distance_confidence(dec!(2.0)), dec!(1.00));  // 2.0 ATR
-        assert_eq!(PositionManager::distance_confidence(dec!(1.2)), dec!(0.85));  // 1.2 ATR
-        assert_eq!(PositionManager::distance_confidence(dec!(0.8)), dec!(0.70));  // 0.8 ATR
-        assert_eq!(PositionManager::distance_confidence(dec!(0.6)), dec!(0.55));  // 0.6 ATR
-        assert_eq!(PositionManager::distance_confidence(dec!(0.3)), dec!(0.40));  // 0.3 ATR
-        assert_eq!(PositionManager::distance_confidence(dec!(0.1)), dec!(0.20));  // 0.1 ATR
+        // Distance confidence formula: clamp(floor + per_atr * atr_mult, floor, 1.0)
+        // Default floor=0.20, per_atr=0.50
+        let pm = PositionManager::with_budget(dec!(1000));
+
+        // 0 ATR: 0.20 + 0.50 * 0 = 0.20 (floor)
+        assert_eq!(pm.distance_confidence(dec!(0.0)), dec!(0.20));
+
+        // 0.5 ATR: 0.20 + 0.50 * 0.5 = 0.45
+        assert_eq!(pm.distance_confidence(dec!(0.5)), dec!(0.45));
+
+        // 1.0 ATR: 0.20 + 0.50 * 1.0 = 0.70
+        assert_eq!(pm.distance_confidence(dec!(1.0)), dec!(0.70));
+
+        // 1.6 ATR: 0.20 + 0.50 * 1.6 = 1.0 (capped)
+        assert_eq!(pm.distance_confidence(dec!(1.6)), dec!(1.0));
+
+        // 2.0 ATR: 0.20 + 0.50 * 2.0 = 1.2 -> capped to 1.0
+        assert_eq!(pm.distance_confidence(dec!(2.0)), dec!(1.0));
     }
 
     #[test]
     fn test_calculate_confidence() {
-        // Default ATR is $100
+        // Default ATR is $100, time_conf_floor=0.30, dist_conf params: floor=0.20, per_atr=0.50
         let pm = PositionManager::with_budget(dec!(1000));
+        const WINDOW: i64 = 900;
 
-        // Early market, close to strike -> low confidence
-        // $15 = 0.15 ATR -> dist_conf=0.20, time_conf=0.40 -> sqrt(0.08) ≈ 0.28
-        let conf1 = pm.calculate_confidence(dec!(15), dec!(14));
+        // Early market (840s = 14min), close to strike ($15 = 0.15 ATR)
+        // time_conf = 0.30 + 0.70 * (1 - 840/900) = 0.30 + 0.70 * 0.067 ≈ 0.347
+        // dist_conf = 0.20 + 0.50 * 0.15 = 0.275
+        // combined = sqrt(0.347 * 0.275) ≈ 0.31
+        let conf1 = pm.calculate_confidence(dec!(15), 840, WINDOW);
         assert!(conf1 < dec!(0.50), "Expected low confidence, got {}", conf1);
 
-        // Late market, far from strike -> high confidence
-        // $150 = 1.5 ATR -> dist_conf=1.00, time_conf=1.00 -> 1.0 (with boost)
-        let conf2 = pm.calculate_confidence(dec!(150), dec!(2));
+        // Late market (120s = 2min), far from strike ($150 = 1.5 ATR)
+        // time_conf = 0.30 + 0.70 * (1 - 120/900) = 0.30 + 0.70 * 0.867 ≈ 0.907
+        // dist_conf = 0.20 + 0.50 * 1.5 = 0.95
+        // combined = sqrt(0.907 * 0.95) * 1.2 (boost) ≈ 1.0
+        let conf2 = pm.calculate_confidence(dec!(150), 120, WINDOW);
         assert!(conf2 > dec!(0.90), "Expected high confidence, got {}", conf2);
 
-        // Late market, at strike -> moderate (time high, distance low)
-        // $5 = 0.05 ATR -> dist_conf=0.20, time_conf=1.00 -> sqrt(0.20) ≈ 0.45
-        let conf3 = pm.calculate_confidence(dec!(5), dec!(1));
+        // Late market (60s = 1min), at strike ($5 = 0.05 ATR)
+        // time_conf = 0.30 + 0.70 * (1 - 60/900) = 0.30 + 0.70 * 0.933 ≈ 0.953
+        // dist_conf = 0.20 + 0.50 * 0.05 = 0.225
+        // combined = sqrt(0.953 * 0.225) ≈ 0.46
+        let conf3 = pm.calculate_confidence(dec!(5), 60, WINDOW);
         assert!(conf3 < dec!(0.60), "Expected moderate confidence, got {}", conf3);
     }
 
@@ -754,34 +821,50 @@ mod tests {
 
     #[test]
     fn test_spec_example_simulation() {
-        // Test with edge-based thresholds
+        // Test with EV-based decision logic
         // Budget: $1,000 | Default ATR: $100
         // max_edge_factor: 0.20, window_duration: 900 secs
         // favorable_price: 0.50 for all tests
+        // Confidence params: time_floor=0.30, dist_floor=0.20, dist_per_atr=0.50
+        //
+        // EV-based logic: trade if (confidence - price) >= min_edge
+        // where min_edge = max_edge_factor * time_ratio
         let pm = PositionManager::with_budget(dec!(1000));
 
-        // [14.0m] edge=0.187, need=0.687 | Dist: +$15 (0.15 ATR) | conf=0.28 -> SKIP
+        // [14.0m = 840s] $15 (0.15 ATR)
+        // time_conf = 0.30 + 0.70*0.067 = 0.35, dist_conf = 0.20 + 0.50*0.15 = 0.28
+        // conf ≈ 0.31, EV = 0.31 - 0.50 = -0.19, min_edge = 0.20*0.93 = 0.19 -> SKIP
         let d1 = pm.should_trade(dec!(15), 840, dec!(0.50), dec!(0.20), 900);
         assert!(matches!(d1, TradeDecision::Skip(SkipReason::LowConfidence)));
 
-        // [12.0m] edge=0.16, need=0.66 | Dist: +$22 (0.22 ATR) | conf=0.28 -> SKIP
+        // [12.0m = 720s] $22 (0.22 ATR)
+        // time_conf = 0.30 + 0.70*0.20 = 0.44, dist_conf = 0.20 + 0.50*0.22 = 0.31
+        // conf ≈ 0.37, EV = 0.37 - 0.50 = -0.13, min_edge = 0.20*0.80 = 0.16 -> SKIP
         let d2 = pm.should_trade(dec!(22), 720, dec!(0.50), dec!(0.20), 900);
         assert!(matches!(d2, TradeDecision::Skip(SkipReason::LowConfidence)));
 
-        // [10.0m] edge=0.133, need=0.633 | Dist: +$35 (0.35 ATR) | conf=0.45 -> SKIP
+        // [10.0m = 600s] $35 (0.35 ATR)
+        // time_conf = 0.30 + 0.70*0.33 = 0.53, dist_conf = 0.20 + 0.50*0.35 = 0.38
+        // conf ≈ 0.45, EV = 0.45 - 0.50 = -0.05, min_edge = 0.20*0.67 = 0.13 -> SKIP
         let d3 = pm.should_trade(dec!(35), 600, dec!(0.50), dec!(0.20), 900);
         assert!(matches!(d3, TradeDecision::Skip(SkipReason::LowConfidence)));
 
-        // [8.5m] edge=0.113, need=0.613 | Dist: +$60 (0.60 ATR) | conf=0.52 -> SKIP
+        // [8.5m = 510s] $60 (0.60 ATR)
+        // time_conf = 0.30 + 0.70*0.43 = 0.60, dist_conf = 0.20 + 0.50*0.60 = 0.50
+        // conf ≈ 0.55, EV = 0.55 - 0.50 = 0.05, min_edge = 0.20*0.57 = 0.11 -> SKIP
         let d4 = pm.should_trade(dec!(60), 510, dec!(0.50), dec!(0.20), 900);
         assert!(matches!(d4, TradeDecision::Skip(SkipReason::LowConfidence)),
             "Expected skip at 8.5m with $60 distance, got {:?}", d4);
 
-        // [2.0m] edge=0.027, need=0.527 | Dist: +$70 (0.70 ATR) | conf=0.74 -> TRADE
+        // [2.0m = 120s] $70 (0.70 ATR)
+        // time_conf = 0.30 + 0.70*0.87 = 0.91, dist_conf = 0.20 + 0.50*0.70 = 0.55
+        // conf ≈ 0.71, EV = 0.71 - 0.50 = 0.21, min_edge = 0.20*0.13 = 0.03 -> TRADE
         let d5 = pm.should_trade(dec!(70), 120, dec!(0.50), dec!(0.20), 900);
         assert!(d5.is_trade(), "Expected trade at 2m with $70 distance, got {:?}", d5);
 
-        // [1.0m] edge=0.013, need=0.513 | Dist: +$100 (1.0 ATR) | conf=0.84 -> TRADE
+        // [1.0m = 60s] $100 (1.0 ATR)
+        // time_conf = 0.30 + 0.70*0.93 = 0.95, dist_conf = 0.20 + 0.50*1.0 = 0.70
+        // conf ≈ 0.82, EV = 0.82 - 0.50 = 0.32, min_edge = 0.20*0.07 = 0.01 -> TRADE
         let d6 = pm.should_trade(dec!(100), 60, dec!(0.50), dec!(0.20), 900);
         assert!(d6.is_trade(), "Expected trade at 1m with $100 distance, got {:?}", d6);
     }

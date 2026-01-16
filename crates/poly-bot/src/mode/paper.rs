@@ -34,7 +34,7 @@ use crate::dashboard::{
     SharedSessionManager,
 };
 use crate::data_source::live::{ActiveMarket, LiveDataSource, LiveDataSourceConfig};
-use crate::executor::paper::{PaperExecutor, PaperExecutorConfig};
+use crate::executor::simulated::{SimulatedExecutor, SimulatedExecutorConfig};
 use crate::observability::{
     create_shared_analyzer, create_shared_detector_with_capture, AnomalyConfig, CaptureConfig,
     CounterfactualConfig, InMemoryIdLookup, ObservabilityCapture, ProcessorConfig,
@@ -48,7 +48,7 @@ pub struct PaperModeConfig {
     /// Data source configuration.
     pub data_source: LiveDataSourceConfig,
     /// Executor configuration.
-    pub executor: PaperExecutorConfig,
+    pub executor: SimulatedExecutorConfig,
     /// Strategy configuration.
     pub strategy: StrategyConfig,
     /// Observability configuration.
@@ -69,7 +69,7 @@ impl Default for PaperModeConfig {
     fn default() -> Self {
         Self {
             data_source: LiveDataSourceConfig::default(),
-            executor: PaperExecutorConfig::default(),
+            executor: SimulatedExecutorConfig::paper(),
             strategy: StrategyConfig::default(),
             observability: ObservabilityConfig::default(),
             engines: EnginesConfig::default(),
@@ -84,14 +84,12 @@ impl Default for PaperModeConfig {
 impl PaperModeConfig {
     /// Create config from BotConfig.
     pub fn from_bot_config(config: &BotConfig) -> Self {
-        let executor_config = PaperExecutorConfig {
-            initial_balance: Decimal::new(10000, 0),
-            fill_latency_ms: config.execution.paper_fill_latency_ms,
-            fee_rate: Decimal::ZERO, // Polymarket has 0% maker fees
-            enforce_balance: true,
-            max_position_per_market: config.trading.max_position_per_market,
-            ..Default::default()
-        };
+        let mut executor_config = SimulatedExecutorConfig::paper();
+        executor_config.initial_balance = Decimal::new(10000, 0);
+        executor_config.latency_ms = config.execution.paper_fill_latency_ms;
+        executor_config.fee_rate = Decimal::ZERO; // Polymarket has 0% maker fees
+        executor_config.enforce_balance = true;
+        executor_config.max_position_per_market = config.trading.max_position_per_market;
 
         // Convert string assets to CryptoAsset enum for discovery
         let discovery_assets: Vec<CryptoAsset> = config
@@ -216,7 +214,7 @@ impl PaperMode {
 
         info!(
             initial_balance = %self.config.initial_balance,
-            fill_latency_ms = self.config.executor.fill_latency_ms,
+            latency_ms = self.config.executor.latency_ms,
             "Paper executor configuration"
         );
 
@@ -251,7 +249,7 @@ impl PaperMode {
         // Create paper executor (simulated fills)
         let mut executor_config = self.config.executor.clone();
         executor_config.initial_balance = self.config.initial_balance;
-        let executor = PaperExecutor::new(executor_config);
+        let executor = SimulatedExecutor::new(executor_config);
 
         // Set up observability
         let (capture, obs_tasks) = self.setup_observability().await?;
@@ -609,7 +607,7 @@ mod tests {
         let config = PaperModeConfig::default();
         assert_eq!(config.initial_balance, dec!(10000));
         assert_eq!(config.shutdown_timeout_secs, 30);
-        assert_eq!(config.executor.fill_latency_ms, 50);
+        assert_eq!(config.executor.latency_ms, 50);
     }
 
     #[test]
@@ -618,7 +616,7 @@ mod tests {
         bot_config.execution.paper_fill_latency_ms = 100;
 
         let config = PaperModeConfig::from_bot_config(&bot_config);
-        assert_eq!(config.executor.fill_latency_ms, 100);
+        assert_eq!(config.executor.latency_ms, 100);
         assert_eq!(config.strategy.max_consecutive_failures, 3);
     }
 
@@ -681,7 +679,7 @@ mod tests {
 
         let config = PaperModeConfig::from_bot_config(&bot_config);
 
-        assert_eq!(config.executor.fill_latency_ms, 25);
+        assert_eq!(config.executor.latency_ms, 25);
         assert_eq!(config.executor.max_position_per_market, dec!(500));
         assert_eq!(config.executor.fee_rate, Decimal::ZERO);
         assert!(config.executor.enforce_balance);

@@ -464,10 +464,20 @@ pub struct StrategyConfig {
     /// Minimum confidence for final phase (<2 min remaining).
     pub final_threshold: Decimal,
 
-    /// Maximum edge factor for dynamic confidence requirement.
-    /// When > 0, uses edge-based: required = price + (edge_factor * time_remaining / window_duration)
-    /// When = 0, uses phase-based thresholds (legacy mode, slightly better in backtest).
+    /// Maximum edge factor (minimum EV required at window start).
+    /// When > 0, uses EV-based: trade if (confidence - price) >= min_edge
+    /// When = 0, uses phase-based thresholds (legacy mode).
     pub max_edge_factor: Decimal,
+
+    // Confidence calculation params (EV-based mode)
+    /// Minimum time confidence at window start (default 0.30).
+    /// Formula: time_conf = floor + (1 - floor) * (1 - time_ratio)
+    pub time_conf_floor: Decimal,
+    /// Minimum distance confidence for tiny moves (default 0.20).
+    pub dist_conf_floor: Decimal,
+    /// Confidence gained per ATR of movement (default 0.50).
+    /// Formula: dist_conf = clamp(floor + per_atr * atr_multiple, floor, 1.0)
+    pub dist_conf_per_atr: Decimal,
 
     // Allocation ratios for directional trading (configurable via sweep)
     /// Strong UP signal allocation ratio (0.0-1.0).
@@ -485,13 +495,17 @@ impl Default for StrategyConfig {
             max_consecutive_failures: 3,
             block_on_toxic_high: true,
             window_duration_secs: 900, // 15-minute windows by default
-            // Optimized thresholds from param sweep (18.2% ROI)
+            // Legacy phase-based thresholds (used when max_edge_factor = 0)
             early_threshold: dec!(0.80),
             build_threshold: dec!(0.60),
             core_threshold: dec!(0.50),
             final_threshold: dec!(0.40),
-            // Use phase-based by default (0 = disabled)
-            max_edge_factor: Decimal::ZERO,
+            // EV-based mode: trade if (confidence - price) >= min_edge
+            max_edge_factor: dec!(0.10), // Default: 10% EV required at window start
+            // Confidence calculation params
+            time_conf_floor: dec!(0.30),     // 30% confidence at window start
+            dist_conf_floor: dec!(0.20),     // 20% minimum for tiny moves
+            dist_conf_per_atr: dec!(0.50),   // +50% per ATR of movement
             // Allocation ratios (optimized via param sweep)
             strong_up_ratio: dec!(0.82),
             lean_up_ratio: dec!(0.65),
@@ -516,12 +530,16 @@ impl StrategyConfig {
             max_consecutive_failures: 3,
             block_on_toxic_high: true,
             window_duration_secs,
-            // Default phase thresholds (can be overridden via sweep)
+            // Legacy phase thresholds (used when max_edge_factor = 0)
             early_threshold: dec!(0.80),
             build_threshold: dec!(0.60),
             core_threshold: dec!(0.50),
             final_threshold: dec!(0.40),
-            max_edge_factor: Decimal::ZERO,
+            // EV-based mode params
+            max_edge_factor: dec!(0.10),
+            time_conf_floor: dec!(0.30),
+            dist_conf_floor: dec!(0.20),
+            dist_conf_per_atr: dec!(0.50),
             // Allocation ratios (optimized via param sweep)
             strong_up_ratio: dec!(0.82),
             lean_up_ratio: dec!(0.65),
@@ -555,7 +573,11 @@ impl StrategyConfig {
             build_threshold,
             core_threshold,
             final_threshold,
-            max_edge_factor: Decimal::ZERO,
+            // EV-based mode params
+            max_edge_factor: dec!(0.10),
+            time_conf_floor: dec!(0.30),
+            dist_conf_floor: dec!(0.20),
+            dist_conf_per_atr: dec!(0.50),
             // Allocation ratios (optimized via param sweep)
             strong_up_ratio: dec!(0.82),
             lean_up_ratio: dec!(0.65),
@@ -796,24 +818,51 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
         // Update simulated time from event timestamp (for backtest mode)
         self.simulated_time = event.timestamp();
 
-        match event {
-            MarketEvent::SpotPrice(e) => self.handle_spot_price(e),
-            MarketEvent::BookSnapshot(e) => self.handle_book_snapshot(e).await,
-            MarketEvent::BookDelta(e) => self.handle_book_delta(e),
-            MarketEvent::Fill(e) => self.handle_fill(e).await?,
-            MarketEvent::WindowOpen(e) => self.handle_window_open(e),
-            MarketEvent::WindowClose(e) => self.handle_window_close(e).await,
+        // Process event and get which markets were affected
+        let affected_markets: Vec<String> = match event {
+            MarketEvent::SpotPrice(e) => {
+                let asset = e.asset;
+                self.handle_spot_price(e);
+                // Spot price affects all markets for this asset
+                self.markets.iter()
+                    .filter(|(_, m)| m.asset == asset)
+                    .map(|(id, _)| id.clone())
+                    .collect()
+            }
+            MarketEvent::BookSnapshot(e) => {
+                let event_id = self.handle_book_snapshot(e).await;
+                event_id.into_iter().collect()
+            }
+            MarketEvent::BookDelta(e) => {
+                let event_id = self.handle_book_delta(e);
+                event_id.into_iter().collect()
+            }
+            MarketEvent::Fill(e) => {
+                self.handle_fill(e).await?;
+                vec![] // Fills don't trigger new opportunity checks
+            }
+            MarketEvent::WindowOpen(e) => {
+                let event_id = e.event_id.clone();
+                self.handle_window_open(e);
+                vec![event_id]
+            }
+            MarketEvent::WindowClose(e) => {
+                self.handle_window_close(e).await;
+                vec![] // Market is closed, no opportunities
+            }
             MarketEvent::Heartbeat(_) => {
                 // Heartbeat - update time remaining and settle expired markets
                 self.update_all_market_times(self.simulated_time);
                 self.settle_expired_markets().await;
                 return Ok(());
             }
-        }
+        };
 
-        // After state update, check for opportunities in all active markets
-        let latency_us = event_time.elapsed().as_micros() as u64;
-        self.check_opportunities(latency_us).await?;
+        // Only check opportunities for affected markets
+        if !affected_markets.is_empty() {
+            let latency_us = event_time.elapsed().as_micros() as u64;
+            self.check_opportunities_for_markets(&affected_markets, latency_us).await?;
+        }
 
         Ok(())
     }
@@ -909,8 +958,8 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
         }
     }
 
-    /// Handle order book snapshot.
-    async fn handle_book_snapshot(&mut self, event: BookSnapshotEvent) {
+    /// Handle order book snapshot. Returns the affected event_id if any.
+    async fn handle_book_snapshot(&mut self, event: BookSnapshotEvent) -> Option<String> {
         trace!("Book snapshot: {} ({} bids, {} asks)",
             event.token_id, event.bids.len(), event.asks.len());
 
@@ -926,13 +975,13 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             Some(id) => id.clone(),
             None => {
                 trace!("Unknown token {}, ignoring snapshot", event.token_id);
-                return;
+                return None;
             }
         };
 
         let market = match self.markets.get_mut(&event_id) {
             Some(m) => m,
-            None => return,
+            None => return None,
         };
 
         // Determine which book to update and whether it's YES or NO
@@ -942,7 +991,7 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
         } else if event.token_id == market.no_token_id {
             &mut market.state.no_book
         } else {
-            return;
+            return None;
         };
 
         // Apply snapshot
@@ -971,22 +1020,24 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                 }
             }
         }
+
+        Some(event_id)
     }
 
-    /// Handle order book delta.
-    fn handle_book_delta(&mut self, event: BookDeltaEvent) {
+    /// Handle order book delta. Returns the affected event_id if any.
+    fn handle_book_delta(&mut self, event: BookDeltaEvent) -> Option<String> {
         trace!("Book delta: {} {} @ {} (size {})",
             event.token_id, event.side, event.price, event.size);
 
         // Find the market this token belongs to
         let event_id = match self.token_to_event.get(&event.token_id) {
             Some(id) => id.clone(),
-            None => return,
+            None => return None,
         };
 
         let market = match self.markets.get_mut(&event_id) {
             Some(m) => m,
-            None => return,
+            None => return None,
         };
 
         // Determine which book to update
@@ -996,7 +1047,7 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
         } else if event.token_id == market.no_token_id {
             &mut market.state.no_book
         } else {
-            return;
+            return None;
         };
 
         // Record for toxic flow detection before applying
@@ -1031,6 +1082,8 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                 market.no_toxic_warning = warning;
             }
         }
+
+        Some(event_id)
     }
 
     /// Handle fill event.
@@ -1197,12 +1250,15 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
         }
     }
 
-    /// Check all markets for opportunities using all enabled engines.
+    /// Check specific markets for opportunities using all enabled engines.
     ///
-    /// This method runs all enabled engines (arbitrage, directional, maker) and
-    /// aggregates their decisions based on the configured priority order.
-    /// Maker orders can run concurrently with other strategies since they are passive.
-    async fn check_opportunities(&mut self, event_latency_us: u64) -> Result<(), StrategyError> {
+    /// This is a more efficient variant that only checks the specified markets,
+    /// rather than iterating through all active markets.
+    async fn check_opportunities_for_markets(
+        &mut self,
+        market_ids: &[String],
+        event_latency_us: u64,
+    ) -> Result<(), StrategyError> {
         // Fast path: check if trading is enabled (single atomic load)
         if !self.state.can_trade() {
             trace!("Trading disabled, skipping opportunity check");
@@ -1218,8 +1274,8 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
         // Calculate total exposure once
         let total_exposure = self.state.market_data.total_exposure();
 
-        // Check each market
-        let event_ids: Vec<String> = self.markets.keys().cloned().collect();
+        // Check only specified markets (clone to Vec to match check_opportunities)
+        let event_ids: Vec<String> = market_ids.to_vec();
 
         for event_id in event_ids {
             // === Phase 1: Gather market state ===
@@ -1443,51 +1499,45 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                     // Calculate distance in dollars for position manager
                     let distance_dollars = opp.distance * market.strike_price;
                     let seconds_remaining = market.state.seconds_remaining;
+                    let window_duration_secs = self.config.window_duration_secs;
 
                     // Debug: log confidence calculation for position manager
-                    let mins = Decimal::from(seconds_remaining) / dec!(60);
                     let phase = position::Phase::from_seconds(seconds_remaining);
-                    let pm_conf = market.position_manager.calculate_confidence(distance_dollars, mins);
+                    let pm_conf = market.position_manager.calculate_confidence(
+                        distance_dollars,
+                        seconds_remaining,
+                        window_duration_secs,
+                    );
                     let atr = market.position_manager.atr();
                     let atr_mult = if atr > Decimal::ZERO { distance_dollars.abs() / atr } else { Decimal::ZERO };
 
                     // Calculate time and distance confidence components for detailed logging (trace level)
-                    let time_conf = if mins > dec!(12) { dec!(0.40) }
-                        else if mins > dec!(9) { dec!(0.50) }
-                        else if mins > dec!(6) { dec!(0.60) }
-                        else if mins > dec!(3) { dec!(0.80) }
-                        else { dec!(1.00) };
-                    let dist_conf = if atr_mult > dec!(1.5) { dec!(1.00) }
-                        else if atr_mult > dec!(1.0) { dec!(0.85) }
-                        else if atr_mult > dec!(0.75) { dec!(0.70) }
-                        else if atr_mult > dec!(0.50) { dec!(0.55) }
-                        else if atr_mult > dec!(0.25) { dec!(0.40) }
-                        else { dec!(0.20) };
+                    // These now use the parameterized formulas from PositionManager
+                    let time_ratio = Decimal::new(seconds_remaining, 0) / Decimal::new(window_duration_secs, 0);
+                    let time_conf = dec!(0.30) + dec!(0.70) * (Decimal::ONE - time_ratio); // default params
+                    let dist_conf = (dec!(0.20) + dec!(0.50) * atr_mult).min(Decimal::ONE); // default params
 
-                    // Calculate required confidence (matches position.rs logic)
+                    // Calculate EV and min_edge for logging (matches position.rs logic)
                     let favorable_price = opp.favorable_price();
                     let max_edge_factor = self.engines_config.directional.max_edge_factor;
-                    let window_duration_secs = self.config.window_duration_secs;
-                    let (required_conf, min_edge) = if max_edge_factor > Decimal::ZERO {
-                        // Edge-based: required = price + (edge_factor * time_remaining / window_duration)
+                    let (ev, min_edge) = if max_edge_factor > Decimal::ZERO {
+                        // EV-based: EV = confidence - price, trade if EV >= min_edge
                         let time_factor = Decimal::new(seconds_remaining, 0) / Decimal::new(window_duration_secs, 0);
                         let edge = max_edge_factor * time_factor;
-                        (favorable_price + edge, edge)
+                        (pm_conf - favorable_price, edge)
                     } else {
-                        // Legacy phase-based thresholds (best in backtest)
-                        (phase.min_confidence(), Decimal::ZERO)
+                        // Legacy phase-based thresholds
+                        (Decimal::ZERO, Decimal::ZERO)
                     };
 
                     trace!(
-                        "📈 Confidence {} {}: dist${:.2} atr${:.2} atr_mult={:.2} | time_conf={:.2} dist_conf={:.2} | combined={:.2} need={:.2} ({}={:.2}) phase={}",
+                        "📈 Confidence {} {}: dist${:.2} atr${:.2} atr_mult={:.2} | time_conf={:.2} dist_conf={:.2} | conf={:.2} EV={:.3} min_edge={:.3} ({})",
                         event_id, asset, distance_dollars.abs(), atr, atr_mult,
-                        time_conf, dist_conf, pm_conf, required_conf,
-                        if max_edge_factor > Decimal::ZERO { "price+edge" } else { "phase_thresh" },
-                        if max_edge_factor > Decimal::ZERO { favorable_price + min_edge } else { phase.min_confidence() },
-                        phase
+                        time_conf, dist_conf, pm_conf, ev, min_edge,
+                        if max_edge_factor > Decimal::ZERO { "EV-based" } else { "phase-based" },
                     );
 
-                    // Check if we should trade based on edge-based confidence threshold and budget
+                    // Check if we should trade based on EV-based threshold and budget
                     let trade_decision = market.should_trade(
                         distance_dollars,
                         seconds_remaining,
@@ -1500,10 +1550,8 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                         position::TradeDecision::Skip(reason) => {
                             // Log skips at debug level to reduce spam (low confidence is very common)
                             debug!(
-                                "⏭️ SKIP {} {} {:?}: signal={:?} dist=${:.2} atr_mult={:.2} conf={:.2} need={:.2} ({}={:.2}) phase={}",
-                                event_id, asset, reason, opp.signal, distance_dollars.abs(), atr_mult, pm_conf, required_conf,
-                                if max_edge_factor > Decimal::ZERO { "price+edge" } else { "phase_thresh" },
-                                required_conf, phase
+                                "⏭️ SKIP {} {} {:?}: signal={:?} dist=${:.2} atr_mult={:.2} conf={:.2} EV={:.3} min_edge={:.3} phase={}",
+                                event_id, asset, reason, opp.signal, distance_dollars.abs(), atr_mult, pm_conf, ev, min_edge, phase
                             );
                             // Only record decision for meaningful skips, not low confidence
                             if !matches!(reason, position::SkipReason::LowConfidence) {
