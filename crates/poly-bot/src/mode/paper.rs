@@ -187,6 +187,12 @@ impl PaperMode {
         self
     }
 
+    /// Use an existing GlobalState (for sharing with dashboard).
+    pub fn with_state(mut self, state: Arc<GlobalState>) -> Self {
+        self.state = state;
+        self
+    }
+
     /// Get a shutdown signal receiver.
     pub fn shutdown_signal(&self) -> broadcast::Receiver<()> {
         self.shutdown_tx.subscribe()

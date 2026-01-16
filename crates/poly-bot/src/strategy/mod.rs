@@ -164,7 +164,7 @@ use crate::data_source::{
     SpotPriceEvent, WindowCloseEvent, WindowOpenEvent,
 };
 use crate::executor::{Executor, ExecutorError, OrderRequest, OrderResult, OrderType};
-use crate::state::GlobalState;
+use crate::state::{ActiveWindow, GlobalState};
 use crate::types::{EngineType, Inventory, MarketState, OrderBook};
 
 pub use arb::{ArbDetector, ArbOpportunity, ArbRejection, ArbThresholds};
@@ -1166,7 +1166,18 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
         self.token_to_event.insert(event.no_token_id.clone(), event.event_id.clone());
 
         // Add to tracked markets
-        self.markets.insert(event.event_id, market);
+        self.markets.insert(event.event_id.clone(), market);
+
+        // Sync to global state for dashboard display
+        let active_window = ActiveWindow {
+            event_id: event.event_id.clone(),
+            asset: event.asset,
+            yes_token_id: event.yes_token_id,
+            no_token_id: event.no_token_id,
+            strike_price: event.strike_price,
+            window_end: event.window_end,
+        };
+        self.state.market_data.active_windows.insert(event.event_id, active_window);
     }
 
     /// Handle window close.
@@ -1203,6 +1214,9 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             self.token_to_event.remove(&market.yes_token_id);
             self.token_to_event.remove(&market.no_token_id);
         }
+
+        // Remove from global state (dashboard display)
+        self.state.market_data.active_windows.remove(&event.event_id);
     }
 
     /// Update time remaining on all markets.
@@ -1238,6 +1252,8 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             self.markets.remove(id);
             self.token_to_event.remove(yes_token_id);
             self.token_to_event.remove(no_token_id);
+            // Also remove from global state (dashboard display)
+            self.state.market_data.active_windows.remove(id);
         }
 
         expired

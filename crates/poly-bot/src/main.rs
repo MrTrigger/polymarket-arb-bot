@@ -184,18 +184,22 @@ async fn run() -> Result<()> {
         }
     }
 
+    // Create shared GlobalState for dashboard and mode to share
+    // This enables the dashboard to display real-time data from the trading strategy
+    let shared_state = Arc::new(poly_bot::state::GlobalState::new());
+
     // Start dashboard servers if enabled (except in backtest mode)
     let dashboard_handles = if config.dashboard.enabled && config.mode != TradingMode::Backtest {
-        Some(start_dashboard_servers(&config.dashboard, clickhouse.clone()).await?)
+        Some(start_dashboard_servers(&config.dashboard, clickhouse.clone(), shared_state.clone()).await?)
     } else {
         None
     };
 
     // Run the selected mode
     let result = match config.mode {
-        TradingMode::Live => run_live_mode(config, clickhouse).await,
-        TradingMode::Paper => run_paper_mode(config, clickhouse).await,
-        TradingMode::Shadow => run_shadow_mode(config, clickhouse).await,
+        TradingMode::Live => run_live_mode(config, clickhouse, shared_state).await,
+        TradingMode::Paper => run_paper_mode(config, clickhouse, shared_state).await,
+        TradingMode::Shadow => run_shadow_mode(config, clickhouse, shared_state).await,
         TradingMode::Backtest => run_backtest_mode(config, clickhouse).await,
     };
 
@@ -216,6 +220,7 @@ async fn run() -> Result<()> {
 async fn start_dashboard_servers(
     config: &DashboardConfig,
     clickhouse: ClickHouseClient,
+    global_state: Arc<poly_bot::state::GlobalState>,
 ) -> Result<(
     poly_bot::dashboard::SharedWebSocketServer,
     tokio::task::JoinHandle<anyhow::Result<()>>,
@@ -231,11 +236,6 @@ async fn start_dashboard_servers(
     // Create shared state manager for WebSocket broadcasts
     let state_manager = create_shared_dashboard_state_manager();
 
-    // Create a temporary GlobalState for dashboard state snapshots
-    // In practice, this will be replaced by the mode's actual GlobalState
-    // once we wire the mode to pass its state to the dashboard
-    let global_state = Arc::new(poly_bot::state::GlobalState::new());
-
     // Configure and start WebSocket server
     let ws_config = WebSocketServerConfig::from_dashboard_config(config);
     let (ws_server, ws_handle) =
@@ -249,13 +249,18 @@ async fn start_dashboard_servers(
 }
 
 /// Run live trading mode.
-async fn run_live_mode(config: BotConfig, clickhouse: ClickHouseClient) -> Result<()> {
+async fn run_live_mode(
+    config: BotConfig,
+    clickhouse: ClickHouseClient,
+    _shared_state: Arc<poly_bot::state::GlobalState>,
+) -> Result<()> {
     info!("Initializing live trading mode");
 
     // Create mode config
     let mode_config = LiveModeConfig::from_bot_config(&config);
 
     // Create live mode runner
+    // TODO: Wire shared_state to LiveMode once it supports with_state
     let mut mode = LiveMode::new(mode_config, config)
         .context("Failed to create live mode")?
         .with_clickhouse(clickhouse);
@@ -278,15 +283,20 @@ async fn run_live_mode(config: BotConfig, clickhouse: ClickHouseClient) -> Resul
 }
 
 /// Run paper trading mode.
-async fn run_paper_mode(config: BotConfig, clickhouse: ClickHouseClient) -> Result<()> {
+async fn run_paper_mode(
+    config: BotConfig,
+    clickhouse: ClickHouseClient,
+    shared_state: Arc<poly_bot::state::GlobalState>,
+) -> Result<()> {
     info!("Initializing paper trading mode");
 
     // Create mode config
     let mode_config = PaperModeConfig::from_bot_config(&config);
 
-    // Create paper mode runner
+    // Create paper mode runner with shared state (for dashboard integration)
     let mut mode = PaperMode::new(mode_config, &config)
         .context("Failed to create paper mode")?
+        .with_state(shared_state)
         .with_clickhouse(clickhouse);
 
     // Set up shutdown handler
@@ -306,13 +316,18 @@ async fn run_paper_mode(config: BotConfig, clickhouse: ClickHouseClient) -> Resu
 }
 
 /// Run shadow mode.
-async fn run_shadow_mode(config: BotConfig, clickhouse: ClickHouseClient) -> Result<()> {
+async fn run_shadow_mode(
+    config: BotConfig,
+    clickhouse: ClickHouseClient,
+    _shared_state: Arc<poly_bot::state::GlobalState>,
+) -> Result<()> {
     info!("Initializing shadow mode");
 
     // Create mode config
     let mode_config = ShadowModeConfig::from_bot_config(&config);
 
     // Create shadow mode runner
+    // TODO: Wire shared_state to ShadowMode once it supports with_state
     let mut mode = ShadowMode::new(mode_config, &config)
         .context("Failed to create shadow mode")?
         .with_clickhouse(clickhouse);
