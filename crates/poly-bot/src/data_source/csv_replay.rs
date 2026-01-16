@@ -103,6 +103,7 @@ struct MarketWindowRow {
     strike_price: Decimal,
     window_start: DateTime<Utc>,
     window_end: DateTime<Utc>,
+    #[allow(dead_code)]
     discovered_at: DateTime<Utc>,
 }
 
@@ -440,6 +441,27 @@ impl DataSource for CsvReplayDataSource {
     async fn shutdown(&mut self) {
         self.is_exhausted = true;
         self.event_queue.clear();
+    }
+}
+
+impl CsvReplayDataSource {
+    /// Load all events from CSV files and return them in chronological order.
+    ///
+    /// This is useful for caching events when running multiple backtests
+    /// (e.g., parameter sweeps) to avoid reloading CSV files each time.
+    pub fn load_all_events(config: CsvReplayConfig) -> Result<Vec<MarketEvent>, DataSourceError> {
+        let mut source = CsvReplayDataSource::new(config);
+        source.load_data()?;
+
+        // Drain the heap - events come out in chronological order
+        // (BinaryHeap uses reversed Ord so pop() gives earliest first)
+        let mut events = Vec::with_capacity(source.event_queue.len());
+        while let Some(timestamped) = source.event_queue.pop() {
+            events.push(timestamped.event);
+        }
+
+        info!("Loaded {} events from CSV files", events.len());
+        Ok(events)
     }
 }
 

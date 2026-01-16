@@ -24,14 +24,14 @@ final_threshold = 0.40    # <2 min remaining
 # EV-based mode settings
 # Trade if: (confidence - price) >= min_edge
 # min_edge decays from max_edge_factor at window start to 0 at end
-max_edge_factor = 0.10    # 10% EV required at window start
+max_edge_factor = 0.08    # 8% EV required at window start (sweep optimal)
 
 # Confidence calculation params (EV-based mode)
 # time_conf = time_conf_floor + (1 - time_conf_floor) * (1 - time_ratio)
 # dist_conf = clamp(dist_conf_floor + dist_conf_per_atr * atr_multiple, floor, 1.0)
 time_conf_floor = 0.30    # Min confidence from time at window start
-dist_conf_floor = 0.20    # Min confidence for tiny moves
-dist_conf_per_atr = 0.50  # Confidence gained per ATR of movement
+dist_conf_floor = 0.15    # Min confidence for tiny moves (sweep optimal)
+dist_conf_per_atr = 0.30  # Confidence gained per ATR of movement (sweep optimal)
 
 [sweep]
 # Parameter sweep configuration
@@ -45,12 +45,18 @@ dist_conf_per_atr = 0.50  # Confidence gained per ATR of movement
 #lean_ratios = [0.55, 0.60, 0.65, 0.70]
 
 # EV-based mode sweep (minimum EV required at window start)
-edge_factors = [0.05, 0.10, 0.15, 0.20]
+# Narrowed based on first sweep - lower values performed similarly
+edge_factors = [0.02, 0.05, 0.08]
 
 # Confidence calculation params sweep
-time_conf_floors = [0.20, 0.30, 0.40]
-dist_conf_floors = [0.15, 0.20, 0.25]
-dist_conf_per_atrs = [0.40, 0.50, 0.60]
+# Results from 54-run sweep (2026-01-10 to 2026-01-12, BTC):
+# - dist_conf_floor: 0.15 best (avg $5272 vs $5057 for 0.05)
+# - dist_conf_per_atr: 0.30 best (avg $5217)
+# - max_edge_factor: 0.08 best (avg $5197, highest peak $5748)
+# - time_conf_floor: minimal impact (0.25 slightly better avg)
+time_conf_floors = [0.25, 0.30]
+dist_conf_floors = [0.05, 0.10, 0.15]
+dist_conf_per_atrs = [0.25, 0.30, 0.35]
 
 # Legacy phase mode sweep (uncomment and set max_edge_factor = 0)
 # early_thresholds = [0.75, 0.80, 0.85]

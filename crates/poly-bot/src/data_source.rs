@@ -16,6 +16,7 @@
 pub mod csv_replay;
 pub mod live;
 pub mod replay;
+pub mod vec_replay;
 
 use std::fmt;
 

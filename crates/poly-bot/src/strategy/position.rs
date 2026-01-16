@@ -160,10 +160,10 @@ impl Default for PositionConfig {
             build_threshold: dec!(0.60),
             core_threshold: dec!(0.50),
             final_threshold: dec!(0.40),
-            // EV-based confidence calculation params
+            // EV-based confidence calculation params (sweep optimal)
             time_conf_floor: dec!(0.30),     // 30% confidence at window start
-            dist_conf_floor: dec!(0.20),     // 20% minimum for tiny moves
-            dist_conf_per_atr: dec!(0.50),   // +50% per ATR of movement
+            dist_conf_floor: dec!(0.15),     // 15% minimum for tiny moves (sweep optimal)
+            dist_conf_per_atr: dec!(0.30),   // +30% per ATR of movement (sweep optimal)
         }
     }
 }

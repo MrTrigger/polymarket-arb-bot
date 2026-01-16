@@ -71,9 +71,9 @@ struct Args {
     #[arg(long)]
     sweep: bool,
 
-    /// Market window duration: 15min or 1h
-    #[arg(long, short = 'w', default_value = "1h")]
-    window: String,
+    /// Market window duration: 15min or 1h (overrides config file)
+    #[arg(long, short = 'w')]
+    window: Option<String>,
 }
 
 #[tokio::main]
@@ -131,9 +131,11 @@ async fn run() -> Result<()> {
         config.backtest.sweep_enabled = true;
     }
 
-    // Apply window duration
-    if let Ok(window_duration) = args.window.parse::<WindowDuration>() {
-        config.window_duration = window_duration;
+    // Apply window duration override from CLI
+    if let Some(window_str) = &args.window {
+        if let Ok(window_duration) = window_str.parse::<WindowDuration>() {
+            config.window_duration = window_duration;
+        }
     }
 
     // Initialize logging
@@ -399,24 +401,59 @@ async fn run_backtest_mode(config: BotConfig, clickhouse: ClickHouseClient) -> R
     info!("Trades executed: {}", result.trades_executed);
     info!("Volume traded: ${:.2}", result.volume_traded);
 
-    // If sweep was enabled, log sweep results
+    // If sweep was enabled, log sweep results sorted by P&L
     let sweep_results = mode.sweep_results();
     if !sweep_results.is_empty() {
-        info!("Sweep results ({} runs):", sweep_results.len());
-        for (i, res) in sweep_results.iter().enumerate() {
+        // Sort by P&L descending
+        let mut sorted: Vec<_> = sweep_results.iter().enumerate().collect();
+        sorted.sort_by(|a, b| b.1.total_pnl.cmp(&a.1.total_pnl));
+
+        info!("");
+        info!("═══════════════════════════════════════════════════════════════════════════");
+        info!("                      SWEEP RESULTS ({} runs, sorted by P&L)", sweep_results.len());
+        info!("═══════════════════════════════════════════════════════════════════════════");
+        info!("");
+        info!("{:>4}  {:>10}  {:>8}  {}", "Rank", "P&L", "Return", "Parameters");
+        info!("{:>4}  {:>10}  {:>8}  {}", "----", "----------", "--------", "----------");
+
+        for (rank, (_orig_idx, res)) in sorted.iter().enumerate() {
+            // Format parameters more compactly
+            let params: Vec<String> = res.parameters.iter()
+                .map(|(k, v)| format!("{}={:.2}", k, v))
+                .collect();
+            let params_str = params.join(", ");
+
             info!(
-                "  Run {}: P&L=${:.2}, Return={:.2}%, Params={:?}",
-                i + 1,
+                "{:>4}  ${:>9.2}  {:>7.2}%  {}",
+                rank + 1,
                 res.total_pnl,
                 res.return_pct,
-                res.parameters
+                params_str
             );
         }
 
-        // Find best run
-        if let Some(best) = sweep_results.iter().max_by_key(|r| r.total_pnl) {
-            info!("Best run: P&L=${:.2}, Params={:?}", best.total_pnl, best.parameters);
+        info!("");
+        info!("═══════════════════════════════════════════════════════════════════════════");
+
+        // Show best run prominently
+        if let Some((_, best)) = sorted.first() {
+            let params: Vec<String> = best.parameters.iter()
+                .map(|(k, v)| format!("{}={:.2}", k, v))
+                .collect();
+            info!("BEST: P&L=${:.2} ({:.2}%)", best.total_pnl, best.return_pct);
+            info!("      {}", params.join(", "));
         }
+
+        // Show worst run for comparison
+        if let Some((_, worst)) = sorted.last() {
+            let params: Vec<String> = worst.parameters.iter()
+                .map(|(k, v)| format!("{}={:.2}", k, v))
+                .collect();
+            info!("WORST: P&L=${:.2} ({:.2}%)", worst.total_pnl, worst.return_pct);
+            info!("       {}", params.join(", "));
+        }
+
+        info!("═══════════════════════════════════════════════════════════════════════════");
     }
 
     Ok(())

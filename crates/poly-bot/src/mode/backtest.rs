@@ -35,7 +35,8 @@ use poly_common::ClickHouseClient;
 use crate::config::{BacktestConfig, BotConfig, EnginesConfig, ObservabilityConfig, TradingMode};
 use crate::data_source::csv_replay::{CsvReplayConfig, CsvReplayDataSource};
 use crate::data_source::replay::{ReplayConfig, ReplayDataSource};
-use crate::data_source::DataSource;
+use crate::data_source::vec_replay::VecReplayDataSource;
+use crate::data_source::{DataSource, MarketEvent};
 use crate::executor::simulated::{SimulatedExecutor, SimulatedExecutorConfig, SimulatedStats};
 use crate::observability::{
     create_shared_analyzer, create_shared_detector_with_capture, AnomalyConfig, CaptureConfig,
@@ -67,6 +68,8 @@ pub struct BacktestModeConfig {
     pub sweep_enabled: bool,
     /// Parameter sweep configurations.
     pub sweep_params: Vec<SweepParameter>,
+    /// Number of parallel workers for sweep mode (0 = number of CPU cores).
+    pub sweep_parallel_workers: usize,
 }
 
 impl Default for BacktestModeConfig {
@@ -82,6 +85,7 @@ impl Default for BacktestModeConfig {
             shutdown_timeout_secs: 30,
             sweep_enabled: false,
             sweep_params: Vec::new(),
+            sweep_parallel_workers: 0, // 0 = use number of CPU cores
         }
     }
 }
@@ -124,6 +128,7 @@ impl BacktestModeConfig {
             shutdown_timeout_secs: 30,
             sweep_enabled: config.backtest.sweep_enabled,
             sweep_params: Vec::new(),
+            sweep_parallel_workers: config.backtest.sweep_parallel_workers.unwrap_or(0),
         })
     }
 
@@ -376,6 +381,82 @@ pub struct PositionSummary {
     pub no_shares: Decimal,
     /// Cost basis.
     pub cost_basis: Decimal,
+}
+
+
+/// Standalone backtest task for parallel sweep execution.
+///
+/// This is a blocking function that runs a complete backtest synchronously.
+/// It creates its own tokio runtime internally to run async strategy code.
+fn run_backtest_task_blocking(
+    events: Arc<Vec<MarketEvent>>,
+    config: BacktestModeConfig,
+) -> Result<BacktestResult> {
+    let start_instant = std::time::Instant::now();
+
+    // Create a dedicated runtime for this backtest
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| anyhow::anyhow!("Failed to create runtime: {}", e))?;
+
+    // Run the backtest on this runtime
+    rt.block_on(async {
+        // Create fresh state for this run
+        let state = Arc::new(GlobalState::new());
+
+        // Create data source from cached events
+        let data_source = VecReplayDataSource::new(events, config.data_source.speed);
+
+        // Create executor
+        let mut executor_config = config.executor.clone();
+        executor_config.initial_balance = config.initial_balance;
+        let executor = SimulatedExecutor::new(executor_config);
+
+        // Create strategy loop (no observability for sweep runs - too expensive)
+        let mut strategy = StrategyLoop::with_engines(
+            data_source,
+            executor,
+            state.clone(),
+            config.strategy.clone(),
+            config.engines.clone(),
+        );
+
+        // Enable trading and run
+        state.enable_trading();
+
+        let run_result = strategy.run().await;
+
+        // Get final metrics
+        let final_balance = strategy.available_balance();
+        let metrics = strategy.metrics();
+
+        // Shutdown strategy
+        strategy.shutdown().await;
+
+        // Check for errors
+        match run_result {
+            Ok(()) => {}
+            Err(crate::strategy::StrategyError::Shutdown) => {}
+            Err(e) => {
+                return Err(anyhow::anyhow!("Strategy error: {}", e));
+            }
+        }
+
+        // Build result
+        let duration_secs = start_instant.elapsed().as_secs_f64();
+        let default_stats = SimulatedStats::default();
+
+        Ok(BacktestResult::new(
+            config.data_source.start_time,
+            config.data_source.end_time,
+            config.initial_balance,
+            final_balance,
+            &default_stats,
+            &metrics,
+            duration_secs,
+        ))
+    })
 }
 
 
@@ -681,7 +762,7 @@ impl BacktestMode {
         Ok(backtest_result)
     }
 
-    /// Run parameter sweep.
+    /// Run parameter sweep with parallel execution.
     async fn run_sweep(&mut self) -> Result<BacktestResult> {
         info!("Starting parameter sweep backtest");
 
@@ -689,33 +770,108 @@ impl BacktestMode {
         let combinations = self.generate_sweep_combinations();
         let total_runs = combinations.len();
 
+        // Determine number of workers
+        let num_workers = if self.config.sweep_parallel_workers == 0 {
+            std::thread::available_parallelism()
+                .map(|p| p.get())
+                .unwrap_or(4)
+        } else {
+            self.config.sweep_parallel_workers
+        };
+
         info!(
-            "Running {} parameter combinations",
-            total_runs
+            "Running {} parameter combinations with {} parallel workers",
+            total_runs, num_workers
         );
 
-        let mut best_result: Option<BacktestResult> = None;
-        let mut best_pnl = Decimal::MIN;
+        // Pre-load events once if using CSV source (required for parallel execution)
+        let cached_events: Option<Arc<Vec<MarketEvent>>> = if let Some(ref data_dir) = self.config.csv_data_dir {
+            info!("Pre-loading CSV data for sweep");
+            let csv_config = CsvReplayConfig {
+                data_dir: data_dir.clone(),
+                start_time: Some(self.config.data_source.start_time),
+                end_time: Some(self.config.data_source.end_time),
+                assets: self.config.data_source.assets.clone(),
+                speed: 0.0,
+            };
+            match CsvReplayDataSource::load_all_events(csv_config) {
+                Ok(events) => {
+                    info!("Cached {} events for sweep", events.len());
+                    Some(Arc::new(events))
+                }
+                Err(e) => {
+                    return Err(anyhow::anyhow!("Failed to pre-load CSV data: {}", e));
+                }
+            }
+        } else {
+            return Err(anyhow::anyhow!("Parallel sweep requires CSV data source"));
+        };
 
+        let events = cached_events.unwrap();
+
+        // Prepare all run configs
+        let mut run_configs: Vec<(usize, HashMap<String, f64>, BacktestModeConfig)> = Vec::new();
         for (run_idx, params) in combinations.into_iter().enumerate() {
-            info!(
-                "Sweep run {}/{}: {:?}",
-                run_idx + 1,
-                total_runs,
-                params
-            );
-
-            // Apply parameters to config
             let mut run_config = self.config.clone();
             for (name, value) in &params {
                 apply_parameter(&mut run_config, name, *value);
             }
+            run_configs.push((run_idx, params, run_config));
+        }
 
-            // Run backtest with this config
-            let original_config = std::mem::replace(&mut self.config, run_config);
-            let result = self.run_single().await;
-            self.config = original_config;
+        // Use std::thread for true parallel execution
+        // Simple concurrency limiting with atomic counter and spin-wait
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let active_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut handles = Vec::new();
 
+        for (run_idx, params, run_config) in run_configs {
+            let events = Arc::clone(&events);
+            let result_tx = result_tx.clone();
+            let active_count = Arc::clone(&active_count);
+            let total = total_runs;
+            let max_workers = num_workers;
+
+            let handle = std::thread::spawn(move || {
+                // Simple spin-wait to limit concurrency
+                loop {
+                    let current = active_count.load(std::sync::atomic::Ordering::SeqCst);
+                    if current < max_workers {
+                        if active_count
+                            .compare_exchange(
+                                current,
+                                current + 1,
+                                std::sync::atomic::Ordering::SeqCst,
+                                std::sync::atomic::Ordering::SeqCst,
+                            )
+                            .is_ok()
+                        {
+                            break;
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+
+                let count = active_count.load(std::sync::atomic::Ordering::SeqCst);
+                info!("Sweep run {}/{} (active: {}): {:?}", run_idx + 1, total, count, params);
+
+                let result = run_backtest_task_blocking(events, run_config);
+
+                active_count.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+
+                let _ = result_tx.send((run_idx, params, result));
+            });
+
+            handles.push(handle);
+        }
+
+        // Drop our sender so the channel closes when all threads finish
+        drop(result_tx);
+
+        // Collect results as they complete
+        let mut results: Vec<(usize, BacktestResult)> = Vec::new();
+
+        for (run_idx, params, result) in result_rx {
             match result {
                 Ok(mut res) => {
                     // Add parameters to result
@@ -730,17 +886,32 @@ impl BacktestMode {
                         res.return_pct
                     );
 
-                    if res.total_pnl > best_pnl {
-                        best_pnl = res.total_pnl;
-                        best_result = Some(res.clone());
-                    }
-
-                    self.sweep_results.push(res);
+                    results.push((run_idx, res));
                 }
                 Err(e) => {
                     warn!("Sweep run {} failed: {}", run_idx + 1, e);
                 }
             }
+        }
+
+        // Wait for all threads to finish
+        for handle in handles {
+            let _ = handle.join();
+        }
+
+        // Sort results by run index for consistent ordering
+        results.sort_by_key(|(idx, _)| *idx);
+
+        // Find best result and collect all results
+        let mut best_result: Option<BacktestResult> = None;
+        let mut best_pnl = Decimal::MIN;
+
+        for (_, res) in results {
+            if res.total_pnl > best_pnl {
+                best_pnl = res.total_pnl;
+                best_result = Some(res.clone());
+            }
+            self.sweep_results.push(res);
         }
 
         // Return best result or error

@@ -524,6 +524,9 @@ pub struct BacktestConfig {
 
     /// Data directory for CSV replay (if set, uses CSV instead of ClickHouse).
     pub data_dir: Option<String>,
+
+    /// Number of parallel workers for sweep mode (0 or None = number of CPU cores).
+    pub sweep_parallel_workers: Option<usize>,
 }
 
 impl Default for BacktestConfig {
@@ -534,6 +537,7 @@ impl Default for BacktestConfig {
             speed: 0.0, // Max speed by default
             sweep_enabled: false,
             data_dir: None,
+            sweep_parallel_workers: None,
         }
     }
 }
@@ -1032,6 +1036,9 @@ impl BotConfig {
         if let Ok(pass) = std::env::var("CLICKHOUSE_PASSWORD") {
             self.clickhouse.password = Some(pass);
         }
+        if let Ok(database) = std::env::var("CLICKHOUSE_DATABASE") {
+            self.clickhouse.database = database;
+        }
 
         // Alert webhook
         if let Ok(url) = std::env::var("ALERT_WEBHOOK_URL") {
@@ -1327,7 +1334,7 @@ impl Default for ClickHouseToml {
     fn default() -> Self {
         Self {
             url: "http://localhost:8123".to_string(),
-            database: "default".to_string(),
+            database: "polymarket".to_string(),
             max_rows: 10000,
             max_bytes: 10 * 1024 * 1024,
             period_secs: 5,
@@ -1533,6 +1540,7 @@ struct BacktestToml {
     speed: f64,
     sweep_enabled: bool,
     data_dir: Option<String>,
+    sweep_parallel_workers: Option<usize>,
 }
 
 impl Default for BacktestToml {
@@ -1543,6 +1551,7 @@ impl Default for BacktestToml {
             speed: 0.0,
             sweep_enabled: false,
             data_dir: None,
+            sweep_parallel_workers: None,
         }
     }
 }
@@ -1813,6 +1822,7 @@ impl From<TomlConfig> for BotConfig {
                 speed: toml.backtest.speed,
                 sweep_enabled: toml.backtest.sweep_enabled,
                 data_dir: toml.backtest.data_dir,
+                sweep_parallel_workers: toml.backtest.sweep_parallel_workers,
             },
             engines: EnginesConfig {
                 arbitrage: ArbitrageEngineConfig {

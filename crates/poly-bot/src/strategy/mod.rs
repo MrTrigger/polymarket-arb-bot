@@ -359,7 +359,7 @@ struct TrackedMarket {
 }
 
 impl TrackedMarket {
-    fn new(event: &WindowOpenEvent, market_budget: Decimal) -> Self {
+    fn new(event: &WindowOpenEvent, market_budget: Decimal, strategy_config: &StrategyConfig) -> Self {
         let state = MarketState::new(
             event.event_id.clone(),
             event.asset,
@@ -370,6 +370,23 @@ impl TrackedMarket {
         );
         // Use asset-specific ATR for proper volatility normalization
         let atr = event.asset.estimated_atr_15m();
+
+        // Build PositionConfig with confidence params from StrategyConfig
+        let position_config = position::PositionConfig {
+            total_budget: market_budget,
+            atr,
+            // Phase-based thresholds (legacy mode)
+            early_threshold: strategy_config.early_threshold,
+            build_threshold: strategy_config.build_threshold,
+            core_threshold: strategy_config.core_threshold,
+            final_threshold: strategy_config.final_threshold,
+            // EV-based confidence params
+            time_conf_floor: strategy_config.time_conf_floor,
+            dist_conf_floor: strategy_config.dist_conf_floor,
+            dist_conf_per_atr: strategy_config.dist_conf_per_atr,
+            ..Default::default()
+        };
+
         Self {
             event_id: event.event_id.clone(),
             asset: event.asset,
@@ -382,7 +399,7 @@ impl TrackedMarket {
             yes_toxic_warning: None,
             no_toxic_warning: None,
             active_maker_orders: HashMap::new(),
-            position_manager: position::PositionManager::with_budget_and_atr(market_budget, atr),
+            position_manager: position::PositionManager::new(position_config),
         }
     }
 
@@ -501,11 +518,11 @@ impl Default for StrategyConfig {
             core_threshold: dec!(0.50),
             final_threshold: dec!(0.40),
             // EV-based mode: trade if (confidence - price) >= min_edge
-            max_edge_factor: dec!(0.10), // Default: 10% EV required at window start
+            max_edge_factor: dec!(0.08), // 8% EV required at window start (sweep optimal)
             // Confidence calculation params
             time_conf_floor: dec!(0.30),     // 30% confidence at window start
-            dist_conf_floor: dec!(0.20),     // 20% minimum for tiny moves
-            dist_conf_per_atr: dec!(0.50),   // +50% per ATR of movement
+            dist_conf_floor: dec!(0.15),     // 15% minimum for tiny moves (sweep optimal)
+            dist_conf_per_atr: dec!(0.30),   // +30% per ATR of movement (sweep optimal)
             // Allocation ratios (optimized via param sweep)
             strong_up_ratio: dec!(0.82),
             lean_up_ratio: dec!(0.65),
@@ -535,11 +552,11 @@ impl StrategyConfig {
             build_threshold: dec!(0.60),
             core_threshold: dec!(0.50),
             final_threshold: dec!(0.40),
-            // EV-based mode params
-            max_edge_factor: dec!(0.10),
+            // EV-based mode params (sweep optimal)
+            max_edge_factor: dec!(0.08),
             time_conf_floor: dec!(0.30),
-            dist_conf_floor: dec!(0.20),
-            dist_conf_per_atr: dec!(0.50),
+            dist_conf_floor: dec!(0.15),
+            dist_conf_per_atr: dec!(0.30),
             // Allocation ratios (optimized via param sweep)
             strong_up_ratio: dec!(0.82),
             lean_up_ratio: dec!(0.65),
@@ -573,11 +590,11 @@ impl StrategyConfig {
             build_threshold,
             core_threshold,
             final_threshold,
-            // EV-based mode params
-            max_edge_factor: dec!(0.10),
+            // EV-based mode params (sweep optimal)
+            max_edge_factor: dec!(0.08),
             time_conf_floor: dec!(0.30),
-            dist_conf_floor: dec!(0.20),
-            dist_conf_per_atr: dec!(0.50),
+            dist_conf_floor: dec!(0.15),
+            dist_conf_per_atr: dec!(0.30),
             // Allocation ratios (optimized via param sweep)
             strong_up_ratio: dec!(0.82),
             lean_up_ratio: dec!(0.65),
@@ -1141,7 +1158,8 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
         let market_budget = self.config.sizing_config.max_position_per_market;
 
         // Create tracked market with phase-based position management
-        let market = TrackedMarket::new(&event, market_budget);
+        // Pass strategy config so confidence params flow through to PositionManager
+        let market = TrackedMarket::new(&event, market_budget, &self.config);
 
         // Update token mapping
         self.token_to_event.insert(event.yes_token_id.clone(), event.event_id.clone());
@@ -3010,7 +3028,7 @@ mod tests {
             timestamp: Utc::now(),
         };
 
-        let market = TrackedMarket::new(&event, dec!(100));
+        let market = TrackedMarket::new(&event, dec!(100), &StrategyConfig::default());
         assert!(market.active_maker_orders.is_empty());
     }
 }
