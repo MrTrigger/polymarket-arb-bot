@@ -191,6 +191,7 @@ impl WebSocketServer {
         );
 
         // Start the broadcast task
+        info!("Starting broadcast task");
         let broadcast_handle = self.spawn_broadcast_task();
 
         // Accept connections until shutdown
@@ -434,6 +435,7 @@ pub fn create_websocket_server(
     state_manager: SharedDashboardStateManager,
     global_state: Arc<GlobalState>,
 ) -> SharedWebSocketServer {
+    tracing::info!("WebSocket server using GlobalState at {:p}", Arc::as_ptr(&global_state));
     Arc::new(WebSocketServer::new(config, state_manager, global_state))
 }
 

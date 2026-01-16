@@ -72,7 +72,7 @@ const LOG_LEVEL_CONFIG: Record<
  */
 export function LogWindow() {
   const { recentLogs, initialized } = useDashboardState();
-  const [isOpen, setIsOpen] = useState(true);
+  const [isOpen, setIsOpen] = useState(false); // Start collapsed to give MarketsGrid more space
   const [selectedLevels, setSelectedLevels] = useState<Set<LogLevel>>(
     new Set(["ERROR", "WARN", "INFO"])
   );

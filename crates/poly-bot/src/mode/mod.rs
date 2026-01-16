@@ -9,8 +9,12 @@
 //!
 //! Each mode wires together the appropriate `DataSource` and `Executor`
 //! implementations with the strategy loop.
+//!
+//! The `common` module contains shared functionality between modes to ensure
+//! identical behavior (market discovery, observability, ATR warmup).
 
 pub mod backtest;
+pub mod common;
 pub mod live;
 pub mod paper;
 pub mod shadow;

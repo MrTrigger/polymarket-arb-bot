@@ -50,16 +50,17 @@ impl Signal {
     /// Get the UP allocation ratio (0.0 to 1.0).
     ///
     /// Returns the fraction of the position that should be allocated to UP.
-    /// OPTIMIZED via backtest sweep: Strong = 82/18, Lean = 65/35
-    /// (Previous spec: Strong = 78/22, Lean = 61/39)
+    /// Note: This is a base ratio. The actual hedge amount should be
+    /// adjusted based on the hedge price - cheap hedges are worth buying,
+    /// expensive hedges are not.
     #[inline]
     pub fn up_ratio(&self) -> Decimal {
         match self {
-            Signal::StrongUp => dec!(0.82),   // 82% UP, 18% DOWN (optimized)
-            Signal::LeanUp => dec!(0.65),     // 65% UP, 35% DOWN (optimized)
+            Signal::StrongUp => dec!(0.82),   // 82% UP, 18% DOWN
+            Signal::LeanUp => dec!(0.65),     // 65% UP, 35% DOWN
             Signal::Neutral => dec!(0.50),    // 50/50 split
-            Signal::LeanDown => dec!(0.35),   // 35% UP, 65% DOWN (optimized)
-            Signal::StrongDown => dec!(0.18), // 18% UP, 82% DOWN (optimized)
+            Signal::LeanDown => dec!(0.35),   // 35% UP, 65% DOWN
+            Signal::StrongDown => dec!(0.18), // 18% UP, 82% DOWN
         }
     }
 

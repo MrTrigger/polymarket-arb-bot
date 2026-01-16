@@ -365,7 +365,7 @@ export function PriceChart({ market, trades }: PriceChartProps) {
     };
   }, [market.asset]);
 
-  // Update strike price line and ensure it's visible in chart range
+  // Update strike price line
   useEffect(() => {
     if (!priceSeriesRef.current || !priceChartRef.current) return;
 
@@ -381,23 +381,40 @@ export function PriceChart({ market, trades }: PriceChartProps) {
       title: "Strike",
     });
 
-    // Force the price scale to include the strike price in visible range
-    // by setting auto scale to include the strike price area
-    if (strikePrice > 0) {
-      const margin = Math.abs(spotPrice - strikePrice) * 0.5 || spotPrice * 0.001;
-      const minPrice = Math.min(spotPrice, strikePrice) - margin;
-      const maxPrice = Math.max(spotPrice, strikePrice) + margin;
+    // Dynamically compute the price range from all data points + strike price
+    // This ensures the Y-axis scales to show all price data and the strike line
+    priceSeriesRef.current.applyOptions({
+      autoscaleInfoProvider: () => {
+        const data = priceDataRef.current;
+        if (data.length === 0) return null;
 
-      priceSeriesRef.current.applyOptions({
-        autoscaleInfoProvider: () => ({
+        // Find min/max from all price data
+        let minPrice = data[0].value;
+        let maxPrice = data[0].value;
+        for (const point of data) {
+          if (point.value < minPrice) minPrice = point.value;
+          if (point.value > maxPrice) maxPrice = point.value;
+        }
+
+        // Include strike price in the range
+        if (strikePrice > 0) {
+          minPrice = Math.min(minPrice, strikePrice);
+          maxPrice = Math.max(maxPrice, strikePrice);
+        }
+
+        // Add 5% margin for visual breathing room
+        const range = maxPrice - minPrice || maxPrice * 0.01;
+        const margin = range * 0.05;
+
+        return {
           priceRange: {
-            minValue: minPrice,
-            maxValue: maxPrice,
+            minValue: minPrice - margin,
+            maxValue: maxPrice + margin,
           },
-        }),
-      });
-    }
-  }, [strikePrice, spotPrice]);
+        };
+      },
+    });
+  }, [strikePrice]);
 
   // Update spot price data
   useEffect(() => {

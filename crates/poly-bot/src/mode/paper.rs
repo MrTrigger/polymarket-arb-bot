@@ -26,21 +26,19 @@ use tokio::sync::broadcast;
 use tracing::{error, info, warn};
 
 use poly_common::{ClickHouseClient, CryptoAsset};
-use poly_market::{DiscoveryConfig, MarketDiscovery};
+use poly_market::DiscoveryConfig;
 
 use crate::config::{BotConfig, EnginesConfig, ObservabilityConfig, TradingMode};
 use crate::dashboard::{
     create_shared_session_manager, end_shared_session, BotMode, DashboardIntegration, ExitReason,
     SharedSessionManager,
 };
-use crate::data_source::live::{ActiveMarket, LiveDataSource, LiveDataSourceConfig};
+use crate::data_source::live::{LiveDataSource, LiveDataSourceConfig};
 use crate::executor::simulated::{SimulatedExecutor, SimulatedExecutorConfig};
-use crate::observability::{
-    create_shared_analyzer, create_shared_detector_with_capture, AnomalyConfig, CaptureConfig,
-    CounterfactualConfig, InMemoryIdLookup, ObservabilityCapture, ProcessorConfig,
-};
 use crate::state::GlobalState;
 use crate::strategy::{StrategyConfig, StrategyLoop};
+
+use super::common;
 
 /// Configuration for paper trading mode.
 #[derive(Debug, Clone)]
@@ -192,6 +190,7 @@ impl PaperMode {
 
     /// Use an existing GlobalState (for sharing with dashboard).
     pub fn with_state(mut self, state: Arc<GlobalState>) -> Self {
+        tracing::info!("PaperMode using shared GlobalState at {:p}", Arc::as_ptr(&state));
         self.state = state;
         self
     }
@@ -245,10 +244,10 @@ impl PaperMode {
         let active_markets = data_source.active_markets_handle();
         let event_sender = data_source.event_sender();
 
-        // Spawn market discovery task
+        // Spawn market discovery task (shared with live mode)
         let discovery_shutdown = self.shutdown_tx.subscribe();
         let discovery_config = self.config.discovery.clone();
-        let _discovery_handle = tokio::spawn(run_market_discovery(
+        let _discovery_handle = tokio::spawn(common::run_market_discovery(
             discovery_config,
             active_markets,
             event_sender,
@@ -264,8 +263,12 @@ impl PaperMode {
         self.state.metrics.set_allocated_balance(self.config.initial_balance);
         self.state.metrics.set_current_balance(self.config.initial_balance);
 
-        // Set up observability
-        let (capture, obs_tasks) = self.setup_observability().await?;
+        // Set up observability (shared with live mode)
+        let (capture, obs_tasks) = common::setup_observability(
+            &self.config.observability,
+            self.clickhouse.as_ref(),
+            &self.shutdown_tx,
+        ).await?;
 
         // Set up dashboard integration
         let session_id = self.session.read().map(|s| s.session_id()).unwrap_or_default();
@@ -296,78 +299,14 @@ impl PaperMode {
             self.config.engines.clone(),
         );
 
-        // Warm up ATR tracker with recent historical prices
-        // This ensures accurate ATR from the first trade instead of waiting for data to accumulate
-        info!("Warming up ATR tracker with recent prices...");
-        let warmup_discovery = MarketDiscovery::with_assets(self.config.discovery.assets.clone());
-        for asset in &self.config.discovery.assets {
-            match warmup_discovery.fetch_recent_prices(*asset, 10).await {
-                Ok(prices) if !prices.is_empty() => {
-                    strategy.warmup_atr(*asset, &prices);
-                    info!(
-                        "Warmed up ATR for {} with {} recent prices",
-                        asset,
-                        prices.len()
-                    );
-                }
-                Ok(_) => {
-                    warn!("No recent prices available for {} warmup, using default ATR", asset);
-                }
-                Err(e) => {
-                    warn!("Failed to fetch warmup prices for {}: {}, using default ATR", asset, e);
-                }
-            }
-        }
-        info!("ATR warmup complete");
+        // Warm up ATR tracker with recent historical prices (shared with live mode)
+        common::warmup_atr(&mut strategy, &self.config.discovery.assets).await;
 
-        // Add observability sender if capture is enabled
+        // Add observability sender if capture is enabled (shared with live mode)
         if let Some(ref cap) = capture
             && cap.is_enabled()
         {
-            // Create a simple channel for TradeDecision (separate from ObservabilityEvent)
-            let (tx, mut rx) = tokio::sync::mpsc::channel(1024);
-            strategy = strategy.with_observability(tx);
-
-            // Spawn task to forward decisions to capture
-            let cap_clone = cap.clone();
-            tokio::spawn(async move {
-                while let Some(decision) = rx.recv().await {
-                    // Convert TradeDecision to DecisionSnapshot and capture
-                    let snapshot = crate::observability::SnapshotBuilder::new()
-                        .event_id(&decision.event_id)
-                        .yes_token_id(&decision.opportunity.yes_token_id)
-                        .no_token_id(&decision.opportunity.no_token_id)
-                        .yes_ask(decision.opportunity.yes_ask)
-                        .no_ask(decision.opportunity.no_ask)
-                        .margin(decision.opportunity.margin)
-                        .size(decision.opportunity.max_size)
-                        .seconds_remaining(decision.opportunity.seconds_remaining)
-                        .confidence(decision.opportunity.confidence)
-                        .asset(decision.asset)
-                        .phase(decision.opportunity.phase)
-                        .action(match decision.action {
-                            crate::strategy::TradeAction::Execute => {
-                                crate::observability::ActionType::Execute
-                            }
-                            crate::strategy::TradeAction::SkipSizing => {
-                                crate::observability::ActionType::SkipSizing
-                            }
-                            crate::strategy::TradeAction::SkipToxic => {
-                                crate::observability::ActionType::SkipToxic
-                            }
-                            crate::strategy::TradeAction::SkipDisabled => {
-                                crate::observability::ActionType::SkipDisabled
-                            }
-                            crate::strategy::TradeAction::SkipCircuitBreaker => {
-                                crate::observability::ActionType::SkipCircuitBreaker
-                            }
-                        })
-                        .latency_us(decision.latency_us)
-                        .build();
-
-                    cap_clone.try_capture(snapshot);
-                }
-            });
+            strategy = common::setup_observability_forwarding(strategy, cap);
         }
 
         // Enable trading
@@ -402,86 +341,6 @@ impl PaperMode {
         self.shutdown(&mut strategy, obs_tasks, dashboard_tasks).await;
 
         result
-    }
-
-    /// Set up observability components.
-    async fn setup_observability(
-        &self,
-    ) -> Result<(
-        Option<Arc<ObservabilityCapture>>,
-        Vec<tokio::task::JoinHandle<()>>,
-    )> {
-        let obs_config = &self.config.observability;
-        let mut tasks = Vec::new();
-
-        if !obs_config.capture_decisions {
-            return Ok((None, tasks));
-        }
-
-        // Create capture channel using from_config
-        let capture_config = CaptureConfig {
-            enabled: true,
-            channel_capacity: obs_config.channel_buffer_size,
-            log_drops: true,
-            drop_log_threshold: 100,
-        };
-
-        let (capture, receiver) = ObservabilityCapture::from_config(capture_config);
-        let capture = Arc::new(capture);
-
-        // Create ID lookup for enrichment
-        let id_lookup = Arc::new(InMemoryIdLookup::new());
-
-        // Create processor if we have both ClickHouse and a receiver
-        if let (Some(client), Some(receiver)) = (&self.clickhouse, receiver) {
-            let processor_config = ProcessorConfig {
-                batch_size: obs_config.batch_size,
-                flush_interval: Duration::from_secs(obs_config.flush_interval_secs),
-                max_buffer_size: obs_config.channel_buffer_size,
-                process_counterfactuals: obs_config.capture_counterfactuals,
-                process_anomalies: obs_config.detect_anomalies,
-            };
-
-            // Create processor and run it
-            let processor = crate::observability::ObservabilityProcessor::new(
-                processor_config,
-                id_lookup.clone(),
-            );
-
-            let shutdown_rx = self.shutdown_tx.subscribe();
-            let client_clone = client.clone();
-            let handle = tokio::spawn(async move {
-                processor.run(receiver, client_clone, shutdown_rx).await;
-            });
-            tasks.push(handle);
-        }
-
-        // Create counterfactual analyzer if enabled
-        if obs_config.capture_counterfactuals {
-            let cf_config = CounterfactualConfig::default();
-            let analyzer = create_shared_analyzer(cf_config);
-
-            // Spawn cleanup loop
-            let analyzer_clone = analyzer.clone();
-            let shutdown_rx = self.shutdown_tx.subscribe();
-            let handle = tokio::spawn(async move {
-                analyzer_clone
-                    .run_cleanup_loop(Duration::from_secs(60), shutdown_rx)
-                    .await;
-            });
-            tasks.push(handle);
-        }
-
-        // Create anomaly detector if enabled
-        if obs_config.detect_anomalies {
-            let _detector = create_shared_detector_with_capture(
-                AnomalyConfig::from_observability_config(obs_config),
-                capture.clone(),
-            );
-            // Detector is used by strategy loop for real-time detection
-        }
-
-        Ok((Some(capture), tasks))
     }
 
     /// Perform graceful shutdown.
@@ -545,92 +404,6 @@ impl PaperMode {
         info!("Paper trading shutdown requested");
         self.state.control.request_shutdown();
         let _ = self.shutdown_tx.send(());
-    }
-}
-
-/// Run market discovery in a background task.
-///
-/// Periodically queries the Gamma API for new 15-minute markets
-/// and adds them to the active markets state for CLOB subscription.
-/// Also sends WindowOpenEvent to the strategy for each discovered market.
-async fn run_market_discovery(
-    config: DiscoveryConfig,
-    active_markets: crate::data_source::live::ActiveMarketsState,
-    event_sender: crate::data_source::live::EventSender,
-    mut shutdown: broadcast::Receiver<()>,
-) {
-    use crate::data_source::{MarketEvent, WindowOpenEvent};
-    use chrono::Utc;
-
-    info!(
-        "Starting market discovery for {:?}",
-        config.assets.iter().map(|a| a.as_str()).collect::<Vec<_>>()
-    );
-
-    let mut discovery = MarketDiscovery::new(config.clone());
-    let poll_interval = config.poll_interval;
-
-    loop {
-        // Discover new markets
-        match discovery.discover().await {
-            Ok(markets) => {
-                if !markets.is_empty() {
-                    info!("Discovered {} new markets", markets.len());
-
-                    // Add discovered markets to the active markets state
-                    let mut active = active_markets.write().await;
-                    for market in &markets {
-                        let active_market = ActiveMarket {
-                            event_id: market.event_id.clone(),
-                            yes_token_id: market.yes_token_id.clone(),
-                            no_token_id: market.no_token_id.clone(),
-                            asset: market.asset,
-                            strike_price: market.strike_price,
-                            window_end: market.window_end,
-                        };
-
-                        // Generate Polymarket URL for easy tracking
-                        let url = format!(
-                            "https://polymarket.com/event/{}",
-                            market.event_id
-                        );
-                        info!(
-                            "Adding market {} ({} strike={}) to active markets\n    URL: {}",
-                            market.event_id, market.asset, market.strike_price, url
-                        );
-                        active.insert(market.event_id.clone(), active_market);
-
-                        // Send WindowOpenEvent to strategy
-                        let window_event = MarketEvent::WindowOpen(WindowOpenEvent {
-                            event_id: market.event_id.clone(),
-                            asset: market.asset,
-                            yes_token_id: market.yes_token_id.clone(),
-                            no_token_id: market.no_token_id.clone(),
-                            strike_price: market.strike_price,
-                            window_start: market.window_start,
-                            window_end: market.window_end,
-                            timestamp: Utc::now(),
-                        });
-
-                        if let Err(e) = event_sender.send(window_event).await {
-                            warn!("Failed to send WindowOpen event: {}", e);
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                error!("Market discovery error: {}", e);
-            }
-        }
-
-        // Wait for next poll or shutdown
-        tokio::select! {
-            _ = tokio::time::sleep(poll_interval) => {}
-            _ = shutdown.recv() => {
-                info!("Market discovery received shutdown signal");
-                break;
-            }
-        }
     }
 }
 

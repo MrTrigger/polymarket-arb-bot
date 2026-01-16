@@ -1290,7 +1290,7 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             strike_price: event.strike_price,
             window_end: event.window_end,
         };
-        self.state.market_data.active_windows.insert(event.event_id, active_window);
+        self.state.market_data.active_windows.insert(event.event_id.clone(), active_window);
     }
 
     /// Handle window close.
@@ -1983,10 +1983,6 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             }
         };
 
-        // Calculate UP and DOWN sizes based on signal ratios
-        let up_size = total_size * opportunity.up_ratio;
-        let down_size = total_size * opportunity.down_ratio;
-
         // Get order books
         let (yes_book, no_book) = (&market.state.yes_book, &market.state.no_book);
 
@@ -2006,6 +2002,54 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                 return Ok(TradeAction::SkipSizing);
             }
         };
+
+        // Linear hedge sizing based on distance from strike
+        // Instead of discrete buckets (Strong=82%, Lean=65%), use continuous function
+        //
+        // directional_confidence ranges from -1.0 (100% DOWN) to +1.0 (100% UP)
+        // At 2x the strong threshold, we're at max confidence for that time bracket
+        let thresholds = get_thresholds(opportunity.minutes_remaining);
+        let max_distance = thresholds.strong * dec!(2); // 2x strong threshold = max confidence
+        let directional_confidence = if max_distance > Decimal::ZERO {
+            (opportunity.distance / max_distance).max(dec!(-1)).min(dec!(1))
+        } else {
+            Decimal::ZERO
+        };
+
+        // Linear ratio: 5% to 95% based on confidence
+        // up_ratio = 0.5 + confidence * 0.45
+        let up_ratio = dec!(0.5) + directional_confidence * dec!(0.45);
+        let down_ratio = Decimal::ONE - up_ratio;
+
+        let mut up_size = total_size * up_ratio;
+        let mut down_size = total_size * down_ratio;
+
+        // Calculate share counts to check for position flip
+        let up_shares = if up_price > Decimal::ZERO { up_size / up_price } else { Decimal::ZERO };
+        let down_shares = if down_price > Decimal::ZERO { down_size / down_price } else { Decimal::ZERO };
+
+        // Prevent position flip: hedge shares must not exceed main shares
+        if up_ratio > down_ratio {
+            // Main direction is UP - ensure down_shares < up_shares
+            if down_shares > up_shares && up_shares > Decimal::ZERO {
+                let max_hedge_dollars = up_shares * down_price;
+                down_size = max_hedge_dollars.min(down_size);
+                debug!(
+                    "Capped DOWN hedge to prevent flip: {} shares -> {} dollars",
+                    up_shares, down_size
+                );
+            }
+        } else if down_ratio > up_ratio {
+            // Main direction is DOWN - ensure up_shares < down_shares
+            if up_shares > down_shares && down_shares > Decimal::ZERO {
+                let max_hedge_dollars = down_shares * up_price;
+                up_size = max_hedge_dollars.min(up_size);
+                debug!(
+                    "Capped UP hedge to prevent flip: {} shares -> {} dollars",
+                    down_shares, up_size
+                );
+            }
+        }
 
         // Extract token IDs before we need to borrow self.markets mutably
         let yes_token_id = market.yes_token_id.clone();

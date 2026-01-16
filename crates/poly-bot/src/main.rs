@@ -187,6 +187,7 @@ async fn run() -> Result<()> {
     // Create shared GlobalState for dashboard and mode to share
     // This enables the dashboard to display real-time data from the trading strategy
     let shared_state = Arc::new(poly_bot::state::GlobalState::new());
+    info!("Created shared GlobalState at {:p}", Arc::as_ptr(&shared_state));
 
     // Start dashboard servers if enabled (except in backtest mode)
     let dashboard_handles = if config.dashboard.enabled && config.mode != TradingMode::Backtest {
