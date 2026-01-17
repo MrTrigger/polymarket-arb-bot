@@ -429,6 +429,25 @@ impl TrackedMarket {
         )
     }
 
+    /// Check if we should trade using an externally-provided confidence value.
+    /// This allows incorporating signal strength into the EV calculation.
+    fn should_trade_with_confidence(
+        &self,
+        confidence: Decimal,
+        seconds_remaining: i64,
+        favorable_price: Decimal,
+        max_edge_factor: Decimal,
+        window_duration_secs: i64,
+    ) -> position::TradeDecision {
+        self.position_manager.should_trade_with_confidence(
+            confidence,
+            seconds_remaining,
+            favorable_price,
+            max_edge_factor,
+            window_duration_secs,
+        )
+    }
+
     /// Record a completed trade in the position manager.
     fn record_trade(&mut self, size: Decimal, up_amount: Decimal, down_amount: Decimal, seconds_remaining: i64) {
         self.position_manager.record_trade(size, up_amount, down_amount, seconds_remaining);
@@ -506,6 +525,9 @@ pub struct StrategyConfig {
 
     /// Execution configuration (order mode, chase settings).
     pub execution: crate::config::ExecutionConfig,
+
+    /// Whether running in backtest mode (disables price chasing).
+    pub is_backtest: bool,
 }
 
 impl Default for StrategyConfig {
@@ -532,6 +554,7 @@ impl Default for StrategyConfig {
             strong_up_ratio: dec!(0.82),
             lean_up_ratio: dec!(0.65),
             execution: crate::config::ExecutionConfig::default(),
+            is_backtest: false,
         }
     }
 }
@@ -567,6 +590,7 @@ impl StrategyConfig {
             strong_up_ratio: dec!(0.82),
             lean_up_ratio: dec!(0.65),
             execution: crate::config::ExecutionConfig::default(),
+            is_backtest: false,
         }
     }
 
@@ -606,7 +630,14 @@ impl StrategyConfig {
             strong_up_ratio: dec!(0.82),
             lean_up_ratio: dec!(0.65),
             execution: crate::config::ExecutionConfig::default(),
+            is_backtest: false,
         }
+    }
+
+    /// Set backtest mode (disables price chasing).
+    pub fn with_backtest(mut self, is_backtest: bool) -> Self {
+        self.is_backtest = is_backtest;
+        self
     }
 
     /// Set the window duration on an existing config.
@@ -1492,19 +1523,19 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             let directional_opportunity = if self.engines_config.directional.enabled {
                 match self.directional_detector.detect(market_state) {
                     Ok(opp) => {
-                        // Log signal detection at debug level to confirm detection is working
+                        // Log signal detection at trace level (use debug or info temporarily for diagnosis)
                         let mins = Decimal::from(market_state.seconds_remaining) / dec!(60);
                         let thresholds = get_thresholds(mins);
-                        debug!(
-                            "🎯 Signal {} {}: {:?} dist={:.4}% | thresholds: lean={:.4}% strong={:.4}% | ratio=UP:{}/DOWN:{}",
+                        trace!(
+                            "🎯 Signal {} {}: {:?} dist={:.4}% | thresholds: lean={:.4}% strong={:.4}% | ratio=UP:{}/DOWN:{} | yes_ask={} no_ask={}",
                             event_id, asset, opp.signal, opp.distance * dec!(100),
                             thresholds.lean * dec!(100), thresholds.strong * dec!(100),
-                            opp.up_ratio, opp.down_ratio
+                            opp.up_ratio, opp.down_ratio, opp.yes_ask, opp.no_ask
                         );
                         Some(opp)
                     }
                     Err(reason) => {
-                        debug!("No directional in {}: {}", event_id, reason);
+                        trace!("No directional in {}: {}", event_id, reason);
                         None
                     }
                 }
@@ -1728,10 +1759,11 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
 
                     let (total_size, pm_confidence, phase) = match trade_decision {
                         position::TradeDecision::Skip(reason) => {
-                            // Log skips at debug level to reduce spam (low confidence is very common)
-                            debug!(
-                                "⏭️ SKIP {} {} {:?}: signal={:?} dist=${:.2} atr_mult={:.2} conf={:.2} EV={:.3} min_edge={:.3} phase={}",
-                                event_id, asset, reason, opp.signal, distance_dollars.abs(), atr_mult, pm_conf, ev, min_edge, phase
+                            // Log skips at info level for diagnosis
+                            info!(
+                                "⏭️ SKIP {} {} {:?}: signal={:?} dist=${:.2} atr_mult={:.2} conf={:.2} EV={:.3} min_edge={:.3} phase={} price={}",
+                                event_id, asset, reason, opp.signal, distance_dollars.abs(), atr_mult,
+                                pm_conf, ev, min_edge, phase, favorable_price
                             );
                             // Only record decision for meaningful skips, not low confidence
                             if !matches!(reason, position::SkipReason::LowConfidence) {
@@ -2093,8 +2125,12 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
         let mut down_filled_cost = Decimal::ZERO;
 
         // Determine order type based on execution mode
+        // Chasing is disabled in backtest mode (simulated executor fills immediately)
         let (order_type, use_chase) = match self.config.execution.execution_mode {
-            crate::config::ExecutionMode::Limit => (OrderType::Gtc, self.config.execution.chase_enabled),
+            crate::config::ExecutionMode::Limit => {
+                let chase = self.config.execution.chase_enabled && !self.config.is_backtest;
+                (OrderType::Gtc, chase)
+            }
             crate::config::ExecutionMode::Market => (OrderType::Ioc, false),
         };
 
@@ -2269,6 +2305,9 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                 .try_into()
                 .unwrap_or(0u64);
             self.state.metrics.add_volume_cents(volume_cents);
+
+            // Record successful trade for metrics tracking
+            self.state.record_success();
         }
 
         Ok(TradeAction::Execute)

@@ -291,11 +291,12 @@ impl PaperMode {
         }
 
         // Create strategy loop with engines config
+        // Set is_backtest=true to disable price chasing (simulated executor fills immediately)
         let mut strategy = StrategyLoop::with_engines(
             data_source,
             executor,
             self.state.clone(),
-            self.config.strategy.clone(),
+            self.config.strategy.clone().with_backtest(true),
             self.config.engines.clone(),
         );
 

@@ -413,9 +413,37 @@ impl PositionManager {
         max_edge_factor: Decimal,
         window_duration_secs: i64,
     ) -> TradeDecision {
+        let confidence = self.calculate_confidence(distance_dollars, seconds_remaining, window_duration_secs);
+        self.should_trade_with_confidence(
+            confidence,
+            seconds_remaining,
+            favorable_price,
+            max_edge_factor,
+            window_duration_secs,
+        )
+    }
+
+    /// Decide whether to trade using an externally-provided confidence value.
+    ///
+    /// This allows callers to incorporate additional factors (like signal strength)
+    /// into the confidence calculation before making the trade decision.
+    ///
+    /// # Arguments
+    /// * `confidence` - Pre-calculated confidence (0.0 to 1.0), including any signal boosts
+    /// * `seconds_remaining` - Seconds left in the market window
+    /// * `favorable_price` - Price of the dominant side we're buying (for EV calculation)
+    /// * `max_edge_factor` - Minimum EV required at window start (decays to 0)
+    /// * `window_duration_secs` - Total window duration in seconds (e.g., 900 for 15min)
+    pub fn should_trade_with_confidence(
+        &self,
+        confidence: Decimal,
+        seconds_remaining: i64,
+        favorable_price: Decimal,
+        max_edge_factor: Decimal,
+        window_duration_secs: i64,
+    ) -> TradeDecision {
         let minutes = Decimal::new(seconds_remaining, 0) / dec!(60);
         let phase = Phase::from_minutes(minutes);
-        let confidence = self.calculate_confidence(distance_dollars, seconds_remaining, window_duration_secs);
 
         // 1. Check EV threshold (or legacy phase-based threshold)
         // When max_edge_factor > 0: use EV-based (EV = confidence - price >= min_edge)

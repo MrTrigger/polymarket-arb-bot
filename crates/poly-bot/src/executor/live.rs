@@ -468,7 +468,7 @@ mod api {
     #[derive(Debug, Serialize)]
     #[serde(rename_all = "camelCase")]
     pub struct SignedOrder {
-        pub salt: String,
+        pub salt: u64,
         pub maker: String,
         pub signer: String,
         pub taker: String,
@@ -794,7 +794,7 @@ impl LiveExecutor {
         let signature_hex = format!("0x{}", hex::encode(sig_bytes));
 
         Ok(api::SignedOrder {
-            salt: salt.to_string(),
+            salt,
             maker: format!("{:?}", self.wallet.address()),
             signer: format!("{:?}", self.wallet.address()),
             taker: "0x0000000000000000000000000000000000000000".to_string(),
@@ -905,6 +905,9 @@ impl LiveExecutor {
         // Serialize body for HMAC signing
         let body_json = serde_json::to_string(&request_body)
             .map_err(|e| ExecutorError::Internal(format!("Failed to serialize order: {}", e)))?;
+
+        // Debug: log the order payload
+        tracing::info!(payload = %body_json, "Submitting order");
 
         // Create L2 HMAC signature
         let timestamp = Utc::now().timestamp().to_string();

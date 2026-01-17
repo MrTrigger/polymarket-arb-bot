@@ -20,14 +20,14 @@
 [general]
 mode = "paper"                    # paper, live, shadow, backtest
 assets = ["BTC"]                  # Assets to trade ["BTC", "ETH", "SOL", "XRP"]
-log_level = "info"                # info, debug, trace
+log_level = "warn"                # info, debug, trace
 window_duration = "15min"         # 15min or 1h
 
 [trading]
-# Position limits (USDC) - sized for $100 capital
-max_position_per_market = 50.0
-max_total_exposure = 100.0
-base_order_size = 15.0  # ~15% of capital per trade
+# Position limits (USDC)
+max_position_per_market = 1000.0
+max_total_exposure = 5000.0
+base_order_size = 75.0  # Increased to ensure min order size is met
 # Defaults below
 min_margin_early_pct = 2.5
 min_margin_mid_pct = 1.5

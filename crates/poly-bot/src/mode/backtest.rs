@@ -253,10 +253,11 @@ impl BacktestResult {
             final_balance,
             total_pnl,
             return_pct,
-            trades_executed: stats.orders_filled + stats.orders_partial,
-            trades_rejected: stats.orders_rejected,
-            volume_traded: stats.volume_traded,
-            fees_paid: stats.fees_paid,
+            // Use metrics.trades_executed since executor stats may not be accessible
+            trades_executed: metrics.trades_executed,
+            trades_rejected: metrics.trades_failed,
+            volume_traded: metrics.volume_usdc,
+            fees_paid: stats.fees_paid, // Keep this from stats for now
             opportunities_detected: metrics.opportunities_detected,
             opportunities_skipped: metrics.trades_skipped,
             win_rate: None, // Could be calculated from trade history
@@ -414,11 +415,12 @@ fn run_backtest_task_blocking(
         let executor = SimulatedExecutor::new(executor_config);
 
         // Create strategy loop (no observability for sweep runs - too expensive)
+        // Set is_backtest=true to disable price chasing
         let mut strategy = StrategyLoop::with_engines(
             data_source,
             executor,
             state.clone(),
-            config.strategy.clone(),
+            config.strategy.clone().with_backtest(true),
             config.engines.clone(),
         );
 
@@ -645,11 +647,12 @@ impl BacktestMode {
         let (capture, obs_tasks) = self.setup_observability().await?;
 
         // Create strategy loop with engines config - uses the SAME strategy as paper/live mode
+        // Set is_backtest=true to disable price chasing (simulated executor fills immediately)
         let mut strategy = StrategyLoop::with_engines(
             data_source,
             executor,
             self.state.clone(),
-            self.config.strategy.clone(),
+            self.config.strategy.clone().with_backtest(true),
             self.config.engines.clone(),
         );
 
@@ -750,13 +753,13 @@ impl BacktestMode {
             duration_secs,
         );
 
-        // Log final report
+        // Print final report (always visible, regardless of log level)
         let positions: Vec<PositionSummary> = Vec::new(); // Would collect from executor
         let report = PnLReport {
             result: backtest_result.clone(),
             positions,
         };
-        info!("\n{}", report.to_string_report());
+        println!("\n{}", report.to_string_report());
 
         result?;
         Ok(backtest_result)

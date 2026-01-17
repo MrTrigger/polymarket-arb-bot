@@ -182,11 +182,12 @@ impl ShadowMode {
         let (capture, obs_tasks) = self.setup_observability().await?;
 
         // Create strategy loop
+        // Set is_backtest=true to disable price chasing (simulated executor fills immediately)
         let mut strategy = StrategyLoop::new(
             data_source,
             executor,
             self.state.clone(),
-            self.config.strategy.clone(),
+            self.config.strategy.clone().with_backtest(true),
         );
 
         // Add observability sender if capture is enabled
