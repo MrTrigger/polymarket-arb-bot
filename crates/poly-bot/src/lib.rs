@@ -46,6 +46,7 @@ pub use executor::{
     OrderResult, OrderType, PartialOrderFill, PendingOrder,
 };
 pub use executor::live::{LiveExecutor, LiveExecutorConfig};
+pub use executor::live_sdk::LiveSdkExecutor;
 pub use executor::noop::{NoOpExecutor, NoOpExecutorConfig};
 pub use executor::simulated::{
     FillMode, LatencyMode, SimulatedExecutor, SimulatedExecutorConfig, SimulatedPosition,
@@ -54,6 +55,10 @@ pub use executor::simulated::{
 pub use executor::shadow::{
     PrehashedOrder, ShadowError, ShadowFireResult, ShadowManager, ShadowOrder, ShadowStatus,
     SharedShadowManager,
+};
+pub use executor::allowance::{
+    AllowanceConfig, AllowanceManager, AllowanceState, AllowanceTarget,
+    SharedAllowanceManager, create_allowance_manager,
 };
 pub use executor::chase::{
     ChaseConfig, ChaseFill, ChaseResult, ChaseStopReason, PriceChaser,

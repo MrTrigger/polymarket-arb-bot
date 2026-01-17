@@ -398,52 +398,20 @@ fn calculate_imbalance(book: &OrderBook) -> Decimal {
     (bid_depth - ask_depth) / total
 }
 
-/// Calculate optimal maker price inside the spread.
-///
-/// The maker price is positioned inside the bid-ask spread based on spread width:
-/// - Wide spread (>3%): Place 40% from bid toward ask
-/// - Medium spread (1-3%): Place 30% from bid toward ask
-/// - Tight spread (<1%): Place at bid price (for buy) or ask price (for sell)
-///
-/// This ensures we're offering a better price than existing orders
-/// while still capturing maker rebates.
+/// Calculate maker price by placing right at the best bid (for buys) or best ask (for sells).
+/// With POST_ONLY orders, the order is rejected if it would fill immediately,
+/// so we're guaranteed to be a maker. Price chasing will update if the market moves.
 fn calculate_maker_price(book: &OrderBook, side: Side) -> Option<Decimal> {
-    let bid = book.best_bid()?;
-    let ask = book.best_ask()?;
-    let spread = ask - bid;
-    let mid = (bid + ask) / Decimal::TWO;
-
-    if mid <= Decimal::ZERO {
-        return None;
-    }
-
-    // Spread as a ratio of mid price
-    let spread_ratio = spread / mid;
-
-    // Determine placement based on spread width
-    let placement_ratio = if spread_ratio > dec!(0.03) {
-        // Wide spread (>3%): aggressive, 40% from reference
-        dec!(0.40)
-    } else if spread_ratio > dec!(0.01) {
-        // Medium spread (1-3%): moderate, 30% from reference
-        dec!(0.30)
-    } else {
-        // Tight spread (<1%): conservative, at reference price
-        dec!(0.0)
-    };
-
     match side {
         Side::Buy => {
-            // For buying, we place above bid but below ask
-            let price = bid + (spread * placement_ratio);
-            // Round to 2 decimal places (Polymarket uses 0.01 ticks)
-            Some(price.round_dp(2))
+            // For buying, place at best bid to be a maker
+            let bid = book.best_bid()?;
+            Some(bid.round_dp(2))
         }
         Side::Sell => {
-            // For selling, we place below ask but above bid
-            let price = ask - (spread * placement_ratio);
-            // Round to 2 decimal places
-            Some(price.round_dp(2))
+            // For selling, place at best ask to be a maker
+            let ask = book.best_ask()?;
+            Some(ask.round_dp(2))
         }
     }
 }

@@ -204,6 +204,10 @@ pub enum ChaseStopReason {
     /// Order was rejected by executor.
     OrderRejected,
 
+    /// POST_ONLY order rejected (would cross spread).
+    /// Strategy should retry with fresh orderbook prices.
+    PostOnlyRejected,
+
     /// Remaining size below minimum.
     SizeTooSmall,
 
@@ -460,6 +464,34 @@ impl PriceChaser {
                 }
 
                 Ok(OrderResult::Rejected(rejection)) => {
+                    // Check if this is a POST_ONLY rejection (would cross spread)
+                    let is_post_only_rejection = rejection.reason.to_lowercase().contains("cross")
+                        || rejection.reason.to_lowercase().contains("post only")
+                        || rejection.reason.to_lowercase().contains("post_only")
+                        || rejection.reason.to_lowercase().contains("would fill")
+                        || rejection.reason.to_lowercase().contains("immediate");
+
+                    if is_post_only_rejection {
+                        // POST_ONLY rejection means price moved - return to let strategy
+                        // retry with fresh orderbook prices. Strategy will re-evaluate
+                        // and place a new order if opportunity still exists.
+                        debug!(
+                            reason = %rejection.reason,
+                            iteration = iteration,
+                            current_price = %current_price,
+                            "POST_ONLY rejection, returning to strategy for fresh price"
+                        );
+                        return Ok(build_result(
+                            fills,
+                            remaining_size,
+                            current_price,
+                            start.elapsed().as_millis() as u64,
+                            iteration,
+                            Some(ChaseStopReason::PostOnlyRejected),
+                        ));
+                    }
+
+                    // Non-POST_ONLY rejection - give up
                     warn!(
                         reason = %rejection.reason,
                         iteration = iteration,

@@ -87,7 +87,7 @@ impl Default for LiveExecutorConfig {
             chase_step_size: Decimal::new(1, 2), // 0.01
             fill_poll_interval_ms: 100,
             max_poll_attempts: 300, // 30 seconds at 100ms intervals
-            fee_rate_bps: 0, // Polymarket has 0% maker fees
+            fee_rate_bps: 1000, // 10% maker fee for crypto up/down markets
         }
     }
 }
@@ -814,9 +814,8 @@ impl LiveExecutor {
             }
         };
 
-        // Expiration: order timeout from now
-        let expiration = (Utc::now() + chrono::Duration::milliseconds(self.config.order_timeout_ms as i64))
-            .timestamp() as u64;
+        // Expiration: 0 for GTC orders (non-zero only for GTD orders which we don't use)
+        let expiration = 0u64;
 
         // Nonce for replay protection
         let nonce = salt;
@@ -831,6 +830,7 @@ impl LiveExecutor {
         let struct_hash = self.compute_struct_hash(
             salt,
             &self.wallet.proxy_address(),
+            &self.wallet.eoa_address(),
             &request.token_id,
             maker_amount,
             taker_amount,
@@ -866,7 +866,7 @@ impl LiveExecutor {
             nonce: nonce.to_string(),
             fee_rate_bps: self.config.fee_rate_bps.to_string(),
             side: side.to_string(),
-            signature_type: 0, // EOA signature
+            signature_type: 1, // POLY_PROXY (EOA that owns a proxy wallet)
             signature: signature_hex,
         })
     }
@@ -877,6 +877,7 @@ impl LiveExecutor {
         &self,
         salt: u64,
         maker: &Address,
+        signer: &Address,
         token_id: &str,
         maker_amount: u128,
         taker_amount: u128,
@@ -897,13 +898,15 @@ impl LiveExecutor {
         salt_bytes[24..].copy_from_slice(&salt.to_be_bytes());
         encoded.extend_from_slice(&salt_bytes);
 
-        // maker (20 bytes padded to 32)
+        // maker (20 bytes padded to 32) - proxy wallet
         let mut maker_bytes = [0u8; 32];
         maker_bytes[12..].copy_from_slice(maker.as_bytes());
         encoded.extend_from_slice(&maker_bytes);
 
-        // signer (same as maker)
-        encoded.extend_from_slice(&maker_bytes);
+        // signer (20 bytes padded to 32) - EOA that signs
+        let mut signer_bytes = [0u8; 32];
+        signer_bytes[12..].copy_from_slice(signer.as_bytes());
+        encoded.extend_from_slice(&signer_bytes);
 
         // taker (zero address)
         encoded.extend_from_slice(&[0u8; 32]);
@@ -945,7 +948,7 @@ impl LiveExecutor {
 
         // signatureType (32 bytes - uint8 padded)
         let mut sig_type_bytes = [0u8; 32];
-        sig_type_bytes[31] = 0; // EOA
+        sig_type_bytes[31] = 1; // POLY_PROXY (EOA that owns a proxy wallet)
         encoded.extend_from_slice(&sig_type_bytes);
 
         let mut hasher = Keccak256::new();
@@ -977,7 +980,7 @@ impl LiveExecutor {
 
         let response = self.client
             .post(&url)
-            .header("POLY_ADDRESS", format!("{:?}", self.wallet.address()))
+            .header("POLY_ADDRESS", format!("{:?}", self.wallet.eoa_address()))
             .header("POLY_SIGNATURE", signature)
             .header("POLY_TIMESTAMP", &timestamp)
             .header("POLY_API_KEY", &self.wallet.api_key)
@@ -1025,7 +1028,7 @@ impl LiveExecutor {
 
         let response = self.client
             .get(&url)
-            .header("POLY_ADDRESS", format!("{:?}", self.wallet.address()))
+            .header("POLY_ADDRESS", format!("{:?}", self.wallet.eoa_address()))
             .header("POLY_SIGNATURE", signature)
             .header("POLY_TIMESTAMP", &timestamp)
             .header("POLY_API_KEY", &self.wallet.api_key)
@@ -1065,7 +1068,7 @@ impl LiveExecutor {
 
         let response = self.client
             .delete(&url)
-            .header("POLY_ADDRESS", format!("{:?}", self.wallet.address()))
+            .header("POLY_ADDRESS", format!("{:?}", self.wallet.eoa_address()))
             .header("POLY_SIGNATURE", signature)
             .header("POLY_TIMESTAMP", &timestamp)
             .header("POLY_API_KEY", &self.wallet.api_key)
@@ -1111,7 +1114,7 @@ impl LiveExecutor {
 
         let response = self.client
             .get(&url)
-            .header("POLY_ADDRESS", format!("{:?}", self.wallet.address()))
+            .header("POLY_ADDRESS", format!("{:?}", self.wallet.eoa_address()))
             .header("POLY_SIGNATURE", &signature)
             .header("POLY_TIMESTAMP", &timestamp)
             .header("POLY_API_KEY", &self.wallet.api_key)

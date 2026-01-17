@@ -25,10 +25,12 @@
 //! The `shadow` module provides pre-hashed order support for fast secondary
 //! order submission (<2ms) when a primary order fills.
 
+pub mod allowance;
 pub mod chase;
 pub mod fill;
 pub mod interval;
 pub mod live;
+pub mod live_sdk;
 pub mod noop;
 pub mod shadow;
 pub mod simulated;

@@ -32,9 +32,9 @@ use crate::dashboard::{
     SharedSessionManager,
 };
 use crate::data_source::live::{ActiveMarketsState, LiveDataSource, LiveDataSourceConfig};
-use crate::executor::chase::{ChaseConfig, PriceChaser};
-use crate::executor::live::{LiveExecutor, LiveExecutorConfig};
-use crate::executor::{OrderRequest, OrderType};
+use crate::executor::live::LiveExecutorConfig;
+use crate::executor::live_sdk::LiveSdkExecutor;
+use crate::executor::{Executor, OrderRequest, OrderResult, OrderType};
 use poly_common::types::{Outcome, Side};
 use crate::state::GlobalState;
 use crate::strategy::{StrategyConfig, StrategyLoop};
@@ -253,15 +253,20 @@ impl LiveMode {
             discovery_shutdown,
         ));
 
-        // Create executor (derives API credentials if not provided)
-        let mut executor = LiveExecutor::new(
+        // Create executor using official SDK (handles signing, fees, proxy wallets)
+        // Pass available_balance for automatic allowance management
+        // Pass global_state so allowance manager respects risk limits (won't replenish if circuit breaker tripped)
+        let available_balance = self.bot_config.trading.sizing.available_balance;
+        let mut executor = LiveSdkExecutor::new(
             self.config.executor.clone(),
             &self.bot_config.wallet,
             Some(&self.bot_config.shadow),
             self.config.initial_balance,
+            available_balance,
+            Some(Arc::clone(&self.state)),
         )
         .await
-        .context("Failed to create live executor")?;
+        .context("Failed to create live SDK executor")?;
 
         // Fetch real balance from Polymarket
         let real_balance = match executor.fetch_balance().await {
@@ -431,23 +436,26 @@ impl LiveMode {
         let _ = self.shutdown_tx.send(());
     }
 
-    /// Execute a test trade on startup to verify the order flow.
+    /// Execute a test trade on startup to verify the full order lifecycle.
     ///
-    /// Places a small $1 limit order on a NO outcome to test:
+    /// Tests:
     /// - Order creation and signing
     /// - CLOB API submission
-    /// - Price chasing
-    /// - Fill detection
+    /// - Price chasing until filled
+    /// - Position holding (settlement handled by strategy loop)
     async fn execute_test_trade(
         &self,
-        executor: &mut LiveExecutor,
+        executor: &mut LiveSdkExecutor,
         active_markets: &ActiveMarketsState,
     ) {
+        use crate::executor::chase::{ChaseConfig, PriceChaser};
+
         // Wait for market discovery (up to 10 seconds)
         let mut market_found = None;
         for _ in 0..20 {
             tokio::time::sleep(Duration::from_millis(500)).await;
             let markets = active_markets.read().await;
+            // Find any market
             if let Some((event_id, market)) = markets.iter().next() {
                 market_found = Some((event_id.clone(), market.clone()));
                 break;
@@ -459,52 +467,55 @@ impl LiveMode {
             return;
         };
 
+        // Try buying YES - markets may have more liquidity on YES side
+        let outcome = Outcome::Yes;
+        let token_id = market.yes_token_id.clone();
+
         info!(
             event_id = %event_id,
             asset = ?market.asset,
-            no_token = %market.no_token_id,
-            "🧪 Test trade: Found market"
+            "🧪 Test trade: Found market, will chase to get filled"
         );
 
-        // Create a small $1 test order on NO side at a low price
-        // Using $1 size and 0.05 price means we're bidding $0.05 for a NO share
-        // Price must be on 0.01 tick grid
-        let test_size = dec!(1);  // $1 worth
-        let test_price = dec!(0.05);  // Very low price to avoid fills and ceiling issues
+        // Start at 0.70 for NO - very aggressive to actually get filled in illiquid market
+        // We're willing to overpay to test the complete order lifecycle
+        let test_size = dec!(5);
+        let start_price = dec!(0.70);
 
         let request = OrderRequest {
             request_id: format!("test-{}", chrono::Utc::now().timestamp_millis()),
             event_id: event_id.clone(),
-            token_id: market.no_token_id.clone(),
-            outcome: Outcome::No,
+            token_id,
+            outcome,
             side: Side::Buy,
             size: test_size,
-            price: Some(test_price),
+            price: Some(start_price),
             order_type: OrderType::Gtc,
-            timeout_ms: Some(10000),
+            timeout_ms: Some(60000), // 60s timeout for chasing
             timestamp: chrono::Utc::now(),
         };
 
         info!(
             size = %test_size,
-            price = %test_price,
-            token_id = %market.no_token_id,
-            "🧪 Test trade: Placing limit order"
+            start_price = %start_price,
+            outcome = ?outcome,
+            "🧪 Test trade: Starting price chase (aggressive for lifecycle test)"
         );
 
-        // Create chaser with config from bot
+        // Create chaser with aggressive config to ensure we get a fill
         let chase_config = ChaseConfig::from_execution_config(
-            self.bot_config.execution.chase_enabled,
+            true, // chase enabled
             self.bot_config.execution.chase_step_size,
             self.bot_config.execution.chase_check_interval_ms,
-            self.bot_config.execution.max_chase_time_ms,
-            dec!(0.005), // 0.5% min margin
+            60000, // 60 second chase
+            dec!(0.01), // 1% min margin
         );
         let chaser = PriceChaser::new(chase_config);
 
-        // Execute with chasing - use 0.50 as other leg (YES) price for ceiling calculation
-        // Ceiling = 1 - 0.50 - margin = ~0.49, so 0.05 is well below
-        let other_leg_price = dec!(0.50);
+        // Set other_leg very low so ceiling is high (0.95) - willing to overpay
+        // Ceiling = 1.0 - other_leg - margin = 1.0 - 0.04 - 0.01 = 0.95
+        let other_leg_price = dec!(0.04);
+
         match chaser.chase_order(executor, request, other_leg_price).await {
             Ok(result) => {
                 info!(
@@ -517,13 +528,13 @@ impl LiveMode {
 
                 if result.filled_size > Decimal::ZERO {
                     info!(
-                        "✅ Test trade SUCCESS: Filled {} at avg price {}",
+                        "✅ Test trade FILLED: {} shares at avg price {} - Position will settle at window end",
                         result.filled_size, result.avg_price
                     );
                 } else {
-                    info!(
-                        "⚠️ Test trade: No fills (order at {} may be too low), but order flow verified",
-                        test_price
+                    warn!(
+                        "⚠️ Test trade: No fills after {} iterations (market may be illiquid)",
+                        result.iterations
                     );
                 }
             }

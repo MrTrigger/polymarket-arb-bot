@@ -165,7 +165,7 @@ use crate::data_source::{
     SpotPriceEvent, WindowCloseEvent, WindowOpenEvent,
 };
 use crate::executor::{Executor, ExecutorError, OrderRequest, OrderResult, OrderType};
-use crate::executor::chase::PriceChaser;
+use crate::executor::chase::{ChaseStopReason, PriceChaser};
 use crate::state::{ActiveWindow, GlobalState};
 use crate::types::{EngineType, Inventory, MarketState, OrderBook};
 
@@ -207,45 +207,20 @@ use rust_decimal_macros::dec;
 /// - Medium spread (1-3%): Place 30% from bid toward ask
 /// - Tight spread (<1%): Place at bid price
 ///
-/// This ensures we're offering a better price than existing bids (for buys)
-/// while still capturing maker rebates.
+/// Calculate maker price by placing right at the best bid (for buys) or best ask (for sells).
+/// With POST_ONLY orders, the order is rejected if it would fill immediately,
+/// so we're guaranteed to be a maker. Price chasing will update if the market moves.
 fn calculate_maker_price(book: &OrderBook, side: Side) -> Option<Decimal> {
-    let bid = book.best_bid()?;
-    let ask = book.best_ask()?;
-    let spread = ask - bid;
-    let mid = (bid + ask) / Decimal::TWO;
-
-    if mid <= Decimal::ZERO {
-        return None;
-    }
-
-    // Spread as a ratio of mid price
-    let spread_ratio = spread / mid;
-
-    // Determine placement based on spread width
-    let placement_ratio = if spread_ratio > dec!(0.03) {
-        // Wide spread (>3%): aggressive, 40% from bid
-        dec!(0.40)
-    } else if spread_ratio > dec!(0.01) {
-        // Medium spread (1-3%): moderate, 30% from bid
-        dec!(0.30)
-    } else {
-        // Tight spread (<1%): conservative, at bid
-        dec!(0.0)
-    };
-
     match side {
         Side::Buy => {
-            // For buying, we place above bid but below ask
-            let price = bid + (spread * placement_ratio);
-            // Round to 2 decimal places (Polymarket uses 0.01 ticks)
-            Some(price.round_dp(2))
+            // For buying, place at best bid to be a maker
+            let bid = book.best_bid()?;
+            Some(bid.round_dp(2))
         }
         Side::Sell => {
-            // For selling, we place below ask but above bid
-            let price = ask - (spread * placement_ratio);
-            // Round to 2 decimal places
-            Some(price.round_dp(2))
+            // For selling, place at best ask to be a maker
+            let ask = book.best_ask()?;
+            Some(ask.round_dp(2))
         }
     }
 }
@@ -2153,26 +2128,60 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             // The other_leg_price is the NO price (for arb ceiling calculation)
             let other_leg_price = down_price;
             let up_result = if use_chase {
-                match self.chaser.chase_order(&mut self.executor, up_order, other_leg_price).await {
-                    Ok(chase_result) => {
-                        if chase_result.success || chase_result.filled_size > Decimal::ZERO {
-                            Ok(OrderResult::Filled(crate::executor::OrderFill {
-                                request_id: format!("dir-{}-up", req_id_base),
-                                order_id: "chased".to_string(),
-                                size: chase_result.filled_size,
-                                price: chase_result.avg_price,
-                                fee: chase_result.total_fee,
-                                timestamp: Utc::now(),
-                            }))
-                        } else {
-                            Ok(OrderResult::Pending(crate::executor::PendingOrder {
-                                request_id: format!("dir-{}-up", req_id_base),
-                                order_id: "chase_failed".to_string(),
-                                timestamp: Utc::now(),
-                            }))
+                const MAX_POST_ONLY_RETRIES: u32 = 3;
+                let mut current_order = up_order;
+                let mut post_only_retries = 0u32;
+
+                loop {
+                    match self.chaser.chase_order(&mut self.executor, current_order.clone(), other_leg_price).await {
+                        Ok(chase_result) => {
+                            // Check if POST_ONLY rejection - retry with fresh price
+                            if chase_result.stop_reason == Some(ChaseStopReason::PostOnlyRejected) {
+                                post_only_retries += 1;
+                                if post_only_retries >= MAX_POST_ONLY_RETRIES {
+                                    debug!("POST_ONLY max retries reached for UP order");
+                                    break Ok(OrderResult::Pending(crate::executor::PendingOrder {
+                                        request_id: format!("dir-{}-up", req_id_base),
+                                        order_id: "post_only_max_retries".to_string(),
+                                        timestamp: Utc::now(),
+                                    }));
+                                }
+                                // Small delay before retry
+                                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                                // Get fresh price from orderbook
+                                if let Some(fresh_price) = calculate_maker_price(yes_book, Side::Buy) {
+                                    current_order.price = Some(fresh_price);
+                                    debug!(retry = post_only_retries, fresh_price = %fresh_price, "Retrying UP order with fresh price");
+                                    continue;
+                                } else {
+                                    debug!("No fresh price available for UP order retry");
+                                    break Ok(OrderResult::Pending(crate::executor::PendingOrder {
+                                        request_id: format!("dir-{}-up", req_id_base),
+                                        order_id: "no_fresh_price".to_string(),
+                                        timestamp: Utc::now(),
+                                    }));
+                                }
+                            }
+
+                            if chase_result.success || chase_result.filled_size > Decimal::ZERO {
+                                break Ok(OrderResult::Filled(crate::executor::OrderFill {
+                                    request_id: format!("dir-{}-up", req_id_base),
+                                    order_id: "chased".to_string(),
+                                    size: chase_result.filled_size,
+                                    price: chase_result.avg_price,
+                                    fee: chase_result.total_fee,
+                                    timestamp: Utc::now(),
+                                }));
+                            } else {
+                                break Ok(OrderResult::Pending(crate::executor::PendingOrder {
+                                    request_id: format!("dir-{}-up", req_id_base),
+                                    order_id: "chase_failed".to_string(),
+                                    timestamp: Utc::now(),
+                                }));
+                            }
                         }
+                        Err(e) => break Err(e),
                     }
-                    Err(e) => Err(e),
                 }
             } else {
                 self.executor.place_order(up_order).await
@@ -2216,26 +2225,60 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             // The other_leg_price is the YES price (for arb ceiling calculation)
             let other_leg_price = up_price;
             let down_result = if use_chase {
-                match self.chaser.chase_order(&mut self.executor, down_order, other_leg_price).await {
-                    Ok(chase_result) => {
-                        if chase_result.success || chase_result.filled_size > Decimal::ZERO {
-                            Ok(OrderResult::Filled(crate::executor::OrderFill {
-                                request_id: format!("dir-{}-down", req_id_base),
-                                order_id: "chased".to_string(),
-                                size: chase_result.filled_size,
-                                price: chase_result.avg_price,
-                                fee: chase_result.total_fee,
-                                timestamp: Utc::now(),
-                            }))
-                        } else {
-                            Ok(OrderResult::Pending(crate::executor::PendingOrder {
-                                request_id: format!("dir-{}-down", req_id_base),
-                                order_id: "chase_failed".to_string(),
-                                timestamp: Utc::now(),
-                            }))
+                const MAX_POST_ONLY_RETRIES: u32 = 3;
+                let mut current_order = down_order;
+                let mut post_only_retries = 0u32;
+
+                loop {
+                    match self.chaser.chase_order(&mut self.executor, current_order.clone(), other_leg_price).await {
+                        Ok(chase_result) => {
+                            // Check if POST_ONLY rejection - retry with fresh price
+                            if chase_result.stop_reason == Some(ChaseStopReason::PostOnlyRejected) {
+                                post_only_retries += 1;
+                                if post_only_retries >= MAX_POST_ONLY_RETRIES {
+                                    debug!("POST_ONLY max retries reached for DOWN order");
+                                    break Ok(OrderResult::Pending(crate::executor::PendingOrder {
+                                        request_id: format!("dir-{}-down", req_id_base),
+                                        order_id: "post_only_max_retries".to_string(),
+                                        timestamp: Utc::now(),
+                                    }));
+                                }
+                                // Small delay before retry
+                                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                                // Get fresh price from orderbook
+                                if let Some(fresh_price) = calculate_maker_price(no_book, Side::Buy) {
+                                    current_order.price = Some(fresh_price);
+                                    debug!(retry = post_only_retries, fresh_price = %fresh_price, "Retrying DOWN order with fresh price");
+                                    continue;
+                                } else {
+                                    debug!("No fresh price available for DOWN order retry");
+                                    break Ok(OrderResult::Pending(crate::executor::PendingOrder {
+                                        request_id: format!("dir-{}-down", req_id_base),
+                                        order_id: "no_fresh_price".to_string(),
+                                        timestamp: Utc::now(),
+                                    }));
+                                }
+                            }
+
+                            if chase_result.success || chase_result.filled_size > Decimal::ZERO {
+                                break Ok(OrderResult::Filled(crate::executor::OrderFill {
+                                    request_id: format!("dir-{}-down", req_id_base),
+                                    order_id: "chased".to_string(),
+                                    size: chase_result.filled_size,
+                                    price: chase_result.avg_price,
+                                    fee: chase_result.total_fee,
+                                    timestamp: Utc::now(),
+                                }));
+                            } else {
+                                break Ok(OrderResult::Pending(crate::executor::PendingOrder {
+                                    request_id: format!("dir-{}-down", req_id_base),
+                                    order_id: "chase_failed".to_string(),
+                                    timestamp: Utc::now(),
+                                }));
+                            }
                         }
+                        Err(e) => break Err(e),
                     }
-                    Err(e) => Err(e),
                 }
             } else {
                 self.executor.place_order(down_order).await
