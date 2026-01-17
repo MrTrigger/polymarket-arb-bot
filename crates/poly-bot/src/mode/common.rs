@@ -12,6 +12,7 @@ use tracing::{error, info, warn};
 use poly_common::ClickHouseClient;
 use poly_market::{DiscoveryConfig, MarketDiscovery};
 
+use crate::api::MarketClient;
 use crate::data_source::live::{ActiveMarket, ActiveMarketsState, EventSender};
 use crate::data_source::{MarketEvent, WindowOpenEvent};
 use crate::observability::{
@@ -40,6 +41,7 @@ pub async fn run_market_discovery(
 
     let mut discovery = MarketDiscovery::new(config.clone());
     let poll_interval = config.poll_interval;
+    let market_client = MarketClient::new(None);
 
     loop {
         // Discover new markets
@@ -51,6 +53,11 @@ pub async fn run_market_discovery(
                     // Add discovered markets to the active markets state
                     let mut active = active_markets.write().await;
                     for market in &markets {
+                        // Fetch min_order_size from CLOB API (defaults to $1 if unavailable)
+                        let min_order_size = market_client
+                            .get_min_order_size(&market.yes_token_id)
+                            .await;
+
                         let active_market = ActiveMarket {
                             event_id: market.event_id.clone(),
                             yes_token_id: market.yes_token_id.clone(),
@@ -58,6 +65,7 @@ pub async fn run_market_discovery(
                             asset: market.asset,
                             strike_price: market.strike_price,
                             window_end: market.window_end,
+                            min_order_size,
                         };
 
                         // Generate Polymarket URL for easy tracking
@@ -66,8 +74,8 @@ pub async fn run_market_discovery(
                             market.event_id
                         );
                         info!(
-                            "Adding market {} ({} strike={}) to active markets\n    URL: {}",
-                            market.event_id, market.asset, market.strike_price, url
+                            "Adding market {} ({} strike={}, min_order=${}) to active markets\n    URL: {}",
+                            market.event_id, market.asset, market.strike_price, min_order_size, url
                         );
                         active.insert(market.event_id.clone(), active_market);
 

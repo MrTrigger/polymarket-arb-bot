@@ -68,7 +68,7 @@ impl Default for SizingConfig {
             base_order_size: Decimal::new(50, 0),       // $50
             max_position_per_market: Decimal::new(1000, 0), // $1000
             max_total_exposure: Decimal::new(5000, 0),      // $5000
-            min_order_size: Decimal::new(5, 0),             // $5 minimum
+            min_order_size: Decimal::new(1, 0),             // $1 minimum (Polymarket minimum)
             max_liquidity_take: Decimal::new(5, 1),         // 50% of book
         }
     }
@@ -81,7 +81,7 @@ impl SizingConfig {
             base_order_size: config.base_order_size,
             max_position_per_market: config.max_position_per_market,
             max_total_exposure: config.max_total_exposure,
-            min_order_size: Decimal::new(5, 0),
+            min_order_size: Decimal::new(1, 0),             // $1 minimum (Polymarket minimum)
             max_liquidity_take: Decimal::new(5, 1),
         }
     }
@@ -823,7 +823,7 @@ mod tests {
         assert_eq!(config.base_order_size, dec!(50));
         assert_eq!(config.max_position_per_market, dec!(1000));
         assert_eq!(config.max_total_exposure, dec!(5000));
-        assert_eq!(config.min_order_size, dec!(5));
+        assert_eq!(config.min_order_size, dec!(1));
         assert_eq!(config.max_liquidity_take, dec!(0.5));
     }
 
@@ -991,8 +991,8 @@ mod tests {
     #[test]
     fn test_below_minimum() {
         let config = SizingConfig {
-            base_order_size: dec!(10),
-            min_order_size: dec!(5),
+            base_order_size: dec!(2),
+            min_order_size: dec!(1),
             ..Default::default()
         };
         let sizer = PositionSizer::new(config);
@@ -1001,7 +1001,7 @@ mod tests {
 
         let result = sizer.calculate_size(&opportunity, None, Decimal::ZERO, Some(&warning));
 
-        // 10 * 0.25 = 2.5 < 5 minimum
+        // 2 * 0.25 = 0.5 < 1 minimum
         assert!(!result.is_valid);
         assert_eq!(result.limit_reason, Some(SizingLimit::BelowMinimum));
     }

@@ -80,6 +80,8 @@ pub struct ActiveMarket {
     pub strike_price: Decimal,
     /// Window end time.
     pub window_end: DateTime<Utc>,
+    /// Minimum order size from market data (fetched from CLOB API).
+    pub min_order_size: Decimal,
 }
 
 /// Shared state for active markets.
@@ -835,9 +837,11 @@ mod tests {
             asset: CryptoAsset::Btc,
             strike_price: dec!(100000),
             window_end: Utc::now() + chrono::Duration::minutes(15),
+            min_order_size: Decimal::ONE,
         };
 
         assert_eq!(market.asset, CryptoAsset::Btc);
         assert_eq!(market.strike_price, dec!(100000));
+        assert_eq!(market.min_order_size, Decimal::ONE);
     }
 }
