@@ -122,6 +122,9 @@ pub struct TradingConfig {
     /// Base order size (USDC). Used by limit-based sizing.
     pub base_order_size: Decimal,
 
+    /// Maximum order size (USDC). Hard cap on any single order.
+    pub max_order_size: Decimal,
+
     /// Window time boundary for "early" phase (seconds).
     pub early_threshold_secs: u64,
 
@@ -246,6 +249,7 @@ impl Default for TradingConfig {
             max_position_per_market: Decimal::new(1000, 0), // $1000
             max_total_exposure: Decimal::new(5000, 0),      // $5000
             base_order_size: Decimal::new(50, 0),           // $50
+            max_order_size: Decimal::new(100, 0),           // $100 hard cap
             early_threshold_secs: 300, // 5 minutes
             mid_threshold_secs: 120,   // 2 minutes
             sizing: SizingConfig::default(),
@@ -1391,8 +1395,10 @@ struct TradingToml {
     max_position_per_market: f64,
     max_total_exposure: f64,
     base_order_size: f64,
+    max_order_size: f64,
     early_threshold_secs: u64,
     mid_threshold_secs: u64,
+    available_balance: f64,
     #[serde(default)]
     sizing: SizingToml,
 }
@@ -1407,8 +1413,10 @@ impl Default for TradingToml {
             max_position_per_market: 1000.0,
             max_total_exposure: 5000.0,
             base_order_size: 50.0,
+            max_order_size: 100.0,
             early_threshold_secs: 300,
             mid_threshold_secs: 120,
+            available_balance: 5000.0,
             sizing: SizingToml::default(),
         }
     }
@@ -1796,11 +1804,19 @@ impl From<TomlConfig> for BotConfig {
                 max_position_per_market: f64_to_decimal(toml.trading.max_position_per_market),
                 max_total_exposure: f64_to_decimal(toml.trading.max_total_exposure),
                 base_order_size: f64_to_decimal(toml.trading.base_order_size),
+                max_order_size: f64_to_decimal(toml.trading.max_order_size),
                 early_threshold_secs: toml.trading.early_threshold_secs,
                 mid_threshold_secs: toml.trading.mid_threshold_secs,
                 sizing: SizingConfig {
                     mode: toml.trading.sizing.mode,
-                    available_balance: f64_to_decimal(toml.trading.sizing.available_balance),
+                    // Read from [trading] directly, fall back to [trading.sizing] for backward compat
+                    available_balance: f64_to_decimal(
+                        if toml.trading.available_balance > 0.0 {
+                            toml.trading.available_balance
+                        } else {
+                            toml.trading.sizing.available_balance
+                        }
+                    ),
                     max_market_allocation: f64_to_decimal(toml.trading.sizing.max_market_allocation),
                     expected_trades_per_market: toml.trading.sizing.expected_trades_per_market,
                     min_order_size: f64_to_decimal(toml.trading.sizing.min_order_size),

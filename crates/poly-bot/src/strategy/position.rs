@@ -104,6 +104,8 @@ pub struct PositionConfig {
     pub total_budget: Decimal,
     /// Minimum order size (default $1.00).
     pub min_order_size: Decimal,
+    /// Maximum order size - hard cap on any single order (default $100).
+    pub max_order_size: Decimal,
     /// Maximum single-side exposure (default 0.80 = 80%).
     pub max_single_side_exposure: Decimal,
     /// Minimum hedge ratio (default 0.20 = 20%).
@@ -151,6 +153,7 @@ impl Default for PositionConfig {
         Self {
             total_budget: dec!(100),
             min_order_size: dec!(1),
+            max_order_size: dec!(100), // Hard cap on single order
             max_single_side_exposure: dec!(0.80),
             min_hedge_ratio: dec!(0.20),
             trades_per_phase: 15,
@@ -519,6 +522,7 @@ impl PositionManager {
         // Apply limits
         size = size.min(phase_remaining); // Don't exceed phase budget
         size = size.min(total_remaining * dec!(0.15)); // Max 15% of remaining
+        size = size.min(self.config.max_order_size); // Hard cap on single order
         size = size.max(self.config.min_order_size); // Minimum order size
 
         size

@@ -27,6 +27,7 @@ pub mod executor;
 pub mod mode;
 pub mod observability;
 pub mod risk;
+pub mod session;
 pub mod state;
 pub mod strategy;
 pub mod types;
@@ -111,3 +112,10 @@ pub use mode::{
     PaperModeConfig, PnLReport, ShadowMode, ShadowModeConfig, SweepParameter,
 };
 pub use api::{FeeRateClient, FeeRateError, FeeRateResponse};
+pub use session::{
+    SessionManager, SessionManagerConfig, SharedSessionManager, SessionSummary,
+    OrderTracker, TrackedOrder, OrderState, OrderSource, OrderSummary,
+    PositionTracker, MarketPosition, PositionSummary, PositionState,
+    PnlTracker, PnlSnapshot, PnlSummary, CompletedTrade,
+    SessionStats, StatsSummary,
+};

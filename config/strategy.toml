@@ -5,118 +5,109 @@
 # See config/bot.toml for operational settings.
 
 # ============================================================================
-# USER SETTINGS - Tune these for optimization
+#                            USER SETTINGS
+#                    (tune these for optimization)
 # ============================================================================
 
 [tuning]
 # Allocation ratios for directional signals (0.0 to 1.0)
-# Higher = more aggressive on signal direction
-strong_up_ratio = 0.82    # Strong UP: 82% YES, 18% NO
-lean_up_ratio = 0.65      # Lean UP: 65% YES, 35% NO
+strong_up_ratio = 0.82         # Strong UP: 82% YES, 18% NO
+lean_up_ratio = 0.65           # Lean UP: 65% YES, 35% NO
 
-# Phase confidence thresholds (0.0 to 1.0)
-# Lower = more trades, higher risk
-early_threshold = 0.80    # >10 min remaining
-build_threshold = 0.60    # 5-10 min remaining
-core_threshold = 0.50     # 2-5 min remaining
-final_threshold = 0.40    # <2 min remaining
+# Phase confidence thresholds (0.0 to 1.0) - lower = more trades
+early_threshold = 0.80         # >10 min remaining
+build_threshold = 0.60         # 5-10 min remaining
+core_threshold = 0.50          # 2-5 min remaining
+final_threshold = 0.40         # <2 min remaining
 
-# EV-based mode settings
-# Trade if: (confidence - price) >= min_edge
+# EV-based mode: trade if (confidence - price) >= min_edge
 # min_edge decays from max_edge_factor at window start to 0 at end
-max_edge_factor = 0.08    # 8% EV required at window start (sweep optimal)
+max_edge_factor = 0.08         # 8% EV required at window start
 
-# Confidence calculation params (EV-based mode)
-# time_conf = time_conf_floor + (1 - time_conf_floor) * (1 - time_ratio)
-# dist_conf = clamp(dist_conf_floor + dist_conf_per_atr * atr_multiple, floor, 1.0)
-time_conf_floor = 0.30    # Min confidence from time at window start
-dist_conf_floor = 0.15    # Min confidence for tiny moves (sweep optimal)
-dist_conf_per_atr = 0.30  # Confidence gained per ATR of movement (sweep optimal)
+# Confidence calculation params
+# time_conf = time_conf_floor + (1 - floor) * (1 - time_ratio)
+# dist_conf = clamp(dist_conf_floor + dist_conf_per_atr * atr_mult, floor, 1.0)
+time_conf_floor = 0.30         # Min confidence from time at window start
+dist_conf_floor = 0.15         # Min confidence for tiny moves
+dist_conf_per_atr = 0.30       # Confidence gained per ATR of movement
+
+# ============================================================================
+#                        PARAMETER SWEEP SETTINGS
+#                  (for backtest optimization runs)
+# ============================================================================
 
 [sweep]
-# Parameter sweep configuration
-# Run: cargo run -p poly-bot --release -- --mode backtest
-#
-# EV-based mode: sweep edge_factors and confidence params
-# Legacy phase mode: set max_edge_factor = 0 and sweep thresholds
-
-# Always swept
-#strong_ratios = [0.75, 0.78, 0.80, 0.82, 0.85, 0.88, 0.90]
-#lean_ratios = [0.55, 0.60, 0.65, 0.70]
+# Run: cargo run -p poly-bot --release -- --mode backtest --sweep
 
 # EV-based mode sweep (minimum EV required at window start)
-# Narrowed based on first sweep - lower values performed similarly
 edge_factors = [0.02, 0.05, 0.08]
 
 # Confidence calculation params sweep
-# Results from 54-run sweep (2026-01-10 to 2026-01-12, BTC):
-# - dist_conf_floor: 0.15 best (avg $5272 vs $5057 for 0.05)
-# - dist_conf_per_atr: 0.30 best (avg $5217)
-# - max_edge_factor: 0.08 best (avg $5197, highest peak $5748)
-# - time_conf_floor: minimal impact (0.25 slightly better avg)
 time_conf_floors = [0.25, 0.30]
 dist_conf_floors = [0.05, 0.10, 0.15]
 dist_conf_per_atrs = [0.25, 0.30, 0.35]
 
-# Legacy phase mode sweep (uncomment and set max_edge_factor = 0)
+# Legacy phase mode sweep (set max_edge_factor = 0 to use)
 # early_thresholds = [0.75, 0.80, 0.85]
 # final_thresholds = [0.35, 0.40, 0.45]
 
 results_file = "sweep_results.json"
 
 # ============================================================================
-# DEFAULTS - Rarely need to change these
+#                          ADVANCED SETTINGS
+#                      (rarely need to change)
 # ============================================================================
 
 [phases]
-# Phase time boundaries (minutes)
-early_boundary_min = 10
-build_boundary_min = 5
-core_boundary_min = 2
+# Phase time boundaries (minutes remaining)
+early_boundary_min = 10        # Early phase: >10 min
+build_boundary_min = 5         # Build phase: 5-10 min
+core_boundary_min = 2          # Core phase: 2-5 min
+                               # Final phase: <2 min
 
 # Budget allocation per phase (must sum to 1.0)
-early_budget = 0.15
-build_budget = 0.25
-core_budget = 0.30
-final_budget = 0.30
+early_budget = 0.15            # 15% for early phase
+build_budget = 0.25            # 25% for build phase
+core_budget = 0.30             # 30% for core phase
+final_budget = 0.30            # 30% for final phase
 
 [signals]
 # Signal thresholds (basis points from strike)
-strong_threshold_base_bps = 30
-lean_threshold_base_bps = 20
+strong_threshold_base_bps = 30 # Strong signal threshold
+lean_threshold_base_bps = 20   # Lean signal threshold
 
-# Time scaling factors
-time_scale_30min = 1.0
-time_scale_10min = 0.7
-time_scale_3min = 0.5
-time_scale_late = 0.3
+# Time scaling factors (signal threshold multipliers)
+time_scale_30min = 1.0         # At 30 min remaining
+time_scale_10min = 0.7         # At 10 min remaining
+time_scale_3min = 0.5          # At 3 min remaining
+time_scale_late = 0.3          # Near window end
 
 [confidence]
-# ATR normalization per asset
-default_atr_btc = 20.0
-default_atr_eth = 1.0
-default_atr_sol = 0.15
+# Default ATR per asset (for normalization)
+default_atr_btc = 20.0         # BTC 15-min ATR in dollars
+default_atr_eth = 1.0          # ETH 15-min ATR in dollars
+default_atr_sol = 0.15         # SOL 15-min ATR in dollars
 
 # Distance confidence thresholds (ATR multiples)
-dist_very_high_atr = 1.5
-dist_high_atr = 1.0
-dist_medium_atr = 0.75
-dist_low_atr = 0.50
-dist_very_low_atr = 0.25
+dist_very_high_atr = 1.5       # Very high confidence distance
+dist_high_atr = 1.0            # High confidence distance
+dist_medium_atr = 0.75         # Medium confidence distance
+dist_low_atr = 0.50            # Low confidence distance
+dist_very_low_atr = 0.25       # Very low confidence distance
 
-# Time confidence thresholds (minutes)
-time_very_high_min = 3
-time_high_min = 6
-time_medium_min = 9
-time_low_min = 12
+# Time confidence thresholds (minutes remaining)
+time_very_high_min = 3         # Very high confidence time
+time_high_min = 6              # High confidence time
+time_medium_min = 9            # Medium confidence time
+time_low_min = 12              # Low confidence time
 
 # Confidence boost for strong signals
-dual_strong_boost = 1.2
+dual_strong_boost = 1.2        # Multiplier when both signals strong
 
 [sizing]
-trades_per_phase = 15
-min_confidence_multiplier = 0.5
-max_confidence_multiplier = 2.0
-max_single_side_exposure = 0.80
-min_hedge_ratio = 0.20
-min_order_size = 1.0
+trades_per_phase = 15          # Expected trades per phase
+min_confidence_multiplier = 0.5    # Min size multiplier at low confidence
+max_confidence_multiplier = 2.0    # Max size multiplier at high confidence
+max_single_side_exposure = 0.80    # Max exposure on one side (YES or NO)
+min_hedge_ratio = 0.20         # Min hedge ratio for directional trades
+min_order_size = 1.0           # Min order size in USDC

@@ -318,8 +318,12 @@ struct TrackedMarket {
     no_token_id: String,
     /// Strike price.
     strike_price: Decimal,
+    /// Window start time (when strike is announced and trading begins).
+    window_start: DateTime<Utc>,
     /// Window end time.
     window_end: DateTime<Utc>,
+    /// True if we have the official strike price from API, not self-assigned.
+    has_official_strike: bool,
     /// Current market state.
     state: MarketState,
     /// Current inventory.
@@ -333,6 +337,12 @@ struct TrackedMarket {
     /// Phase-based position manager for this market.
     /// Controls when/how much to trade based on confidence and budget.
     position_manager: position::PositionManager,
+    /// True if a directional order is currently in-flight (placed but not yet filled/cancelled).
+    /// Prevents duplicate order spam while waiting for order confirmation.
+    pending_directional: bool,
+    /// Timestamp when the last directional order was placed.
+    /// Used for minimum cooldown between orders.
+    last_directional_order_time: Option<DateTime<Utc>>,
 }
 
 impl TrackedMarket {
@@ -361,8 +371,13 @@ impl TrackedMarket {
             time_conf_floor: strategy_config.time_conf_floor,
             dist_conf_floor: strategy_config.dist_conf_floor,
             dist_conf_per_atr: strategy_config.dist_conf_per_atr,
+            // Safety limits
+            max_order_size: strategy_config.max_order_size,
             ..Default::default()
         };
+
+        // Track if we have official strike price from API
+        let has_official_strike = !event.strike_price.is_zero();
 
         Self {
             event_id: event.event_id.clone(),
@@ -370,13 +385,17 @@ impl TrackedMarket {
             yes_token_id: event.yes_token_id.clone(),
             no_token_id: event.no_token_id.clone(),
             strike_price: event.strike_price,
+            window_start: event.window_start,
             window_end: event.window_end,
+            has_official_strike,
             state,
             inventory: Inventory::new(event.event_id.clone()),
             yes_toxic_warning: None,
             no_toxic_warning: None,
             active_maker_orders: HashMap::new(),
             position_manager: position::PositionManager::new(position_config),
+            pending_directional: false,
+            last_directional_order_time: None,
         }
     }
 
@@ -431,6 +450,22 @@ impl TrackedMarket {
     /// Check if we have any position in this market.
     fn has_position(&self) -> bool {
         self.inventory.total_exposure() > Decimal::ZERO
+    }
+
+    /// Check if this market is ready to trade.
+    /// Returns false if:
+    /// - Market hasn't started yet (current time < window_start)
+    /// - We don't have the official strike price from API
+    fn is_ready_to_trade(&self, current_time: DateTime<Utc>) -> bool {
+        // Market must have started
+        if current_time < self.window_start {
+            return false;
+        }
+        // Must have official strike price (not zero, and not self-assigned)
+        if !self.has_official_strike || self.strike_price.is_zero() {
+            return false;
+        }
+        true
     }
 
     /// Get the position manager's budget remaining.
@@ -503,6 +538,9 @@ pub struct StrategyConfig {
 
     /// Whether running in backtest mode (disables price chasing).
     pub is_backtest: bool,
+
+    /// Maximum order size - hard cap on any single order (USDC).
+    pub max_order_size: Decimal,
 }
 
 impl Default for StrategyConfig {
@@ -530,6 +568,7 @@ impl Default for StrategyConfig {
             lean_up_ratio: dec!(0.65),
             execution: crate::config::ExecutionConfig::default(),
             is_backtest: false,
+            max_order_size: dec!(100), // $100 hard cap on single order
         }
     }
 }
@@ -566,6 +605,7 @@ impl StrategyConfig {
             lean_up_ratio: dec!(0.65),
             execution: crate::config::ExecutionConfig::default(),
             is_backtest: false,
+            max_order_size: config.max_order_size,
         }
     }
 
@@ -606,6 +646,7 @@ impl StrategyConfig {
             lean_up_ratio: dec!(0.65),
             execution: crate::config::ExecutionConfig::default(),
             is_backtest: false,
+            max_order_size: config.max_order_size,
         }
     }
 
@@ -1268,25 +1309,35 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
 
     /// Handle new market window.
     fn handle_window_open(&mut self, mut event: WindowOpenEvent) {
-        // For "Up or Down" relative markets, strike_price is 0 from discovery.
-        // Set strike from current spot price (the opening price).
+        // Log market discovery
         if event.strike_price.is_zero() {
-            if let Some(&spot) = self.spot_prices.get(&event.asset) {
-                info!(
-                    "Window open: {} {} (Up/Down market, setting strike from spot={})",
-                    event.event_id, event.asset, spot
-                );
-                event.strike_price = spot;
+            // In backtest mode, we may need to derive strike from spot (CSV data limitation)
+            if self.config.is_backtest {
+                if let Some(&spot) = self.spot_prices.get(&event.asset) {
+                    info!(
+                        "Window open (backtest): {} {} setting strike from spot={}",
+                        event.event_id, event.asset, spot
+                    );
+                    event.strike_price = spot;
+                } else {
+                    info!(
+                        "Market discovered (backtest): {} {} (no strike or spot yet)",
+                        event.event_id, event.asset
+                    );
+                }
             } else {
-                warn!(
-                    "Window open: {} {} has no strike price and no spot price available. \
-                     Market will not trade until spot price is received.",
-                    event.event_id, event.asset
+                // Live mode: market discovered but not started yet
+                // Strike price will be set when market actually opens
+                info!(
+                    "Market discovered: {} {} (starts at {}, no strike yet - will wait for official strike)",
+                    event.event_id, event.asset, event.window_start
                 );
             }
         } else {
-            info!("Window open: {} {} strike={}",
-                event.event_id, event.asset, event.strike_price);
+            info!(
+                "Window open: {} {} strike={} (starts at {})",
+                event.event_id, event.asset, event.strike_price, event.window_start
+            );
         }
 
         // Calculate budget per market from sizing config
@@ -1462,9 +1513,16 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                 continue;
             }
 
-            // Skip markets that haven't started yet (strike_price = 0)
-            if market.strike_price.is_zero() {
-                trace!("Skipping market {} - not started yet (strike=0)", event_id);
+            // Skip markets that haven't started yet or don't have official strike price
+            if !market.is_ready_to_trade(self.simulated_time) {
+                trace!(
+                    "Skipping market {} - not ready (start={}, now={}, has_official_strike={}, strike={})",
+                    event_id,
+                    market.window_start,
+                    self.simulated_time,
+                    market.has_official_strike,
+                    market.strike_price
+                );
                 continue;
             }
 
@@ -1657,6 +1715,22 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                     action
                 }
                 Some(EngineDecision::Directional(opp)) => {
+                    // Check for pending directional order - skip if one is already in-flight
+                    if let Some(market) = self.markets.get(&event_id) {
+                        if market.pending_directional {
+                            trace!("Skipping directional for {}: order already in-flight", event_id);
+                            continue;
+                        }
+                        // Also enforce minimum cooldown between orders (2 seconds)
+                        if let Some(last_order_time) = market.last_directional_order_time {
+                            let elapsed = (Utc::now() - last_order_time).num_milliseconds();
+                            if elapsed < 2000 {
+                                trace!("Skipping directional for {}: cooldown {}ms < 2000ms", event_id, elapsed);
+                                continue;
+                            }
+                        }
+                    }
+
                     // Update position manager with dynamic ATR before making decision
                     let dynamic_atr = self.atr_tracker.get_atr(asset);
                     if let Some(market) = self.markets.get_mut(&event_id) {
@@ -1790,7 +1864,18 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                     info!("🚀 EXECUTE {} {}: signal={:?} size=${:.2} phase={} conf={:.2} up_ratio={} down_ratio={}",
                         event_id, asset, opp.signal, total_size, phase, pm_confidence, opp.up_ratio, opp.down_ratio);
 
+                    // Mark as pending BEFORE placing order to prevent duplicate orders
+                    if let Some(market) = self.markets.get_mut(&event_id) {
+                        market.pending_directional = true;
+                        market.last_directional_order_time = Some(Utc::now());
+                    }
+
                     let action = self.execute_directional(opp, total_size).await?;
+
+                    // Clear pending flag after order completes (fill, reject, or timeout)
+                    if let Some(market) = self.markets.get_mut(&event_id) {
+                        market.pending_directional = false;
+                    }
 
                     // Record decision with engine source
                     self.record_multi_decision(

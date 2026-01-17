@@ -2,7 +2,6 @@
 # ==============================
 #
 # Collects data from Binance (spot prices) and Polymarket (orderbooks).
-# Supports both historical and live collection modes.
 #
 # Environment variables:
 #   CLICKHOUSE_URL      - ClickHouse HTTP URL
@@ -10,59 +9,55 @@
 #   CLICKHOUSE_PASSWORD - Password (optional)
 #
 # Usage:
-#   # Historical mode (fetch past data)
-#   cargo run -p poly-collect --release
-#
-#   # Live mode (stream real-time data)
-#   # Set mode = "live" in [collection] below
+#   cargo run -p poly-collect --release              # Historical mode
+#   cargo run -p poly-collect --release -- --live    # Live mode
 
 # ============================================================================
-# USER SETTINGS (configure these)
+#                            USER SETTINGS
 # ============================================================================
 
 [general]
-assets = ["BTC", "ETH", "SOL"]    # Assets to collect
-timeframes = ["15m"]              # Timeframes: "5m", "15m", "1h"
-log_level = "info"                # info, debug, trace
+assets = ["BTC", "ETH", "SOL"]  # Assets to collect: "BTC", "ETH", "SOL", "XRP"
+timeframes = ["15m"]           # Timeframes: "5m", "15m", "1h"
+log_level = "info"             # "info", "debug", "trace"
 
 [collection]
-mode = "history"                  # "history" or "live"
-# Use start_date/end_date OR days (not both)
-#start_date = "2025-01-01"        # Start date (YYYY-MM-DD)
-#end_date = "2025-01-15"          # End date (YYYY-MM-DD)
-days = 7                          # Alternative: collect last N days
+mode = "history"               # "history" (past data) or "live" (real-time stream)
+days = 7                       # Collect last N days (for history mode)
+# start_date = "2025-01-01"    # Alternative: specific start date (YYYY-MM-DD)
+# end_date = "2025-01-15"      # Alternative: specific end date (YYYY-MM-DD)
 
 [output]
-mode = "csv"                      # clickhouse, csv, or both
-csv_dir = "data"                  # Directory for CSV output
+mode = "csv"                   # "clickhouse", "csv", or "both"
+csv_dir = "data"               # Directory for CSV output
 
 # ============================================================================
-# DEFAULTS (rarely need to change)
+#                          ADVANCED SETTINGS
 # ============================================================================
 
 [live]
-discovery_interval_secs = 300     # How often to check for new markets
+discovery_interval_secs = 300  # How often to check for new markets
 
 [binance]
-buffer_size = 500
-flush_interval_ms = 5000
-connect_timeout_secs = 10
-initial_reconnect_delay_secs = 1
-max_reconnect_delay_secs = 60
+buffer_size = 500              # Message buffer size
+flush_interval_ms = 5000       # Flush to storage interval (ms)
+connect_timeout_secs = 10      # WebSocket connect timeout
+initial_reconnect_delay_secs = 1   # Initial reconnect delay
+max_reconnect_delay_secs = 60  # Max reconnect delay (exponential backoff)
 
 [clob]
-snapshot_buffer_size = 500
-delta_buffer_size = 1000
-flush_interval_ms = 5000
-snapshot_interval_ms = 100
-connect_timeout_secs = 10
-initial_reconnect_delay_secs = 1
-max_reconnect_delay_secs = 60
+snapshot_buffer_size = 500     # Orderbook snapshot buffer
+delta_buffer_size = 1000       # Orderbook delta buffer
+flush_interval_ms = 5000       # Flush to storage interval (ms)
+snapshot_interval_ms = 100     # Snapshot capture interval (ms)
+connect_timeout_secs = 10      # WebSocket connect timeout
+initial_reconnect_delay_secs = 1   # Initial reconnect delay
+max_reconnect_delay_secs = 60  # Max reconnect delay
 
 [clickhouse]
-max_rows = 10000
-max_bytes = 10485760
-period_secs = 5
+max_rows = 10000               # Max rows per batch insert
+max_bytes = 10485760           # Max bytes per batch (10MB)
+period_secs = 5                # Batch insert interval
 
 [health]
-log_interval_secs = 30
+log_interval_secs = 30         # Health status log interval

@@ -6,267 +6,124 @@
 #   POLY_API_KEY        - Polymarket API key
 #   POLY_API_SECRET     - Polymarket API secret
 #   POLY_API_PASSPHRASE - Polymarket API passphrase
-#   CLICKHOUSE_URL      - ClickHouse HTTP URL (optional, for observability)
-#   CLICKHOUSE_USER     - ClickHouse username
-#   CLICKHOUSE_PASSWORD - ClickHouse password
 #
 # Usage:
 #   cargo run -p poly-bot --release -- --mode paper
 #   cargo run -p poly-bot --release -- --mode live
 
 # ============================================================================
-# USER SETTINGS (configure these)
+#                            USER SETTINGS
+#                    (these are the ones you'll change)
 # ============================================================================
 
 [general]
-# Operating mode: "paper" (simulated), "live" (real money), "backtest" (historical)
-mode = "live"
-
-# Assets to trade - available: "BTC", "ETH", "SOL", "XRP"
-assets = ["BTC"]
-
-# Logging verbosity: "info", "debug", "trace"
-log_level = "info"
+mode = "live"                   # "paper", "live", or "backtest"
+assets = ["BTC"]                # "BTC", "ETH", "SOL", "XRP"
+window_duration = "15min"       # "15min" or "1h"
+log_level = "info"              # "info", "debug", "trace"
 
 [trading]
-# Maximum position size per market in USDC
-max_position_per_market = 10.0
+available_balance = 100.0       # Total capital for trading (USDC)
+max_position_per_market = 10.0  # Max position size per market (USDC)
+max_total_exposure = 20.0       # Max total exposure across all markets (USDC)
+max_order_size = 10.0           # Max single order size (USDC) - safety cap
 
-# Maximum total exposure across all markets in USDC
-max_total_exposure = 20.0
-
-# Base order size in USDC (minimum 5 shares on Polymarket)
-base_order_size = 5.0
-
-[trading.sizing]
-# Total capital allocated for trading in USDC
-available_balance = 100.0
+# --- Margin thresholds (advanced) ---
+min_margin_early_pct = 2.5      # Min margin in early phase (>5min), %
+min_margin_mid_pct = 1.5        # Min margin in mid phase (2-5min), %
+min_margin_late_pct = 0.5       # Min margin in late phase (<2min), %
+early_threshold_secs = 300      # Seconds to consider "early" phase
+mid_threshold_secs = 120        # Seconds to consider "mid" phase
+min_time_remaining_secs = 30    # Don't trade below this
 
 [risk]
-# Stop trading if daily loss exceeds this amount in USDC
-max_daily_loss = 50.0
+max_daily_loss = 50.0           # Stop trading if daily loss exceeds (USDC)
+
+# --- Advanced risk settings ---
+risk_mode = "both"              # "arb", "directional", or "both"
+max_consecutive_failures = 3    # Circuit breaker trip threshold
+circuit_breaker_cooldown_secs = 300  # Cooldown after circuit breaker
+max_imbalance_ratio = 0.7       # Max YES/NO imbalance (0.0-1.0)
+toxic_flow_threshold = 80       # Toxic flow detection (0-100)
+emergency_close_threshold = 200.0  # Emergency close above this (USDC)
 
 [backtest]
-# Start date for backtesting (YYYY-MM-DD)
-start_date = "2026-01-08"
+start_date = "2026-01-08"       # Start date (YYYY-MM-DD)
+end_date = "2026-01-15"         # End date (YYYY-MM-DD)
+data_dir = "data/2026-01-08_2026-01-15_15min"  # CSV data directory
 
-# End date for backtesting (YYYY-MM-DD)
-end_date = "2026-01-15"
-
-# Directory containing CSV data files for backtesting
-data_dir = "data/2026-01-08_2026-01-15_15min"
+# --- Advanced backtest settings ---
+sweep_enabled = false           # Enable parameter sweep
+speed = 0.0                     # Replay speed (0 = max speed)
+sweep_parallel_workers = 8      # Parallel workers (0 = auto)
 
 # ============================================================================
-# ADVANCED SETTINGS (rarely need to change)
+#                          ADVANCED SETTINGS
+#                      (rarely need to change these)
 # ============================================================================
-
-[general.advanced]
-# Market window duration: "15min" or "1h"
-window_duration = "15min"
-
-[trading.margins]
-# Minimum profit margin required in early phase (>5min remaining), percentage
-min_margin_early_pct = 2.5
-
-# Minimum profit margin required in mid phase (2-5min remaining), percentage
-min_margin_mid_pct = 1.5
-
-# Minimum profit margin required in late phase (<2min remaining), percentage
-min_margin_late_pct = 0.5
-
-# Seconds remaining to consider "early" phase
-early_threshold_secs = 300
-
-# Seconds remaining to consider "mid" phase
-mid_threshold_secs = 120
-
-# Don't trade if less than this many seconds remain
-min_time_remaining_secs = 30
-
-[risk.advanced]
-# Risk evaluation mode: "arb", "directional", or "both"
-risk_mode = "both"
-
-# Trip circuit breaker after this many consecutive failed orders
-max_consecutive_failures = 3
-
-# Seconds to wait after circuit breaker trips before resuming
-circuit_breaker_cooldown_secs = 300
-
-# Maximum allowed imbalance between YES/NO positions (0.0-1.0)
-max_imbalance_ratio = 0.7
-
-# Toxic flow detection threshold (0-100)
-toxic_flow_threshold = 80
-
-# Emergency close all positions if exposure exceeds this USDC amount
-emergency_close_threshold = 200.0
-
-[backtest.advanced]
-# Enable parameter sweep mode for optimization
-sweep_enabled = false
-
-# Replay speed multiplier (0.0 = as fast as possible)
-speed = 0.0
-
-# Number of parallel workers for parameter sweeps (0 = auto-detect)
-sweep_parallel_workers = 8
 
 [execution]
-# Order execution mode: "limit" (maker, lower fees) or "market" (taker, instant fill)
-execution_mode = "limit"
-
-# Enable price chasing for limit orders (cancel and resubmit at better prices)
-chase_enabled = true
-
-# Price increment for chasing - must match Polymarket tick size
-chase_step_size = 0.01
-
-# Milliseconds between order status checks during chase
-chase_check_interval_ms = 500
-
-# Maximum milliseconds to chase before giving up
-max_chase_time_ms = 30000
-
-# Simulated fill latency for paper trading in milliseconds
-paper_fill_latency_ms = 50
-
-# Order timeout in milliseconds before considering it failed
-order_timeout_ms = 10000
-
-# Fire a test trade on startup to verify order flow (enable after funding)
-test_trade_on_startup = false
+execution_mode = "limit"        # "limit" (maker) or "market" (taker)
+chase_enabled = true            # Enable price chasing for limit orders
+chase_step_size = 0.01          # Price increment for chasing (tick size)
+chase_check_interval_ms = 500   # Order status check interval (ms)
+max_chase_time_ms = 30000       # Max chase duration (ms)
+paper_fill_latency_ms = 50      # Simulated fill latency for paper (ms)
+order_timeout_ms = 10000        # Order timeout (ms)
+test_trade_on_startup = false   # Fire test trade on startup
 
 [shadow]
-# Enable shadow bidding (place backup orders on opposite leg)
-enabled = true
-
-# Price offset for shadow bids in basis points
-price_offset_bps = 50
-
-# Maximum milliseconds to wait for shadow bid confirmation
-max_wait_ms = 2000
+enabled = true                  # Enable shadow bidding
+price_offset_bps = 50           # Shadow bid price offset (basis points)
+max_wait_ms = 2000              # Max wait for shadow confirmation (ms)
 
 [engines]
-# Engine priority order - first match wins
-priority = ["directional", "arbitrage", "maker"]
+priority = ["directional", "arbitrage", "maker"]  # Engine priority
 
 [engines.arbitrage]
-# Enable arbitrage engine (exploits YES + NO < $1.00)
-enabled = true
-
-# Minimum margin in early phase, basis points (250 = 2.5%)
-min_margin_early_bps = 250
-
-# Minimum margin in mid phase, basis points
-min_margin_mid_bps = 150
-
-# Minimum margin in late phase, basis points
-min_margin_late_bps = 50
+enabled = true                  # Enable arbitrage engine
+min_margin_early_bps = 250      # Min margin early phase (bps)
+min_margin_mid_bps = 150        # Min margin mid phase (bps)
+min_margin_late_bps = 50        # Min margin late phase (bps)
 
 [engines.directional]
-# Enable directional engine (bets on price direction)
-enabled = true
-
-# Don't trade if less than this many seconds remain
-min_seconds_remaining = 60
-
-# Maximum combined cost of YES + NO (1.02 = 2% max overpay)
-max_combined_cost = 1.02
-
-# Maximum bid-ask spread in basis points
-max_spread_bps = 1500
-
-# Minimum favorable depth in USDC on our side of the book
-min_favorable_depth = 50.0
-
-# ATR multiplier threshold for "strong" signal in late phase, basis points
-strong_threshold_late_bps = 9
-
-# ATR multiplier threshold for "lean" signal in late phase, basis points
-lean_threshold_late_bps = 6
-
-# Confidence ratio for strong UP signal
-strong_up_ratio = 0.82
-
-# Confidence ratio for lean UP signal
-lean_up_ratio = 0.65
-
-# Confidence ratio for neutral (no signal)
-neutral_ratio = 0.50
-
-# Maximum edge factor required at window start (0.08 = 8% EV)
-# Lower values trade more frequently, higher values are more selective
-max_edge_factor = 0.01
+enabled = true                  # Enable directional engine
+min_seconds_remaining = 60      # Don't trade below this time
+max_combined_cost = 1.02        # Max YES+NO cost (1.02 = 2% overpay)
+max_spread_bps = 1500           # Max bid-ask spread (bps)
+min_favorable_depth = 50.0      # Min depth on our side (USDC)
+strong_threshold_late_bps = 9   # ATR multiplier for "strong" signal
+lean_threshold_late_bps = 6     # ATR multiplier for "lean" signal
+strong_up_ratio = 0.82          # Confidence ratio for strong UP
+lean_up_ratio = 0.65            # Confidence ratio for lean UP
+neutral_ratio = 0.50            # Confidence ratio for neutral
+max_edge_factor = 0.01          # Max edge at window start (0.01 = 1% EV)
 
 [engines.maker]
-# Enable market maker engine (provide liquidity, collect spread)
-enabled = false
-
-# Don't provide liquidity if less than this many seconds remain
-min_seconds_remaining = 120
-
-# Minimum spread to capture in basis points
-min_spread_bps = 100
-
-# Maximum spread - don't quote if spread is wider than this
-max_spread_bps = 1000
-
-# Default order size for market making in USDC
-default_order_size = 50.0
+enabled = false                 # Enable market maker engine
+min_seconds_remaining = 120     # Don't provide liquidity below this
+min_spread_bps = 100            # Min spread to capture (bps)
+max_spread_bps = 1000           # Max spread - don't quote wider
+default_order_size = 50.0       # Default order size (USDC)
 
 [observability]
-# Capture trading decisions to ClickHouse
-capture_decisions = true
-
-# Capture counterfactual analysis (what-if scenarios)
-capture_counterfactuals = true
-
-# Enable anomaly detection alerts
-detect_anomalies = true
-
-# Channel buffer size for async event processing
-channel_buffer_size = 10000
-
-# Batch size for database writes
-batch_size = 1000
-
-# Seconds between database flushes
-flush_interval_secs = 5
-
-# Enable alert notifications
-alerts_enabled = false
+capture_decisions = true        # Capture decisions to ClickHouse
+capture_counterfactuals = true  # Capture what-if scenarios
+detect_anomalies = true         # Enable anomaly detection
+channel_buffer_size = 10000     # Async event buffer size
+batch_size = 1000               # Database write batch size
+flush_interval_secs = 5         # Database flush interval
+alerts_enabled = false          # Enable alert notifications
 
 [dashboard]
-# Enable web dashboard
-enabled = true
-
-# WebSocket port for real-time updates
-websocket_port = 3001
-
-# REST API port for dashboard data
-api_port = 3002
-
-# Milliseconds between WebSocket broadcasts
-broadcast_interval_ms = 500
-
-# Seconds between P&L snapshots
-pnl_snapshot_interval_secs = 10
-
-# Channel capacity for dashboard events
-channel_capacity = 10000
-
-# Log when events are dropped due to full channel
-log_drops = true
-
-# Only log drops after this many consecutive drops
-drop_log_threshold = 100
-
-# Batch size for dashboard database writes
-batch_size = 100
-
-# Seconds between dashboard database flushes
-flush_interval_secs = 5
-
-# Maximum buffer size for dashboard events
-max_buffer_size = 10000
+enabled = true                  # Enable web dashboard
+websocket_port = 3001           # WebSocket port
+api_port = 3002                 # REST API port
+broadcast_interval_ms = 500     # WebSocket broadcast interval (ms)
+pnl_snapshot_interval_secs = 10 # P&L snapshot interval
+channel_capacity = 10000        # Dashboard event channel capacity
+log_drops = true                # Log dropped events
+drop_log_threshold = 100        # Log after this many drops
+batch_size = 100                # Dashboard DB batch size
+flush_interval_secs = 5         # Dashboard DB flush interval
+max_buffer_size = 10000         # Max dashboard event buffer
