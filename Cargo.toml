@@ -65,6 +65,12 @@ hmac = "0.12"
 hex = "0.4"
 base64 = "0.22"
 
+# Polymarket official client
+polymarket-client-sdk = { version = "0.4", features = ["clob", "gamma"] }
+
+# Alloy for Ethereum types and signing (used by polymarket-client-sdk)
+alloy = { version = "1.4", features = ["signers", "signer-local"] }
+
 # UUID generation
 uuid = { version = "1.11", features = ["v4", "serde"] }
 

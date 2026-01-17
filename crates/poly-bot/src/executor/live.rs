@@ -43,7 +43,7 @@ use super::{
 };
 use crate::config::{ExecutionConfig, ShadowConfig, WalletConfig};
 
-/// Polymarket CLOB API endpoints.
+/// Polymarket CLOB API endpoints and contract addresses.
 pub mod endpoints {
     /// Production CLOB REST API.
     pub const CLOB_REST: &str = "https://clob.polymarket.com";
@@ -53,6 +53,10 @@ pub mod endpoints {
     pub const CHAIN_ID: u64 = 137;
     /// CTF Exchange contract address (Polygon mainnet).
     pub const CTF_EXCHANGE: &str = "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E";
+    /// Proxy wallet factory address (Polygon mainnet).
+    pub const PROXY_FACTORY: &str = "0xaB45c5A4B0c941a2F231C04C3f49182e1A254052";
+    /// EIP-1167 minimal proxy init code hash for CREATE2 derivation.
+    pub const PROXY_INIT_CODE_HASH: &str = "0xd21df8dc65880a8606f09fe0ce3df9b8869287ab0b058be05aa9e8af6330a00b";
 }
 
 /// Configuration for the live executor.
@@ -102,8 +106,10 @@ impl LiveExecutorConfig {
 /// Wallet for signing orders.
 #[derive(Clone)]
 pub struct Wallet {
-    /// Address derived from private key.
-    address: Address,
+    /// EOA address derived from private key (used for signing).
+    eoa_address: Address,
+    /// Proxy wallet address (where funds are held, used for API calls).
+    proxy_address: Address,
     /// Private key bytes (32 bytes).
     private_key: [u8; 32],
     /// API key for CLOB authentication.
@@ -117,7 +123,8 @@ pub struct Wallet {
 impl std::fmt::Debug for Wallet {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Wallet")
-            .field("address", &self.address)
+            .field("eoa_address", &self.eoa_address)
+            .field("proxy_address", &self.proxy_address)
             .field("private_key", &"[REDACTED]")
             .field("api_key", &"[REDACTED]")
             .finish()
@@ -136,10 +143,12 @@ pub struct ApiCredentials {
 impl Wallet {
     /// Create a new wallet from private key hex string with provided credentials.
     pub fn from_private_key(private_key_hex: &str, api_key: String, api_secret: String, api_passphrase: String) -> Result<Self, ExecutorError> {
-        let (address, private_key) = Self::parse_private_key(private_key_hex)?;
+        let (eoa_address, private_key) = Self::parse_private_key(private_key_hex)?;
+        let proxy_address = Self::derive_proxy_wallet(eoa_address)?;
 
         Ok(Self {
-            address,
+            eoa_address,
+            proxy_address,
             private_key,
             api_key,
             api_secret,
@@ -149,11 +158,13 @@ impl Wallet {
 
     /// Create a wallet from private key only (credentials will be derived).
     pub fn from_private_key_only(private_key_hex: &str) -> Result<(Self, [u8; 32]), ExecutorError> {
-        let (address, private_key) = Self::parse_private_key(private_key_hex)?;
+        let (eoa_address, private_key) = Self::parse_private_key(private_key_hex)?;
+        let proxy_address = Self::derive_proxy_wallet(eoa_address)?;
 
         // Return wallet with empty credentials - they'll be filled after derivation
         let wallet = Self {
-            address,
+            eoa_address,
+            proxy_address,
             private_key,
             api_key: String::new(),
             api_secret: String::new(),
@@ -161,6 +172,45 @@ impl Wallet {
         };
 
         Ok((wallet, private_key))
+    }
+
+    /// Derive the Polymarket proxy wallet address from an EOA address using CREATE2.
+    ///
+    /// Polymarket uses EIP-1167 minimal proxy wallets. The proxy address is deterministically
+    /// derived from the EOA address using the formula:
+    /// proxy = CREATE2(factory, keccak256(eoa_address), PROXY_INIT_CODE_HASH)
+    fn derive_proxy_wallet(eoa_address: Address) -> Result<Address, ExecutorError> {
+        // Parse factory address
+        let factory = endpoints::PROXY_FACTORY
+            .parse::<Address>()
+            .map_err(|e| ExecutorError::Internal(format!("Invalid proxy factory address: {}", e)))?;
+
+        // Parse init code hash
+        let init_code_hash_hex = endpoints::PROXY_INIT_CODE_HASH
+            .strip_prefix("0x")
+            .unwrap_or(endpoints::PROXY_INIT_CODE_HASH);
+        let init_code_hash_bytes = hex::decode(init_code_hash_hex)
+            .map_err(|e| ExecutorError::Internal(format!("Invalid init code hash: {}", e)))?;
+
+        // Salt = keccak256(eoa_address) - address is 20 bytes, no padding
+        let mut salt_hasher = Keccak256::new();
+        salt_hasher.update(eoa_address.as_bytes());
+        let salt = salt_hasher.finalize();
+
+        // CREATE2 address = keccak256(0xff ++ factory ++ salt ++ init_code_hash)[12:]
+        let mut create2_hasher = Keccak256::new();
+        create2_hasher.update(&[0xff]);
+        create2_hasher.update(factory.as_bytes());
+        create2_hasher.update(&salt);
+        create2_hasher.update(&init_code_hash_bytes);
+        let create2_hash = create2_hasher.finalize();
+
+        // Address is the last 20 bytes
+        let proxy_bytes: [u8; 20] = create2_hash[12..32]
+            .try_into()
+            .map_err(|_| ExecutorError::Internal("Failed to derive proxy address".to_string()))?;
+
+        Ok(Address::from(proxy_bytes))
     }
 
     /// Set API credentials after derivation.
@@ -358,9 +408,19 @@ impl Wallet {
         Ok(Address::from(address_bytes))
     }
 
-    /// Get the wallet address.
+    /// Get the proxy wallet address (where funds are held, used for API calls).
     pub fn address(&self) -> Address {
-        self.address
+        self.proxy_address
+    }
+
+    /// Get the EOA address (used for signing).
+    pub fn eoa_address(&self) -> Address {
+        self.eoa_address
+    }
+
+    /// Get the proxy wallet address explicitly.
+    pub fn proxy_address(&self) -> Address {
+        self.proxy_address
     }
 
     /// Create L2 HMAC signature for API requests.
@@ -617,14 +677,15 @@ impl LiveExecutor {
             // Derive credentials from private key
             info!("Deriving API credentials from private key...");
             let (mut wallet, pk_bytes) = Wallet::from_private_key_only(private_key_hex)?;
-            let creds = Wallet::derive_api_credentials(wallet.address(), &pk_bytes).await?;
+            let creds = Wallet::derive_api_credentials(wallet.eoa_address(), &pk_bytes).await?;
             wallet.set_credentials(creds);
             wallet
         };
 
         info!(
-            address = %wallet.address(),
-            "Initialized LiveExecutor"
+            eoa = %wallet.eoa_address(),
+            proxy = %wallet.proxy_address(),
+            "Initialized LiveExecutor - proxy wallet is where funds should be"
         );
 
         // Create shadow manager if enabled
@@ -766,10 +827,10 @@ impl LiveExecutor {
             Side::Sell => 1u8,
         };
 
-        // Build struct hash
+        // Build struct hash (maker is the proxy wallet, signer is the EOA)
         let struct_hash = self.compute_struct_hash(
             salt,
-            &self.wallet.address(),
+            &self.wallet.proxy_address(),
             &request.token_id,
             maker_amount,
             taker_amount,
@@ -795,8 +856,8 @@ impl LiveExecutor {
 
         Ok(api::SignedOrder {
             salt,
-            maker: format!("{:?}", self.wallet.address()),
-            signer: format!("{:?}", self.wallet.address()),
+            maker: format!("{:?}", self.wallet.proxy_address()),
+            signer: format!("{:?}", self.wallet.eoa_address()),
             taker: "0x0000000000000000000000000000000000000000".to_string(),
             token_id: request.token_id.clone(),
             maker_amount: maker_amount.to_string(),

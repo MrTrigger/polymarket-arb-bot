@@ -20,14 +20,14 @@
 [general]
 mode = "paper"                    # paper, live, shadow, backtest
 assets = ["BTC"]                  # Assets to trade ["BTC", "ETH", "SOL", "XRP"]
-log_level = "warn"                # info, debug, trace
+log_level = "info"                # info, debug, trace
 window_duration = "15min"         # 15min or 1h
 
 [trading]
-# Position limits (USDC)
-max_position_per_market = 1000.0
-max_total_exposure = 5000.0
-base_order_size = 75.0  # Increased to ensure min order size is met
+# Position limits (USDC) - minimal for testing
+max_position_per_market = 10.0
+max_total_exposure = 20.0
+base_order_size = 5.0  # Small orders for testing
 # Defaults below
 min_margin_early_pct = 2.5
 min_margin_mid_pct = 1.5
@@ -72,6 +72,7 @@ max_wait_ms = 2000
 # Order execution mode: "limit" (maker with chase) or "market" (taker)
 execution_mode = "limit"
 chase_enabled = true
+test_trade_on_startup = true  # Fire a test trade on startup to verify order flow (enable after funding)
 chase_step_size = 0.001
 chase_check_interval_ms = 100
 max_chase_time_ms = 5000

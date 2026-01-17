@@ -374,6 +374,9 @@ pub struct ExecutionConfig {
 
     /// Order timeout (milliseconds).
     pub order_timeout_ms: u64,
+
+    /// Fire a test trade on startup to verify order flow (live mode only).
+    pub test_trade_on_startup: bool,
 }
 
 impl Default for ExecutionConfig {
@@ -386,6 +389,7 @@ impl Default for ExecutionConfig {
             max_chase_time_ms: 5000,
             paper_fill_latency_ms: 50,
             order_timeout_ms: 10000,
+            test_trade_on_startup: false,
         }
     }
 }
@@ -1492,6 +1496,7 @@ struct ExecutionToml {
     max_chase_time_ms: u64,
     paper_fill_latency_ms: u64,
     order_timeout_ms: u64,
+    test_trade_on_startup: bool,
 }
 
 impl Default for ExecutionToml {
@@ -1504,6 +1509,7 @@ impl Default for ExecutionToml {
             max_chase_time_ms: 5000,
             paper_fill_latency_ms: 50,
             order_timeout_ms: 10000,
+            test_trade_on_startup: false,
         }
     }
 }
@@ -1827,6 +1833,7 @@ impl From<TomlConfig> for BotConfig {
                 max_chase_time_ms: toml.execution.max_chase_time_ms,
                 paper_fill_latency_ms: toml.execution.paper_fill_latency_ms,
                 order_timeout_ms: toml.execution.order_timeout_ms,
+                test_trade_on_startup: toml.execution.test_trade_on_startup,
             },
             observability: ObservabilityConfig {
                 capture_decisions: toml.observability.capture_decisions,

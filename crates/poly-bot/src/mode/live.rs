@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 use tokio::sync::broadcast;
 use tracing::{error, info, warn};
 
@@ -30,8 +31,11 @@ use crate::dashboard::{
     create_shared_session_manager, end_shared_session, BotMode, DashboardIntegration, ExitReason,
     SharedSessionManager,
 };
-use crate::data_source::live::{LiveDataSource, LiveDataSourceConfig};
+use crate::data_source::live::{ActiveMarketsState, LiveDataSource, LiveDataSourceConfig};
+use crate::executor::chase::{ChaseConfig, PriceChaser};
 use crate::executor::live::{LiveExecutor, LiveExecutorConfig};
+use crate::executor::{OrderRequest, OrderType};
+use poly_common::types::{Outcome, Side};
 use crate::state::GlobalState;
 use crate::strategy::{StrategyConfig, StrategyLoop};
 
@@ -244,13 +248,13 @@ impl LiveMode {
         let discovery_config = self.config.discovery.clone();
         let _discovery_handle = tokio::spawn(common::run_market_discovery(
             discovery_config,
-            active_markets,
+            Arc::clone(&active_markets),
             event_sender,
             discovery_shutdown,
         ));
 
         // Create executor (derives API credentials if not provided)
-        let executor = LiveExecutor::new(
+        let mut executor = LiveExecutor::new(
             self.config.executor.clone(),
             &self.bot_config.wallet,
             Some(&self.bot_config.shadow),
@@ -276,6 +280,12 @@ impl LiveMode {
         // current_balance = actual Polymarket account balance
         self.state.metrics.set_allocated_balance(self.config.initial_balance);
         self.state.metrics.set_current_balance(real_balance);
+
+        // Execute test trade if configured
+        if self.bot_config.execution.test_trade_on_startup {
+            info!("🧪 Test trade enabled - waiting for markets...");
+            self.execute_test_trade(&mut executor, &active_markets).await;
+        }
 
         // Set up observability using shared function
         let (capture, obs_tasks) = common::setup_observability(
@@ -419,6 +429,108 @@ impl LiveMode {
         info!("Shutdown requested");
         self.state.control.request_shutdown();
         let _ = self.shutdown_tx.send(());
+    }
+
+    /// Execute a test trade on startup to verify the order flow.
+    ///
+    /// Places a small $1 limit order on a NO outcome to test:
+    /// - Order creation and signing
+    /// - CLOB API submission
+    /// - Price chasing
+    /// - Fill detection
+    async fn execute_test_trade(
+        &self,
+        executor: &mut LiveExecutor,
+        active_markets: &ActiveMarketsState,
+    ) {
+        // Wait for market discovery (up to 10 seconds)
+        let mut market_found = None;
+        for _ in 0..20 {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let markets = active_markets.read().await;
+            if let Some((event_id, market)) = markets.iter().next() {
+                market_found = Some((event_id.clone(), market.clone()));
+                break;
+            }
+        }
+
+        let Some((event_id, market)) = market_found else {
+            warn!("🧪 Test trade: No markets discovered after 10s, skipping test");
+            return;
+        };
+
+        info!(
+            event_id = %event_id,
+            asset = ?market.asset,
+            no_token = %market.no_token_id,
+            "🧪 Test trade: Found market"
+        );
+
+        // Create a small $1 test order on NO side at a low price
+        // Using $1 size and 0.05 price means we're bidding $0.05 for a NO share
+        // Price must be on 0.01 tick grid
+        let test_size = dec!(1);  // $1 worth
+        let test_price = dec!(0.05);  // Very low price to avoid fills and ceiling issues
+
+        let request = OrderRequest {
+            request_id: format!("test-{}", chrono::Utc::now().timestamp_millis()),
+            event_id: event_id.clone(),
+            token_id: market.no_token_id.clone(),
+            outcome: Outcome::No,
+            side: Side::Buy,
+            size: test_size,
+            price: Some(test_price),
+            order_type: OrderType::Gtc,
+            timeout_ms: Some(10000),
+            timestamp: chrono::Utc::now(),
+        };
+
+        info!(
+            size = %test_size,
+            price = %test_price,
+            token_id = %market.no_token_id,
+            "🧪 Test trade: Placing limit order"
+        );
+
+        // Create chaser with config from bot
+        let chase_config = ChaseConfig::from_execution_config(
+            self.bot_config.execution.chase_enabled,
+            self.bot_config.execution.chase_step_size,
+            self.bot_config.execution.chase_check_interval_ms,
+            self.bot_config.execution.max_chase_time_ms,
+            dec!(0.005), // 0.5% min margin
+        );
+        let chaser = PriceChaser::new(chase_config);
+
+        // Execute with chasing - use 0.50 as other leg (YES) price for ceiling calculation
+        // Ceiling = 1 - 0.50 - margin = ~0.49, so 0.05 is well below
+        let other_leg_price = dec!(0.50);
+        match chaser.chase_order(executor, request, other_leg_price).await {
+            Ok(result) => {
+                info!(
+                    filled_size = %result.filled_size,
+                    avg_price = %result.avg_price,
+                    iterations = result.iterations,
+                    reason = ?result.stop_reason,
+                    "🧪 Test trade: Chase completed"
+                );
+
+                if result.filled_size > Decimal::ZERO {
+                    info!(
+                        "✅ Test trade SUCCESS: Filled {} at avg price {}",
+                        result.filled_size, result.avg_price
+                    );
+                } else {
+                    info!(
+                        "⚠️ Test trade: No fills (order at {} may be too low), but order flow verified",
+                        test_price
+                    );
+                }
+            }
+            Err(e) => {
+                error!("❌ Test trade FAILED: {}", e);
+            }
+        }
     }
 }
 

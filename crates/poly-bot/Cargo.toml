@@ -59,6 +59,12 @@ hmac = { workspace = true }
 hex = { workspace = true }
 base64 = { workspace = true }
 
+# Polymarket official client
+polymarket-client-sdk = { workspace = true }
+
+# Alloy for Ethereum types and signing
+alloy = { workspace = true }
+
 # UUID for session/trade IDs
 uuid = { workspace = true }
 
