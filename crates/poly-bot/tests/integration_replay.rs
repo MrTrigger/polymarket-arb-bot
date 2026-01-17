@@ -12,6 +12,7 @@ use std::collections::BinaryHeap;
 use std::cmp::Ordering;
 
 use chrono::{Duration, Utc};
+use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 
 use poly_bot::{
@@ -161,6 +162,7 @@ fn test_market_event_display() {
         window_start: now,
         window_end: now + Duration::minutes(15),
         timestamp: now,
+        min_order_size: Decimal::ONE,
     });
     let display = format!("{}", open);
     assert!(display.contains("WindowOpen"));
@@ -302,6 +304,7 @@ fn test_window_open_event_fields() {
         window_start: now,
         window_end,
         timestamp: now,
+        min_order_size: Decimal::ONE,
     };
 
     assert_eq!(event.event_id, "event123");
@@ -573,6 +576,7 @@ async fn test_mock_replay_source_mixed_events() {
             window_start: now,
             window_end: now + Duration::minutes(15),
             timestamp: now + Duration::milliseconds(200),
+            min_order_size: Decimal::ONE,
         }),
     ];
 

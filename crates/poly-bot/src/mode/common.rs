@@ -89,6 +89,7 @@ pub async fn run_market_discovery(
                             window_start: market.window_start,
                             window_end: market.window_end,
                             timestamp: Utc::now(),
+                            min_order_size,
                         });
 
                         if let Err(e) = event_sender.send(window_event).await {

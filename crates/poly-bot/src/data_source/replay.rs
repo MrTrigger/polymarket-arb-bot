@@ -254,6 +254,7 @@ impl ReplayDataSource {
                 window_start,
                 window_end,
                 timestamp: discovered_at,
+                min_order_size: Decimal::ONE, // Default for replay (historical data)
             });
 
             self.event_queue.push(TimestampedEvent {

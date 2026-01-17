@@ -51,6 +51,7 @@ impl MockDataSource {
                 window_start: Utc::now(),
                 window_end: Utc::now() + Duration::minutes(15),
                 timestamp: Utc::now(),
+                min_order_size: Decimal::ONE,
             }),
             // Spot price update
             MarketEvent::SpotPrice(SpotPriceEvent {
@@ -93,6 +94,7 @@ impl MockDataSource {
                 window_start: Utc::now(),
                 window_end: Utc::now() + Duration::minutes(15),
                 timestamp: Utc::now(),
+                min_order_size: Decimal::ONE,
             }),
             // YES book with ask at 0.55
             MarketEvent::BookSnapshot(BookSnapshotEvent {
@@ -128,6 +130,7 @@ impl MockDataSource {
                 window_start: now,
                 window_end: now + Duration::minutes(15),
                 timestamp: now,
+                min_order_size: Decimal::ONE,
             }),
             // ETH market without arb
             MarketEvent::WindowOpen(WindowOpenEvent {
@@ -139,6 +142,7 @@ impl MockDataSource {
                 window_start: now,
                 window_end: now + Duration::minutes(15),
                 timestamp: now,
+                min_order_size: Decimal::ONE,
             }),
             // BTC YES book
             MarketEvent::BookSnapshot(BookSnapshotEvent {
@@ -471,6 +475,7 @@ async fn test_strategy_window_close_removes_market() {
             window_start: Utc::now(),
             window_end: Utc::now() + Duration::minutes(15),
             timestamp: Utc::now(),
+            min_order_size: Decimal::ONE,
         }),
         MarketEvent::WindowClose(WindowCloseEvent {
             event_id: "event1".to_string(),

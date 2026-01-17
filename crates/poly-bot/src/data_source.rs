@@ -210,6 +210,8 @@ pub struct WindowOpenEvent {
     pub window_end: DateTime<Utc>,
     /// Event timestamp.
     pub timestamp: DateTime<Utc>,
+    /// Minimum order size from market data.
+    pub min_order_size: Decimal,
 }
 
 /// Market window closed.
@@ -341,6 +343,7 @@ mod tests {
             window_start: Utc::now(),
             window_end: Utc::now() + chrono::Duration::minutes(15),
             timestamp: Utc::now(),
+            min_order_size: Decimal::ONE,
         };
 
         let market_event = MarketEvent::WindowOpen(open_event);

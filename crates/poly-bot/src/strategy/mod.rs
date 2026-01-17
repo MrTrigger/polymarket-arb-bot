@@ -359,6 +359,9 @@ impl TrackedMarket {
         let atr = event.asset.estimated_atr_15m();
 
         // Build PositionConfig with confidence params from StrategyConfig
+        // Use market's min_order_size, but ensure it's at least as large as config's max_order_size
+        // (if user set max_order_size=0, they want the smallest allowed by market)
+        let effective_min_order = event.min_order_size.max(strategy_config.max_order_size);
         let position_config = position::PositionConfig {
             total_budget: market_budget,
             atr,
@@ -371,8 +374,9 @@ impl TrackedMarket {
             time_conf_floor: strategy_config.time_conf_floor,
             dist_conf_floor: strategy_config.dist_conf_floor,
             dist_conf_per_atr: strategy_config.dist_conf_per_atr,
-            // Safety limits
-            max_order_size: strategy_config.max_order_size,
+            // Safety limits - min_order_size from market, max_order_size from config
+            min_order_size: event.min_order_size,
+            max_order_size: effective_min_order, // Use max(market_min, config_max)
             ..Default::default()
         };
 
@@ -2964,6 +2968,7 @@ mod tests {
             window_start: Utc::now(),
             window_end: Utc::now() + chrono::Duration::minutes(15),
             timestamp: Utc::now(),
+            min_order_size: Decimal::ONE,
         })
     }
 
@@ -3457,6 +3462,7 @@ mod tests {
             window_start: Utc::now(),
             window_end: Utc::now() + chrono::Duration::minutes(15),
             timestamp: Utc::now(),
+            min_order_size: Decimal::ONE,
         };
 
         let market = TrackedMarket::new(&event, dec!(100), &StrategyConfig::default());

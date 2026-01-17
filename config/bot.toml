@@ -23,10 +23,11 @@ window_duration = "15min"       # "15min" or "1h"
 log_level = "info"              # "info", "debug", "trace"
 
 [trading]
-available_balance = 100.0       # Total capital for trading (USDC)
-max_position_per_market = 10.0  # Max position size per market (USDC)
-max_total_exposure = 20.0       # Max total exposure across all markets (USDC)
-max_order_size = 10.0           # Max single order size (USDC) - safety cap
+available_balance = 200.0       # Total capital for trading (USDC)
+max_position_per_market = 50.0  # Max position size per market (USDC)
+max_total_exposure = 50.0       # Max total exposure across all markets (USDC)
+max_order_size = 0              # Max single order size (USDC) - safety cap. 
+                                # Set to 0 for min order size
 
 # --- Margin thresholds (advanced) ---
 min_margin_early_pct = 2.5      # Min margin in early phase (>5min), %
@@ -37,7 +38,7 @@ mid_threshold_secs = 120        # Seconds to consider "mid" phase
 min_time_remaining_secs = 30    # Don't trade below this
 
 [risk]
-max_daily_loss = 50.0           # Stop trading if daily loss exceeds (USDC)
+max_daily_loss = 20.0           # Stop trading if daily loss exceeds (USDC)
 
 # --- Advanced risk settings ---
 risk_mode = "both"              # "arb", "directional", or "both"

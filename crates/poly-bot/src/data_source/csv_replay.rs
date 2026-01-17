@@ -227,6 +227,7 @@ impl CsvReplayDataSource {
                     window_start: row.window_start,
                     window_end: row.window_end,
                     timestamp: row.window_start, // Use window_start as event timestamp
+                    min_order_size: Decimal::ONE, // Default for replay (historical data)
                 });
 
                 self.event_queue.push(TimestampedEvent {
