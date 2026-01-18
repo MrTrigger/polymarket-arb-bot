@@ -337,6 +337,8 @@ struct TrackedMarket {
     /// Phase-based position manager for this market.
     /// Controls when/how much to trade based on confidence and budget.
     position_manager: position::PositionManager,
+    /// Minimum order size in shares (from CLOB API).
+    min_order_size: Decimal,
     /// True if a directional order is currently in-flight (placed but not yet filled/cancelled).
     /// Prevents duplicate order spam while waiting for order confirmation.
     pending_directional: bool,
@@ -359,9 +361,8 @@ impl TrackedMarket {
         let atr = event.asset.estimated_atr_15m();
 
         // Build PositionConfig with confidence params from StrategyConfig
-        // Use market's min_order_size, but ensure it's at least as large as config's max_order_size
-        // (if user set max_order_size=0, they want the smallest allowed by market)
-        let effective_min_order = event.min_order_size.max(strategy_config.max_order_size);
+        // Note: PositionConfig uses USDC limits for budget tracking
+        // Share-based min_order_size validation happens in execute_directional
         let position_config = position::PositionConfig {
             total_budget: market_budget,
             atr,
@@ -374,11 +375,12 @@ impl TrackedMarket {
             time_conf_floor: strategy_config.time_conf_floor,
             dist_conf_floor: strategy_config.dist_conf_floor,
             dist_conf_per_atr: strategy_config.dist_conf_per_atr,
-            // Safety limits - min_order_size from market, max_order_size from config
-            min_order_size: event.min_order_size,
-            max_order_size: effective_min_order, // Use max(market_min, config_max)
             ..Default::default()
         };
+
+        // Calculate effective min order size in shares: max(market_min, config_max)
+        // (if user set max_order_size=0, they want the smallest allowed by market)
+        let effective_min_order = event.min_order_size.max(strategy_config.max_order_size);
 
         // Track if we have official strike price from API
         let has_official_strike = !event.strike_price.is_zero();
@@ -398,6 +400,7 @@ impl TrackedMarket {
             no_toxic_warning: None,
             active_maker_orders: HashMap::new(),
             position_manager: position::PositionManager::new(position_config),
+            min_order_size: effective_min_order, // Use max(market_min, config_max) in shares
             pending_directional: false,
             last_directional_order_time: None,
         }
@@ -543,7 +546,7 @@ pub struct StrategyConfig {
     /// Whether running in backtest mode (disables price chasing).
     pub is_backtest: bool,
 
-    /// Maximum order size - hard cap on any single order (USDC).
+    /// Maximum order size in shares - hard cap per order (0 = use market min).
     pub max_order_size: Decimal,
 }
 
@@ -572,7 +575,7 @@ impl Default for StrategyConfig {
             lean_up_ratio: dec!(0.65),
             execution: crate::config::ExecutionConfig::default(),
             is_backtest: false,
-            max_order_size: dec!(100), // $100 hard cap on single order
+            max_order_size: dec!(100), // 100 shares hard cap per order
         }
     }
 }
@@ -982,6 +985,7 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                     );
                     market.state.strike_price = event.price;
                     market.strike_price = event.price; // Also update the TrackedMarket field
+                    market.has_official_strike = true; // Mark as having strike so it can trade
 
                     // Also update ActiveWindow in GlobalState for dashboard display
                     if let Some(mut window) = self.state.market_data.active_windows.get_mut(&market.event_id) {
@@ -2131,50 +2135,72 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
         let up_ratio = dec!(0.5) + directional_confidence * dec!(0.45);
         let down_ratio = Decimal::ONE - up_ratio;
 
-        let mut up_size = total_size * up_ratio;
-        let mut down_size = total_size * down_ratio;
+        let up_size = total_size * up_ratio;
+        let down_size = total_size * down_ratio;
 
-        // Calculate share counts to check for position flip
-        let up_shares = if up_price > Decimal::ZERO { up_size / up_price } else { Decimal::ZERO };
-        let down_shares = if down_price > Decimal::ZERO { down_size / down_price } else { Decimal::ZERO };
+        // Calculate share counts - the executor expects shares, not USDC
+        let mut up_shares = if up_price > Decimal::ZERO { up_size / up_price } else { Decimal::ZERO };
+        let mut down_shares = if down_price > Decimal::ZERO { down_size / down_price } else { Decimal::ZERO };
+
+        // Get min_order_size (in shares) - max(market_min, config_max)
+        let min_shares = market.min_order_size;
+
+        // Round shares to whole numbers (executor will do this anyway)
+        up_shares = up_shares.round_dp(0);
+        down_shares = down_shares.round_dp(0);
+
+        // Check minimum shares - if either leg is below minimum, skip it
+        let up_valid = up_shares >= min_shares;
+        let down_valid = down_shares >= min_shares;
+
+        if !up_valid && !down_valid {
+            debug!(
+                "Both legs below minimum shares: up={} down={} min={}",
+                up_shares, down_shares, min_shares
+            );
+            return Ok(TradeAction::SkipSizing);
+        }
 
         // Prevent position flip: hedge shares must not exceed main shares
         if up_ratio > down_ratio {
-            // Main direction is UP - ensure down_shares < up_shares
+            // Main direction is UP - cap down_shares to not exceed up_shares
             if down_shares > up_shares && up_shares > Decimal::ZERO {
-                let max_hedge_dollars = up_shares * down_price;
-                down_size = max_hedge_dollars.min(down_size);
+                down_shares = up_shares;
                 debug!(
-                    "Capped DOWN hedge to prevent flip: {} shares -> {} dollars",
-                    up_shares, down_size
+                    "Capped DOWN hedge to prevent flip: {} shares",
+                    down_shares
                 );
             }
         } else if down_ratio > up_ratio {
-            // Main direction is DOWN - ensure up_shares < down_shares
+            // Main direction is DOWN - cap up_shares to not exceed down_shares
             if up_shares > down_shares && down_shares > Decimal::ZERO {
-                let max_hedge_dollars = down_shares * up_price;
-                up_size = max_hedge_dollars.min(up_size);
+                up_shares = down_shares;
                 debug!(
-                    "Capped UP hedge to prevent flip: {} shares -> {} dollars",
-                    down_shares, up_size
+                    "Capped UP hedge to prevent flip: {} shares",
+                    up_shares
                 );
             }
         }
+
+        // Re-check validity after capping (shares may have dropped below minimum)
+        let up_valid = up_shares >= min_shares;
+        let down_valid = down_shares >= min_shares;
 
         // Extract token IDs before we need to borrow self.markets mutably
         let yes_token_id = market.yes_token_id.clone();
         let no_token_id = market.no_token_id.clone();
 
         info!(
-            "Directional trade: {} signal={:?} distance={:.4}% conf={:.2}x up_size={} down_size={} up_price={} down_price={}",
+            "Directional trade: {} signal={:?} distance={:.4}% conf={:.2}x up_shares={} down_shares={} up_price={} down_price={} min={}",
             event_id,
             opportunity.signal,
             opportunity.distance * Decimal::ONE_HUNDRED,
             opportunity.confidence.total_multiplier(),
-            up_size,
-            down_size,
+            up_shares,
+            down_shares,
             up_price,
-            down_price
+            down_price,
+            min_shares
         );
 
         // Generate request IDs
@@ -2198,15 +2224,15 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             crate::config::ExecutionMode::Market => (OrderType::Ioc, false),
         };
 
-        // Place UP (YES) order if size is significant
-        if up_size >= Decimal::ONE {
+        // Place UP (YES) order if shares meet minimum
+        if up_valid {
             let up_order = OrderRequest {
                 request_id: format!("dir-{}-up", req_id_base),
                 event_id: event_id.clone(),
                 token_id: yes_token_id.clone(),
                 outcome: Outcome::Yes,
                 side: Side::Buy,
-                size: up_size,
+                size: up_shares,  // Pass shares, not dollars
                 price: Some(up_price),
                 order_type,
                 timeout_ms: None,
@@ -2295,15 +2321,15 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             }
         }
 
-        // Place DOWN (NO) order if size is significant
-        if down_size >= Decimal::ONE {
+        // Place DOWN (NO) order if shares meet minimum
+        if down_valid {
             let down_order = OrderRequest {
                 request_id: format!("dir-{}-down", req_id_base),
                 event_id: event_id.clone(),
                 token_id: no_token_id.clone(),
                 outcome: Outcome::No,
                 side: Side::Buy,
-                size: down_size,
+                size: down_shares,  // Pass shares, not dollars
                 price: Some(down_price),
                 order_type,
                 timeout_ms: None,

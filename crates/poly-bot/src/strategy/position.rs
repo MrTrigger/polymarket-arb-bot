@@ -102,9 +102,9 @@ impl std::fmt::Display for Phase {
 pub struct PositionConfig {
     /// Total budget for this market (in USDC).
     pub total_budget: Decimal,
-    /// Minimum order size (default $1.00).
+    /// Minimum USDC per order for budget tracking (default $1).
     pub min_order_size: Decimal,
-    /// Maximum order size - hard cap on any single order (default $100).
+    /// Maximum USDC per order for budget capping (default $100).
     pub max_order_size: Decimal,
     /// Maximum single-side exposure (default 0.80 = 80%).
     pub max_single_side_exposure: Decimal,
@@ -152,11 +152,11 @@ impl Default for PositionConfig {
     fn default() -> Self {
         Self {
             total_budget: dec!(100),
-            min_order_size: dec!(1),
-            max_order_size: dec!(100), // Hard cap on single order
+            min_order_size: dec!(5),   // $5 minimum USDC (ensures 5+ shares at typical prices)
+            max_order_size: dec!(100), // $100 USDC cap for budget tracking
             max_single_side_exposure: dec!(0.80),
             min_hedge_ratio: dec!(0.20),
-            trades_per_phase: 15,
+            trades_per_phase: 5,       // Fewer larger trades to meet share minimums
             atr: dec!(100), // Default ATR suitable for BTC
             // Legacy phase-based thresholds (used when max_edge_factor = 0)
             early_threshold: dec!(0.80),
@@ -298,6 +298,11 @@ impl PositionManager {
             down_exposure: Decimal::ZERO,
             trade_count: 0,
         }
+    }
+
+    /// Get the configuration.
+    pub fn config(&self) -> &PositionConfig {
+        &self.config
     }
 
     /// Create with just a budget (uses default config).

@@ -122,7 +122,8 @@ pub struct TradingConfig {
     /// Base order size (USDC). Used by limit-based sizing.
     pub base_order_size: Decimal,
 
-    /// Maximum order size (USDC). Hard cap on any single order.
+    /// Maximum order size (shares). Hard cap on any single order.
+    /// Set to 0 to use the market's minimum order size.
     pub max_order_size: Decimal,
 
     /// Window time boundary for "early" phase (seconds).
@@ -249,7 +250,7 @@ impl Default for TradingConfig {
             max_position_per_market: Decimal::new(1000, 0), // $1000
             max_total_exposure: Decimal::new(5000, 0),      // $5000
             base_order_size: Decimal::new(50, 0),           // $50
-            max_order_size: Decimal::new(100, 0),           // $100 hard cap
+            max_order_size: Decimal::new(100, 0),           // 100 shares hard cap
             early_threshold_secs: 300, // 5 minutes
             mid_threshold_secs: 120,   // 2 minutes
             sizing: SizingConfig::default(),

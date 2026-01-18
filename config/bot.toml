@@ -26,8 +26,8 @@ log_level = "info"              # "info", "debug", "trace"
 available_balance = 200.0       # Total capital for trading (USDC)
 max_position_per_market = 50.0  # Max position size per market (USDC)
 max_total_exposure = 50.0       # Max total exposure across all markets (USDC)
-max_order_size = 0              # Max single order size (USDC) - safety cap. 
-                                # Set to 0 for min order size
+max_order_size = 0              # Max single order size (shares) - safety cap.
+                                # Set to 0 to use market's min_order_size
 
 # --- Margin thresholds (advanced) ---
 min_margin_early_pct = 2.5      # Min margin in early phase (>5min), %
