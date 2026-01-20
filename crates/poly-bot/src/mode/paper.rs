@@ -35,7 +35,7 @@ use crate::dashboard::{
 };
 use crate::data_source::live::{LiveDataSource, LiveDataSourceConfig};
 use crate::executor::simulated::{SimulatedExecutor, SimulatedExecutorConfig};
-use crate::state::GlobalState;
+use crate::state::{BotStatus, GlobalState};
 use crate::strategy::{StrategyConfig, StrategyLoop};
 
 use super::common;
@@ -310,8 +310,9 @@ impl PaperMode {
             strategy = common::setup_observability_forwarding(strategy, cap);
         }
 
-        // Enable trading
+        // Enable trading and set status
         self.state.enable_trading();
+        self.state.control.set_status(BotStatus::Trading);
         info!("Paper trading enabled");
 
         // Run strategy loop

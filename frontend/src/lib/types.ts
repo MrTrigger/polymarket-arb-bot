@@ -245,6 +245,30 @@ export interface Trade {
 // Control State
 // ============================================================================
 
+/** Bot status values. */
+export type BotStatusValue =
+  | "initializing"
+  | "setting_allowances"
+  | "connecting"
+  | "ready"
+  | "trading"
+  | "paused"
+  | "circuit_breaker"
+  | "shutting_down"
+  | "error";
+
+/** Bot mode values. */
+export type BotModeValue = "paper" | "live";
+
+/** Allowance status values. */
+export type AllowanceStatusValue =
+  | "unknown"
+  | "checking"
+  | "sufficient"
+  | "needs_approval"
+  | "pending"
+  | "failed";
+
 /**
  * Control flags state for dashboard.
  */
@@ -259,6 +283,16 @@ export interface ControlState {
   circuit_breaker_trip_time: string | null;
   /** Whether shutdown has been requested. */
   shutdown_requested: boolean;
+  /** Current bot status. */
+  bot_status: BotStatusValue;
+  /** Current operating mode. */
+  current_mode: BotModeValue;
+  /** Allowance status for live trading. */
+  allowance_status: AllowanceStatusValue;
+  /** Number of pending orders in flight. */
+  pending_orders_count: number;
+  /** Error message if in error state. */
+  error_message: string | null;
 }
 
 // ============================================================================
@@ -340,6 +374,17 @@ export interface EquityPoint {
   total_exposure: string;
   /** Trade count at this point. */
   trade_count: number;
+}
+
+/**
+ * Data point for the equity curve chart.
+ * Simplified format for lightweight-charts.
+ */
+export interface EquityDataPoint {
+  /** Unix timestamp in seconds. */
+  time: number;
+  /** P&L value in USDC. */
+  value: number;
 }
 
 // ============================================================================

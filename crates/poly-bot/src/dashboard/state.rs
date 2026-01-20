@@ -472,6 +472,12 @@ pub struct ControlState {
 
     /// Whether shutdown has been requested.
     pub shutdown_requested: bool,
+
+    /// Current bot status (initializing, trading, paused, etc.).
+    pub bot_status: String,
+
+    /// Current bot mode (paper, live).
+    pub current_mode: String,
 }
 
 impl ControlState {
@@ -490,6 +496,8 @@ impl ControlState {
             consecutive_failures: flags.consecutive_failures.load(Ordering::Acquire),
             circuit_breaker_trip_time: trip_time,
             shutdown_requested: flags.shutdown_requested.load(Ordering::Acquire),
+            bot_status: flags.get_status().as_str().to_string(),
+            current_mode: flags.get_mode().as_str().to_string(),
         }
     }
 }

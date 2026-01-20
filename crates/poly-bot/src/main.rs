@@ -240,11 +240,14 @@ async fn start_dashboard_servers(
     // Configure and start WebSocket server
     let ws_config = WebSocketServerConfig::from_dashboard_config(config);
     let (ws_server, ws_handle) =
-        spawn_websocket_server(ws_config, state_manager, global_state);
+        spawn_websocket_server(ws_config, state_manager, global_state.clone());
+
+    // Create shutdown channel for API server control endpoints
+    let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
 
     // Configure and start REST API server
     let api_config = ApiServerConfig::from_dashboard_config(config);
-    let api_handle = spawn_api_server(api_config, clickhouse);
+    let api_handle = spawn_api_server(api_config, clickhouse, Some(global_state), Some(shutdown_tx));
 
     Ok((ws_server, ws_handle, api_handle))
 }

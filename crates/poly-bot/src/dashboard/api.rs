@@ -13,9 +13,10 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
+use tokio::sync::broadcast;
 use chrono::{Duration, Utc};
 use clickhouse::Row;
 use reqwest::Client as HttpClient;
@@ -24,6 +25,8 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use poly_common::ClickHouseClient;
+
+use crate::state::{BotMode, BotStatus, GlobalState};
 
 // ============================================================================
 // API Types
@@ -245,11 +248,32 @@ pub struct MarketSessionApiRow {
 #[derive(Clone)]
 pub struct ApiState {
     pub clickhouse: ClickHouseClient,
+    /// Global trading state for control endpoints.
+    pub global_state: Option<Arc<GlobalState>>,
+    /// Shutdown signal sender.
+    pub shutdown_tx: Option<broadcast::Sender<()>>,
 }
 
 impl ApiState {
     pub fn new(clickhouse: ClickHouseClient) -> Self {
-        Self { clickhouse }
+        Self {
+            clickhouse,
+            global_state: None,
+            shutdown_tx: None,
+        }
+    }
+
+    /// Create with global state for control endpoints.
+    pub fn with_global_state(
+        clickhouse: ClickHouseClient,
+        global_state: Arc<GlobalState>,
+        shutdown_tx: broadcast::Sender<()>,
+    ) -> Self {
+        Self {
+            clickhouse,
+            global_state: Some(global_state),
+            shutdown_tx: Some(shutdown_tx),
+        }
     }
 }
 
@@ -726,6 +750,226 @@ async fn get_spot_prices(
 }
 
 // ============================================================================
+// Control API Handlers
+// ============================================================================
+
+/// Response for control endpoints.
+#[derive(Debug, Serialize)]
+pub struct ControlResponse {
+    pub success: bool,
+    pub message: String,
+}
+
+impl ControlResponse {
+    pub fn ok(message: impl Into<String>) -> Self {
+        Self {
+            success: true,
+            message: message.into(),
+        }
+    }
+
+    pub fn error(message: impl Into<String>) -> Self {
+        Self {
+            success: false,
+            message: message.into(),
+        }
+    }
+}
+
+/// POST /api/control/pause - Pause trading.
+async fn pause_trading(
+    State(state): State<Arc<ApiState>>,
+) -> Result<Json<ControlResponse>, (StatusCode, Json<ApiError>)> {
+    let global_state = state.global_state.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ApiError::internal("Global state not available")),
+        )
+    })?;
+
+    global_state.disable_trading();
+    global_state.control.set_status(BotStatus::Paused);
+    info!("Trading paused via API");
+
+    Ok(Json(ControlResponse::ok("Trading paused")))
+}
+
+/// POST /api/control/resume - Resume trading.
+async fn resume_trading(
+    State(state): State<Arc<ApiState>>,
+) -> Result<Json<ControlResponse>, (StatusCode, Json<ApiError>)> {
+    let global_state = state.global_state.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ApiError::internal("Global state not available")),
+        )
+    })?;
+
+    // Check if circuit breaker is tripped
+    if global_state.control.circuit_breaker_tripped.load(std::sync::atomic::Ordering::Acquire) {
+        return Ok(Json(ControlResponse::error(
+            "Cannot resume: circuit breaker is tripped. Reset it first.",
+        )));
+    }
+
+    global_state.enable_trading();
+    global_state.control.set_status(BotStatus::Trading);
+    info!("Trading resumed via API");
+
+    Ok(Json(ControlResponse::ok("Trading resumed")))
+}
+
+/// POST /api/control/stop - Graceful shutdown.
+async fn stop_bot(
+    State(state): State<Arc<ApiState>>,
+) -> Result<Json<ControlResponse>, (StatusCode, Json<ApiError>)> {
+    let global_state = state.global_state.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ApiError::internal("Global state not available")),
+        )
+    })?;
+
+    global_state.control.request_shutdown();
+    info!("Shutdown requested via API");
+
+    // Send shutdown signal if available
+    if let Some(shutdown_tx) = &state.shutdown_tx {
+        let _ = shutdown_tx.send(());
+    }
+
+    Ok(Json(ControlResponse::ok("Shutdown initiated")))
+}
+
+/// POST /api/control/reset-circuit-breaker - Reset the circuit breaker.
+async fn reset_circuit_breaker(
+    State(state): State<Arc<ApiState>>,
+) -> Result<Json<ControlResponse>, (StatusCode, Json<ApiError>)> {
+    let global_state = state.global_state.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ApiError::internal("Global state not available")),
+        )
+    })?;
+
+    global_state.reset_circuit_breaker();
+    global_state.control.set_status(BotStatus::Ready);
+    info!("Circuit breaker reset via API");
+
+    Ok(Json(ControlResponse::ok("Circuit breaker reset")))
+}
+
+/// POST /api/control/cancel-all-orders - Cancel all pending orders.
+async fn cancel_all_orders(
+    State(state): State<Arc<ApiState>>,
+) -> Result<Json<ControlResponse>, (StatusCode, Json<ApiError>)> {
+    let global_state = state.global_state.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ApiError::internal("Global state not available")),
+        )
+    })?;
+
+    // Clear pending orders count
+    let pending = global_state.control.get_pending_orders();
+    global_state.control.clear_pending_orders();
+    info!(pending_orders = pending, "Cancelled all pending orders via API");
+
+    Ok(Json(ControlResponse::ok(format!(
+        "Cancelled {} pending orders",
+        pending
+    ))))
+}
+
+/// Request body for switching mode.
+#[derive(Debug, Deserialize)]
+pub struct SwitchModeRequest {
+    pub mode: String,
+}
+
+/// POST /api/control/switch-mode - Switch between paper and live mode.
+async fn switch_mode(
+    State(state): State<Arc<ApiState>>,
+    Json(request): Json<SwitchModeRequest>,
+) -> Result<Json<ControlResponse>, (StatusCode, Json<ApiError>)> {
+    let global_state = state.global_state.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ApiError::internal("Global state not available")),
+        )
+    })?;
+
+    let new_mode = match request.mode.to_lowercase().as_str() {
+        "paper" => BotMode::Paper,
+        "live" => BotMode::Live,
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ApiError::bad_request(format!(
+                    "Invalid mode: {}. Use 'paper' or 'live'.",
+                    request.mode
+                ))),
+            ));
+        }
+    };
+
+    let current_mode = global_state.control.get_mode();
+    if current_mode == new_mode {
+        return Ok(Json(ControlResponse::ok(format!(
+            "Already in {} mode",
+            new_mode.as_str()
+        ))));
+    }
+
+    // Check for open positions before switching to paper
+    let total_exposure = global_state.market_data.total_exposure();
+    if total_exposure > rust_decimal::Decimal::ZERO {
+        warn!(
+            exposure = %total_exposure,
+            "Mode switch requested with open positions"
+        );
+        return Ok(Json(ControlResponse::error(format!(
+            "Cannot switch modes with open positions (exposure: ${}). Close positions first.",
+            total_exposure
+        ))));
+    }
+
+    global_state.control.set_mode(new_mode);
+    info!(mode = new_mode.as_str(), "Mode switched via API");
+
+    Ok(Json(ControlResponse::ok(format!(
+        "Switched to {} mode",
+        new_mode.as_str()
+    ))))
+}
+
+/// GET /api/control/status - Get current control status.
+async fn get_control_status(
+    State(state): State<Arc<ApiState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
+    let global_state = state.global_state.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ApiError::internal("Global state not available")),
+        )
+    })?;
+
+    let control = &global_state.control;
+
+    Ok(Json(serde_json::json!({
+        "trading_enabled": control.trading_enabled.load(std::sync::atomic::Ordering::Acquire),
+        "circuit_breaker_tripped": control.circuit_breaker_tripped.load(std::sync::atomic::Ordering::Acquire),
+        "consecutive_failures": control.consecutive_failures.load(std::sync::atomic::Ordering::Acquire),
+        "shutdown_requested": control.shutdown_requested.load(std::sync::atomic::Ordering::Acquire),
+        "bot_status": control.get_status().as_str(),
+        "current_mode": control.get_mode().as_str(),
+        "allowance_status": control.get_allowance_status().as_str(),
+        "pending_orders_count": control.get_pending_orders(),
+        "error_message": control.get_error_message(),
+    })))
+}
+
+// ============================================================================
 // Router Configuration
 // ============================================================================
 
@@ -772,6 +1016,14 @@ pub fn create_api_router(state: Arc<ApiState>) -> Router {
         .route("/api/sessions/{id}/logs", get(get_session_logs))
         .route("/api/sessions/{id}/markets", get(get_session_markets))
         .route("/api/prices/{asset}", get(get_spot_prices))
+        // Control endpoints
+        .route("/api/control/status", get(get_control_status))
+        .route("/api/control/pause", post(pause_trading))
+        .route("/api/control/resume", post(resume_trading))
+        .route("/api/control/stop", post(stop_bot))
+        .route("/api/control/reset-circuit-breaker", post(reset_circuit_breaker))
+        .route("/api/control/cancel-all-orders", post(cancel_all_orders))
+        .route("/api/control/switch-mode", post(switch_mode))
         .with_state(state)
 }
 
@@ -779,11 +1031,17 @@ pub fn create_api_router(state: Arc<ApiState>) -> Router {
 pub async fn run_api_server(
     config: ApiServerConfig,
     clickhouse: ClickHouseClient,
+    global_state: Option<Arc<GlobalState>>,
+    shutdown_tx: Option<broadcast::Sender<()>>,
 ) -> anyhow::Result<()> {
     use std::path::PathBuf;
     use tower_http::services::{ServeDir, ServeFile};
 
-    let state = Arc::new(ApiState::new(clickhouse));
+    let state = Arc::new(if let (Some(gs), Some(tx)) = (global_state, shutdown_tx) {
+        ApiState::with_global_state(clickhouse, gs, tx)
+    } else {
+        ApiState::new(clickhouse)
+    });
     let api_router = create_api_router(state);
 
     // Build the app with optional static file serving
@@ -841,8 +1099,10 @@ pub async fn run_api_server(
 pub fn spawn_api_server(
     config: ApiServerConfig,
     clickhouse: ClickHouseClient,
+    global_state: Option<Arc<GlobalState>>,
+    shutdown_tx: Option<broadcast::Sender<()>>,
 ) -> tokio::task::JoinHandle<anyhow::Result<()>> {
-    tokio::spawn(async move { run_api_server(config, clickhouse).await })
+    tokio::spawn(async move { run_api_server(config, clickhouse, global_state, shutdown_tx).await })
 }
 
 #[cfg(test)]

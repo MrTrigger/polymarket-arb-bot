@@ -8,6 +8,7 @@ import {
   SessionMetrics,
   AnomalyAlerts,
   AccountInfo,
+  ControlPanel,
 } from "@/components/dashboard";
 import { TrendingUp } from "lucide-react";
 
@@ -66,8 +67,11 @@ export function Dashboard() {
           </div>
         </div>
 
-        {/* Right column: Account Info, Equity Curve, Session Metrics, Circuit Breaker stacked */}
+        {/* Right column: Control Panel, Account Info, Equity Curve, Session Metrics, Circuit Breaker stacked */}
         <div className="flex min-h-0 flex-col gap-4 overflow-auto xl:col-span-4">
+          <div className="shrink-0">
+            <ControlPanel />
+          </div>
           <div className="shrink-0">
             <AccountInfo />
           </div>

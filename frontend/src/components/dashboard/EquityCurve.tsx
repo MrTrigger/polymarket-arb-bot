@@ -10,18 +10,9 @@ import {
   type Time,
 } from "lightweight-charts";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { useDashboardStore } from "@/lib/store";
+import { useDashboardStore, selectEquityCurveHistory } from "@/lib/store";
 import { parseDecimal } from "@/lib/types";
 import { TrendingUp } from "lucide-react";
-
-/**
- * Data point for the equity curve.
- * Stores timestamp and cumulative P&L value.
- */
-interface EquityDataPoint {
-  time: Time;
-  value: number;
-}
 
 /**
  * EquityCurve component displays a line chart of cumulative P&L over time.
@@ -40,11 +31,10 @@ export function EquityCurve() {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<"Line"> | null>(null);
-  const dataRef = useRef<EquityDataPoint[]>([]);
 
-  // Get current P&L from store
+  // Get equity curve history from store (persists across remounts)
+  const equityCurveHistory = useDashboardStore(selectEquityCurveHistory);
   const pnlUsdc = useDashboardStore((state) => state.snapshot?.metrics?.pnl_usdc);
-  const timestamp = useDashboardStore((state) => state.snapshot?.timestamp);
 
   // Initialize chart
   useEffect(() => {
@@ -137,40 +127,28 @@ export function EquityCurve() {
     };
   }, []);
 
-  // Update data when P&L changes
+  // Update chart when equity curve history changes
   useEffect(() => {
-    if (!seriesRef.current || !pnlUsdc || !timestamp) return;
+    if (!seriesRef.current || equityCurveHistory.length === 0) return;
 
-    const pnlValue = parseDecimal(pnlUsdc);
-    const timeValue = Math.floor(new Date(timestamp).getTime() / 1000) as Time;
-
-    // Check if we already have a point at this timestamp
-    const lastPoint = dataRef.current[dataRef.current.length - 1];
-
-    if (lastPoint && lastPoint.time === timeValue) {
-      // Update existing point
-      lastPoint.value = pnlValue;
-    } else {
-      // Add new point
-      dataRef.current.push({ time: timeValue, value: pnlValue });
-    }
-
-    // Keep only last 1000 points to prevent memory issues
-    if (dataRef.current.length > 1000) {
-      dataRef.current = dataRef.current.slice(-1000);
-    }
+    // Convert to lightweight-charts format
+    const chartData = equityCurveHistory.map((point) => ({
+      time: point.time as Time,
+      value: point.value,
+    }));
 
     // Update series with all data
-    seriesRef.current.setData(dataRef.current as LineData<Time>[]);
+    seriesRef.current.setData(chartData as LineData<Time>[]);
 
     // Update line color based on current P&L
+    const lastValue = equityCurveHistory[equityCurveHistory.length - 1]?.value ?? 0;
     seriesRef.current.applyOptions({
-      color: pnlValue >= 0 ? "#22c55e" : "#ef4444", // green-500 or red-500
+      color: lastValue >= 0 ? "#22c55e" : "#ef4444", // green-500 or red-500
     });
 
     // Scroll to latest data
     chartRef.current?.timeScale().scrollToRealTime();
-  }, [pnlUsdc, timestamp]);
+  }, [equityCurveHistory]);
 
   // Calculate current P&L for display
   const currentPnl = useMemo(() => {

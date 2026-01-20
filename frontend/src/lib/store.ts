@@ -5,6 +5,7 @@ import type {
   Anomaly,
   ControlState,
   DashboardSnapshot,
+  EquityDataPoint,
   LogEntry,
   MetricsSnapshot,
   Position,
@@ -21,6 +22,8 @@ export interface DashboardState {
   lastUpdate: Date | null;
   /** Whether we've received at least one snapshot. */
   initialized: boolean;
+  /** Equity curve history (persists across component remounts). */
+  equityCurveHistory: EquityDataPoint[];
 }
 
 /**
@@ -45,6 +48,7 @@ const initialState: DashboardState = {
   snapshot: null,
   lastUpdate: null,
   initialized: false,
+  equityCurveHistory: [],
 };
 
 /**
@@ -72,10 +76,35 @@ export const useDashboardStore = create<DashboardStore>()(
 
     // Actions
     updateFromSnapshot: (snapshot: DashboardSnapshot) => {
-      set({
-        snapshot,
-        lastUpdate: new Date(),
-        initialized: true,
+      set((state) => {
+        // Update equity curve history if we have P&L data
+        let newHistory = state.equityCurveHistory;
+        if (snapshot.metrics?.pnl_usdc && snapshot.timestamp) {
+          const pnlValue = parseFloat(snapshot.metrics.pnl_usdc);
+          const timeValue = Math.floor(new Date(snapshot.timestamp).getTime() / 1000);
+
+          // Check if we already have a point at this timestamp
+          const lastPoint = newHistory[newHistory.length - 1];
+          if (lastPoint && lastPoint.time === timeValue) {
+            // Update existing point (clone array to trigger re-render)
+            newHistory = [...newHistory.slice(0, -1), { time: timeValue, value: pnlValue }];
+          } else {
+            // Add new point
+            newHistory = [...newHistory, { time: timeValue, value: pnlValue }];
+          }
+
+          // Keep only last 10000 points to prevent memory issues
+          if (newHistory.length > 10000) {
+            newHistory = newHistory.slice(-10000);
+          }
+        }
+
+        return {
+          snapshot,
+          lastUpdate: new Date(),
+          initialized: true,
+          equityCurveHistory: newHistory,
+        };
       });
     },
 
@@ -260,5 +289,14 @@ export const selectTradesByEventId =
       (t) => t.event_id === eventId
     );
   };
+
+/**
+ * Select equity curve history.
+ */
+export const selectEquityCurveHistory = (
+  state: DashboardStore
+): EquityDataPoint[] => {
+  return state.equityCurveHistory;
+};
 
 export default useDashboardStore;

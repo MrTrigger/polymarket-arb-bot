@@ -9,7 +9,7 @@
 //! - All hot path reads must be lock-free
 //! - No Mutex locks on the trading path
 
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -17,9 +17,197 @@ use dashmap::DashMap;
 use parking_lot::RwLock;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use serde::{Deserialize, Serialize};
 
 use poly_common::types::{CryptoAsset, Outcome};
 use crate::dashboard::types::TradeRecord;
+
+// ============================================================================
+// Bot Status
+// ============================================================================
+
+/// Bot operational status.
+///
+/// Tracks the current state of the bot for display in the dashboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BotStatus {
+    /// Bot is initializing (loading config, connecting).
+    Initializing,
+    /// Setting up token allowances for trading.
+    SettingAllowances,
+    /// Connecting to data sources.
+    Connecting,
+    /// Connected and ready, but trading is disabled.
+    Ready,
+    /// Actively trading.
+    Trading,
+    /// Manually paused by user.
+    Paused,
+    /// Risk limit tripped (circuit breaker).
+    CircuitBreaker,
+    /// Graceful shutdown in progress.
+    ShuttingDown,
+    /// Error state with reason.
+    Error,
+}
+
+impl BotStatus {
+    /// Convert to u8 for atomic storage.
+    fn to_u8(self) -> u8 {
+        match self {
+            BotStatus::Initializing => 0,
+            BotStatus::SettingAllowances => 1,
+            BotStatus::Connecting => 2,
+            BotStatus::Ready => 3,
+            BotStatus::Trading => 4,
+            BotStatus::Paused => 5,
+            BotStatus::CircuitBreaker => 6,
+            BotStatus::ShuttingDown => 7,
+            BotStatus::Error => 8,
+        }
+    }
+
+    /// Convert from u8.
+    fn from_u8(value: u8) -> Self {
+        match value {
+            0 => BotStatus::Initializing,
+            1 => BotStatus::SettingAllowances,
+            2 => BotStatus::Connecting,
+            3 => BotStatus::Ready,
+            4 => BotStatus::Trading,
+            5 => BotStatus::Paused,
+            6 => BotStatus::CircuitBreaker,
+            7 => BotStatus::ShuttingDown,
+            _ => BotStatus::Error,
+        }
+    }
+
+    /// Get display name for the status.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BotStatus::Initializing => "initializing",
+            BotStatus::SettingAllowances => "setting_allowances",
+            BotStatus::Connecting => "connecting",
+            BotStatus::Ready => "ready",
+            BotStatus::Trading => "trading",
+            BotStatus::Paused => "paused",
+            BotStatus::CircuitBreaker => "circuit_breaker",
+            BotStatus::ShuttingDown => "shutting_down",
+            BotStatus::Error => "error",
+        }
+    }
+}
+
+impl Default for BotStatus {
+    fn default() -> Self {
+        BotStatus::Initializing
+    }
+}
+
+/// Bot operating mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BotMode {
+    /// Paper trading (simulated).
+    Paper,
+    /// Live trading (real money).
+    Live,
+}
+
+impl BotMode {
+    /// Convert to u8 for atomic storage.
+    fn to_u8(self) -> u8 {
+        match self {
+            BotMode::Paper => 0,
+            BotMode::Live => 1,
+        }
+    }
+
+    /// Convert from u8.
+    fn from_u8(value: u8) -> Self {
+        match value {
+            1 => BotMode::Live,
+            _ => BotMode::Paper,
+        }
+    }
+
+    /// Get display name for the mode.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BotMode::Paper => "paper",
+            BotMode::Live => "live",
+        }
+    }
+}
+
+impl Default for BotMode {
+    fn default() -> Self {
+        BotMode::Paper
+    }
+}
+
+/// Allowance status for live trading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AllowanceStatus {
+    /// Not checked yet.
+    Unknown,
+    /// Checking allowances in progress.
+    Checking,
+    /// Allowances are sufficient for trading.
+    Sufficient,
+    /// Allowances need to be set.
+    NeedsApproval,
+    /// Setting allowances in progress.
+    Pending,
+    /// Failed to set allowances.
+    Failed,
+}
+
+impl AllowanceStatus {
+    /// Convert to u8 for atomic storage.
+    fn to_u8(self) -> u8 {
+        match self {
+            AllowanceStatus::Unknown => 0,
+            AllowanceStatus::Checking => 1,
+            AllowanceStatus::Sufficient => 2,
+            AllowanceStatus::NeedsApproval => 3,
+            AllowanceStatus::Pending => 4,
+            AllowanceStatus::Failed => 5,
+        }
+    }
+
+    /// Convert from u8.
+    fn from_u8(value: u8) -> Self {
+        match value {
+            1 => AllowanceStatus::Checking,
+            2 => AllowanceStatus::Sufficient,
+            3 => AllowanceStatus::NeedsApproval,
+            4 => AllowanceStatus::Pending,
+            5 => AllowanceStatus::Failed,
+            _ => AllowanceStatus::Unknown,
+        }
+    }
+
+    /// Get display name for the status.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AllowanceStatus::Unknown => "unknown",
+            AllowanceStatus::Checking => "checking",
+            AllowanceStatus::Sufficient => "sufficient",
+            AllowanceStatus::NeedsApproval => "needs_approval",
+            AllowanceStatus::Pending => "pending",
+            AllowanceStatus::Failed => "failed",
+        }
+    }
+}
+
+impl Default for AllowanceStatus {
+    fn default() -> Self {
+        AllowanceStatus::Unknown
+    }
+}
 
 /// Global shared state for the trading bot.
 ///
@@ -299,6 +487,21 @@ pub struct ControlFlags {
 
     /// Graceful shutdown requested.
     pub shutdown_requested: AtomicBool,
+
+    /// Current bot status (uses BotStatus enum as u8).
+    pub bot_status: AtomicU8,
+
+    /// Current bot mode (0 = Paper, 1 = Live).
+    pub current_mode: AtomicU8,
+
+    /// Allowance status (uses AllowanceStatus enum as u8).
+    pub allowance_status: AtomicU8,
+
+    /// Number of pending orders currently in flight.
+    pub pending_orders_count: AtomicU32,
+
+    /// Error message for Error status (protected by RwLock since strings aren't atomic).
+    pub error_message: RwLock<Option<String>>,
 }
 
 impl ControlFlags {
@@ -310,6 +513,11 @@ impl ControlFlags {
             consecutive_failures: AtomicU32::new(0),
             circuit_breaker_trip_time: AtomicI64::new(0),
             shutdown_requested: AtomicBool::new(false),
+            bot_status: AtomicU8::new(BotStatus::Initializing.to_u8()),
+            current_mode: AtomicU8::new(BotMode::Paper.to_u8()),
+            allowance_status: AtomicU8::new(AllowanceStatus::Unknown.to_u8()),
+            pending_orders_count: AtomicU32::new(0),
+            error_message: RwLock::new(None),
         }
     }
 
@@ -317,12 +525,89 @@ impl ControlFlags {
     #[inline]
     pub fn request_shutdown(&self) {
         self.shutdown_requested.store(true, Ordering::Release);
+        self.set_status(BotStatus::ShuttingDown);
     }
 
     /// Check if shutdown was requested.
     #[inline]
     pub fn is_shutdown_requested(&self) -> bool {
         self.shutdown_requested.load(Ordering::Acquire)
+    }
+
+    /// Get current bot status.
+    #[inline]
+    pub fn get_status(&self) -> BotStatus {
+        BotStatus::from_u8(self.bot_status.load(Ordering::Acquire))
+    }
+
+    /// Set bot status.
+    #[inline]
+    pub fn set_status(&self, status: BotStatus) {
+        self.bot_status.store(status.to_u8(), Ordering::Release);
+    }
+
+    /// Set bot status with error message.
+    pub fn set_error(&self, message: impl Into<String>) {
+        *self.error_message.write() = Some(message.into());
+        self.set_status(BotStatus::Error);
+    }
+
+    /// Get error message if in error state.
+    pub fn get_error_message(&self) -> Option<String> {
+        self.error_message.read().clone()
+    }
+
+    /// Clear error state.
+    pub fn clear_error(&self) {
+        *self.error_message.write() = None;
+    }
+
+    /// Get current bot mode.
+    #[inline]
+    pub fn get_mode(&self) -> BotMode {
+        BotMode::from_u8(self.current_mode.load(Ordering::Acquire))
+    }
+
+    /// Set bot mode.
+    #[inline]
+    pub fn set_mode(&self, mode: BotMode) {
+        self.current_mode.store(mode.to_u8(), Ordering::Release);
+    }
+
+    /// Get allowance status.
+    #[inline]
+    pub fn get_allowance_status(&self) -> AllowanceStatus {
+        AllowanceStatus::from_u8(self.allowance_status.load(Ordering::Acquire))
+    }
+
+    /// Set allowance status.
+    #[inline]
+    pub fn set_allowance_status(&self, status: AllowanceStatus) {
+        self.allowance_status.store(status.to_u8(), Ordering::Release);
+    }
+
+    /// Get pending orders count.
+    #[inline]
+    pub fn get_pending_orders(&self) -> u32 {
+        self.pending_orders_count.load(Ordering::Acquire)
+    }
+
+    /// Increment pending orders count.
+    #[inline]
+    pub fn inc_pending_orders(&self) {
+        self.pending_orders_count.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Decrement pending orders count.
+    #[inline]
+    pub fn dec_pending_orders(&self) {
+        self.pending_orders_count.fetch_sub(1, Ordering::AcqRel);
+    }
+
+    /// Clear all pending orders.
+    #[inline]
+    pub fn clear_pending_orders(&self) {
+        self.pending_orders_count.store(0, Ordering::Release);
     }
 }
 

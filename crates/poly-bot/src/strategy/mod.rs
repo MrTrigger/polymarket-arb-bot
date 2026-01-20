@@ -2109,15 +2109,35 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
         // Convert USDC amounts to share counts
         // The executor expects size in SHARES, not USDC
         // shares = usdc_amount / price_per_share
-        let up_shares_final = if up_price > Decimal::ZERO {
+        let up_shares_raw = if up_price > Decimal::ZERO {
             (up_size / up_price).floor()
         } else {
             Decimal::ZERO
         };
-        let down_shares_final = if down_price > Decimal::ZERO {
+        let down_shares_raw = if down_price > Decimal::ZERO {
             (down_size / down_price).floor()
         } else {
             Decimal::ZERO
+        };
+
+        // If main leg is below minimum, scale both legs proportionally to maintain ratio
+        // This ensures we meet minimum order size without distorting the hedge ratio
+        let (up_shares_final, down_shares_final) = if up_ratio > down_ratio {
+            // UP is the main leg
+            if up_shares_raw > Decimal::ZERO && up_shares_raw < min_order_size {
+                let scale_factor = min_order_size / up_shares_raw;
+                (min_order_size, (down_shares_raw * scale_factor).floor())
+            } else {
+                (up_shares_raw, down_shares_raw)
+            }
+        } else {
+            // DOWN is the main leg
+            if down_shares_raw > Decimal::ZERO && down_shares_raw < min_order_size {
+                let scale_factor = min_order_size / down_shares_raw;
+                ((up_shares_raw * scale_factor).floor(), min_order_size)
+            } else {
+                (up_shares_raw, down_shares_raw)
+            }
         };
 
         info!(
