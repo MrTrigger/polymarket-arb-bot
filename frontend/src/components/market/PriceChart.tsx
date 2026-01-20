@@ -231,6 +231,9 @@ export function PriceChart({ market, trades }: PriceChartProps) {
         visible: false,
         borderColor: "#27272a",
       },
+      // Disable independent scrolling/scaling - this chart follows the price chart
+      handleScroll: false,
+      handleScale: false,
     } as Parameters<typeof createChart>[1]);
 
     // Confidence area series (filled)
@@ -281,24 +284,48 @@ export function PriceChart({ market, trades }: PriceChartProps) {
     };
   }, []);
 
-  // Sync time scales between charts
+  // Sync time scales between charts - price chart is the master
   useEffect(() => {
     if (!priceChartRef.current || !confChartRef.current) return;
 
     const priceTimeScale = priceChartRef.current.timeScale();
     const confTimeScale = confChartRef.current.timeScale();
 
+    // Flag to prevent sync loops
+    let isSyncing = false;
+
     const syncFromPrice = () => {
+      if (isSyncing) return;
+      isSyncing = true;
       const range = priceTimeScale.getVisibleLogicalRange();
       if (range) {
         confTimeScale.setVisibleLogicalRange(range);
       }
+      isSyncing = false;
+    };
+
+    // Also sync confidence to price (in case confidence chart auto-fits on data update)
+    const syncFromConfidence = () => {
+      if (isSyncing) return;
+      isSyncing = true;
+      // Get price chart range and re-apply it to confidence chart
+      // This ensures price chart is always the master
+      const range = priceTimeScale.getVisibleLogicalRange();
+      if (range) {
+        confTimeScale.setVisibleLogicalRange(range);
+      }
+      isSyncing = false;
     };
 
     priceTimeScale.subscribeVisibleLogicalRangeChange(syncFromPrice);
+    confTimeScale.subscribeVisibleLogicalRangeChange(syncFromConfidence);
+
+    // Initial sync
+    syncFromPrice();
 
     return () => {
       priceTimeScale.unsubscribeVisibleLogicalRangeChange(syncFromPrice);
+      confTimeScale.unsubscribeVisibleLogicalRangeChange(syncFromConfidence);
     };
   }, []);
 
