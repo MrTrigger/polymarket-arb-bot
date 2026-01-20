@@ -98,7 +98,7 @@ impl BacktestModeConfig {
         executor_config.fee_rate = Decimal::ZERO; // Polymarket has 0% maker fees
         executor_config.latency_ms = config.execution.paper_fill_latency_ms;
         executor_config.enforce_balance = true;
-        executor_config.max_position_per_market = config.trading.max_position_per_market;
+        executor_config.max_position_per_market = config.effective_trading_config().max_position_per_market;
         executor_config.min_fill_ratio = dec!(0.5);
 
         // Parse date range from config
@@ -121,7 +121,7 @@ impl BacktestModeConfig {
             data_source: replay_config,
             csv_data_dir: config.backtest.data_dir.clone(),
             executor: executor_config,
-            strategy: StrategyConfig::from_trading_config(&config.trading, (config.window_duration.minutes() * 60) as i64),
+            strategy: StrategyConfig::from_trading_config(config.effective_trading_config(), (config.window_duration.minutes() * 60) as i64),
             engines: config.engines.clone(),
             observability: config.observability.clone(),
             initial_balance: dec!(10000),
@@ -260,9 +260,9 @@ impl BacktestResult {
             fees_paid: stats.fees_paid, // Keep this from stats for now
             opportunities_detected: metrics.opportunities_detected,
             opportunities_skipped: metrics.trades_skipped,
-            win_rate: None, // Could be calculated from trade history
-            sharpe_ratio: None, // Would need return series
-            max_drawdown: None, // Would need balance history
+            win_rate: stats.win_rate(),
+            sharpe_ratio: stats.sharpe_ratio(),
+            max_drawdown: stats.max_drawdown_pct(),
             parameters: HashMap::new(),
             duration_secs,
         }
@@ -319,6 +319,32 @@ impl PnLReport {
             "Return:               {:.2}%\n\n",
             self.result.return_pct
         ));
+
+        report.push_str("─── RISK METRICS ──────────────────────────────────────────\n");
+        if let Some(win_rate) = self.result.win_rate {
+            report.push_str(&format!(
+                "Win Rate:             {:.1}%\n",
+                win_rate * dec!(100)
+            ));
+        } else {
+            report.push_str("Win Rate:             N/A (no settled markets)\n");
+        }
+        if let Some(sharpe) = self.result.sharpe_ratio {
+            report.push_str(&format!(
+                "Sharpe Ratio:         {:.2}\n",
+                sharpe
+            ));
+        } else {
+            report.push_str("Sharpe Ratio:         N/A (insufficient data)\n");
+        }
+        if let Some(max_dd) = self.result.max_drawdown {
+            report.push_str(&format!(
+                "Max Drawdown:         {:.2}%\n\n",
+                max_dd
+            ));
+        } else {
+            report.push_str("Max Drawdown:         N/A\n\n");
+        }
 
         report.push_str("─── TRADING ACTIVITY ──────────────────────────────────────\n");
         report.push_str(&format!(
@@ -429,9 +455,10 @@ fn run_backtest_task_blocking(
 
         let run_result = strategy.run().await;
 
-        // Get final metrics
+        // Get final metrics and simulation stats
         let final_balance = strategy.available_balance();
         let metrics = strategy.metrics();
+        let simulation_stats = strategy.simulation_stats().unwrap_or_default();
 
         // Shutdown strategy
         strategy.shutdown().await;
@@ -445,16 +472,15 @@ fn run_backtest_task_blocking(
             }
         }
 
-        // Build result
+        // Build result using actual simulation stats
         let duration_secs = start_instant.elapsed().as_secs_f64();
-        let default_stats = SimulatedStats::default();
 
         Ok(BacktestResult::new(
             config.data_source.start_time,
             config.data_source.end_time,
             config.initial_balance,
             final_balance,
-            &default_stats,
+            &simulation_stats,
             &metrics,
             duration_secs,
         ))
@@ -735,20 +761,20 @@ impl BacktestMode {
         // Graceful shutdown
         self.shutdown_strategy(&mut strategy, obs_tasks).await;
 
-        // Get final balance and metrics
+        // Get final balance, metrics, and simulation stats
         let final_balance = strategy.available_balance();
         let metrics = strategy.metrics();
+        let simulation_stats = strategy.simulation_stats().unwrap_or_default();
 
-        // Generate result using default stats (detailed stats tracked in metrics)
+        // Generate result using actual simulation stats
         let duration_secs = start_instant.elapsed().as_secs_f64();
-        let default_stats = SimulatedStats::default();
 
         let backtest_result = BacktestResult::new(
             self.config.data_source.start_time,
             self.config.data_source.end_time,
             self.config.initial_balance,
             final_balance,
-            &default_stats,
+            &simulation_stats,
             &metrics,
             duration_secs,
         );
@@ -1233,6 +1259,7 @@ mod tests {
             orders_rejected: 5,
             volume_traded: dec!(5000),
             fees_paid: dec!(5),
+            ..Default::default()
         };
 
         let metrics = crate::state::MetricsSnapshot {

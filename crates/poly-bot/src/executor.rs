@@ -406,6 +406,13 @@ pub trait Executor: Send + Sync {
     /// Shutdown the executor gracefully.
     async fn shutdown(&mut self);
 
+    /// Get simulation statistics (for backtest/paper trading).
+    ///
+    /// Returns None for live executors, Some for simulated executors.
+    fn simulation_stats(&self) -> Option<crate::executor::simulated::SimulatedStats> {
+        None
+    }
+
     /// Update order book for backtesting.
     ///
     /// For backtest execution, this updates the simulated order book state.

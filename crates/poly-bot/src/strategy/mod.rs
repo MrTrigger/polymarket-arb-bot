@@ -304,6 +304,8 @@ pub struct MultiEngineDecision {
     pub latency_us: u64,
 }
 
+/// Default minimum order size in shares for backtest (most common on Polymarket).
+
 /// Internal market state tracked by the strategy.
 #[derive(Debug)]
 #[allow(dead_code)] // Fields used for debugging and future features
@@ -333,10 +335,19 @@ struct TrackedMarket {
     /// Phase-based position manager for this market.
     /// Controls when/how much to trade based on confidence and budget.
     position_manager: position::PositionManager,
+    /// Minimum order size in shares (from CLOB API).
+    /// For backtest, uses BACKTEST_MIN_ORDER_SIZE (5 shares).
+    min_order_size: Decimal,
 }
 
 impl TrackedMarket {
-    fn new(event: &WindowOpenEvent, market_budget: Decimal, strategy_config: &StrategyConfig) -> Self {
+    /// Create a new TrackedMarket with specified min_order_size.
+    fn new(
+        event: &WindowOpenEvent,
+        market_budget: Decimal,
+        strategy_config: &StrategyConfig,
+        min_order_size: Decimal,
+    ) -> Self {
         let state = MarketState::new(
             event.event_id.clone(),
             event.asset,
@@ -377,7 +388,18 @@ impl TrackedMarket {
             no_toxic_warning: None,
             active_maker_orders: HashMap::new(),
             position_manager: position::PositionManager::new(position_config),
+            min_order_size,
         }
+    }
+
+    /// Create a new TrackedMarket with default min_order_size for backtest.
+    /// Uses 5 shares as the default (most common on Polymarket).
+    fn new_for_backtest(
+        event: &WindowOpenEvent,
+        market_budget: Decimal,
+        strategy_config: &StrategyConfig,
+    ) -> Self {
+        Self::new(event, market_budget, strategy_config, dec!(5))
     }
 
     /// Check if we should trade using phase-based position management.
@@ -1294,7 +1316,14 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
 
         // Create tracked market with phase-based position management
         // Pass strategy config so confidence params flow through to PositionManager
-        let market = TrackedMarket::new(&event, market_budget, &self.config);
+        // For backtest, use default min_order_size (5 shares) since we don't have API access
+        // For live, min_order_size should be fetched from CLOB API during discovery
+        let market = if self.config.is_backtest {
+            TrackedMarket::new_for_backtest(&event, market_budget, &self.config)
+        } else {
+            // For live trading, default to 5 shares (TODO: fetch from API in discovery)
+            TrackedMarket::new(&event, market_budget, &self.config, dec!(5))
+        };
 
         // Update token mapping
         self.token_to_event.insert(event.yes_token_id.clone(), event.event_id.clone());
@@ -2072,20 +2101,36 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             }
         }
 
-        // Extract token IDs before we need to borrow self.markets mutably
+        // Extract token IDs and min_order_size before we need to borrow self.markets mutably
         let yes_token_id = market.yes_token_id.clone();
         let no_token_id = market.no_token_id.clone();
+        let min_order_size = market.min_order_size;
+
+        // Convert USDC amounts to share counts
+        // The executor expects size in SHARES, not USDC
+        // shares = usdc_amount / price_per_share
+        let up_shares_final = if up_price > Decimal::ZERO {
+            (up_size / up_price).floor()
+        } else {
+            Decimal::ZERO
+        };
+        let down_shares_final = if down_price > Decimal::ZERO {
+            (down_size / down_price).floor()
+        } else {
+            Decimal::ZERO
+        };
 
         info!(
-            "Directional trade: {} signal={:?} distance={:.4}% conf={:.2}x up_size={} down_size={} up_price={} down_price={}",
+            "Directional trade: {} signal={:?} distance={:.4}% conf={:.2}x up_shares={} down_shares={} up_price={} down_price={} min_order_size={}",
             event_id,
             opportunity.signal,
             opportunity.distance * Decimal::ONE_HUNDRED,
             opportunity.confidence.total_multiplier(),
-            up_size,
-            down_size,
+            up_shares_final,
+            down_shares_final,
             up_price,
-            down_price
+            down_price,
+            min_order_size
         );
 
         // Generate request IDs
@@ -2109,15 +2154,15 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             crate::config::ExecutionMode::Market => (OrderType::Ioc, false),
         };
 
-        // Place UP (YES) order if size is significant
-        if up_size >= Decimal::ONE {
+        // Place UP (YES) order if share count meets minimum
+        if up_shares_final >= min_order_size {
             let up_order = OrderRequest {
                 request_id: format!("dir-{}-up", req_id_base),
                 event_id: event_id.clone(),
                 token_id: yes_token_id.clone(),
                 outcome: Outcome::Yes,
                 side: Side::Buy,
-                size: up_size,
+                size: up_shares_final, // Size in SHARES, not USDC
                 price: Some(up_price),
                 order_type,
                 timeout_ms: None,
@@ -2206,15 +2251,15 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             }
         }
 
-        // Place DOWN (NO) order if size is significant
-        if down_size >= Decimal::ONE {
+        // Place DOWN (NO) order if share count meets minimum
+        if down_shares_final >= min_order_size {
             let down_order = OrderRequest {
                 request_id: format!("dir-{}-down", req_id_base),
                 event_id: event_id.clone(),
                 token_id: no_token_id.clone(),
                 outcome: Outcome::No,
                 side: Side::Buy,
-                size: down_size,
+                size: down_shares_final, // Size in SHARES, not USDC
                 price: Some(down_price),
                 order_type,
                 timeout_ms: None,
@@ -2766,6 +2811,13 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
     /// Get executor's available balance.
     pub fn available_balance(&self) -> Decimal {
         self.executor.available_balance()
+    }
+
+    /// Get simulation statistics from the executor (if available).
+    ///
+    /// Returns Some for simulated/backtest executors, None for live.
+    pub fn simulation_stats(&self) -> Option<crate::executor::simulated::SimulatedStats> {
+        self.executor.simulation_stats()
     }
 }
 
@@ -3374,7 +3426,7 @@ mod tests {
             timestamp: Utc::now(),
         };
 
-        let market = TrackedMarket::new(&event, dec!(100), &StrategyConfig::default());
+        let market = TrackedMarket::new_for_backtest(&event, dec!(100), &StrategyConfig::default());
         assert!(market.active_maker_orders.is_empty());
     }
 }

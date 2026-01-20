@@ -567,6 +567,11 @@ pub struct BacktestConfig {
 
     /// Number of parallel workers for sweep mode (0 or None = number of CPU cores).
     pub sweep_parallel_workers: Option<usize>,
+
+    /// Optional trading config specific to backtest mode.
+    /// If present, backtest uses these instead of the main [trading] config.
+    /// This allows keeping stable backtest parameters for comparing commits.
+    pub trading: Option<TradingConfig>,
 }
 
 impl Default for BacktestConfig {
@@ -578,6 +583,7 @@ impl Default for BacktestConfig {
             sweep_enabled: false,
             data_dir: None,
             sweep_parallel_workers: None,
+            trading: None,
         }
     }
 }
@@ -1041,6 +1047,19 @@ impl BotConfig {
         Ok(Self::from(file))
     }
 
+    /// Returns the effective trading config for the current mode.
+    ///
+    /// In backtest mode, returns `backtest.trading` if configured, otherwise
+    /// falls back to the main `trading` config. This allows keeping stable
+    /// backtest parameters for comparing across commits.
+    pub fn effective_trading_config(&self) -> &TradingConfig {
+        if self.mode == TradingMode::Backtest {
+            self.backtest.trading.as_ref().unwrap_or(&self.trading)
+        } else {
+            &self.trading
+        }
+    }
+
     /// Apply environment variable overrides for sensitive values.
     pub fn apply_env_overrides(&mut self) {
         // Wallet credentials from environment
@@ -1393,6 +1412,8 @@ struct TradingToml {
     base_order_size: f64,
     early_threshold_secs: u64,
     mid_threshold_secs: u64,
+    /// Available balance - can be set directly under [trading] for simplicity
+    available_balance: Option<f64>,
     #[serde(default)]
     sizing: SizingToml,
 }
@@ -1409,6 +1430,7 @@ impl Default for TradingToml {
             base_order_size: 50.0,
             early_threshold_secs: 300,
             mid_threshold_secs: 120,
+            available_balance: None,
             sizing: SizingToml::default(),
         }
     }
@@ -1585,6 +1607,9 @@ struct BacktestToml {
     sweep_enabled: bool,
     data_dir: Option<String>,
     sweep_parallel_workers: Option<usize>,
+    /// Optional trading config specific to backtest mode.
+    /// If present, backtest uses these instead of [trading].
+    trading: Option<TradingToml>,
 }
 
 impl Default for BacktestToml {
@@ -1596,6 +1621,7 @@ impl Default for BacktestToml {
             sweep_enabled: false,
             data_dir: None,
             sweep_parallel_workers: None,
+            trading: None,
         }
     }
 }
@@ -1800,7 +1826,8 @@ impl From<TomlConfig> for BotConfig {
                 mid_threshold_secs: toml.trading.mid_threshold_secs,
                 sizing: SizingConfig {
                     mode: toml.trading.sizing.mode,
-                    available_balance: f64_to_decimal(toml.trading.sizing.available_balance),
+                    // Prefer top-level available_balance, fall back to sizing.available_balance
+                    available_balance: f64_to_decimal(toml.trading.available_balance.unwrap_or(toml.trading.sizing.available_balance)),
                     max_market_allocation: f64_to_decimal(toml.trading.sizing.max_market_allocation),
                     expected_trades_per_market: toml.trading.sizing.expected_trades_per_market,
                     min_order_size: f64_to_decimal(toml.trading.sizing.min_order_size),
@@ -1870,6 +1897,27 @@ impl From<TomlConfig> for BotConfig {
                 sweep_enabled: toml.backtest.sweep_enabled,
                 data_dir: toml.backtest.data_dir,
                 sweep_parallel_workers: toml.backtest.sweep_parallel_workers,
+                trading: toml.backtest.trading.map(|t| TradingConfig {
+                    min_margin_early: pct_to_decimal(t.min_margin_early_pct),
+                    min_margin_mid: pct_to_decimal(t.min_margin_mid_pct),
+                    min_margin_late: pct_to_decimal(t.min_margin_late_pct),
+                    min_time_remaining_secs: t.min_time_remaining_secs,
+                    max_position_per_market: f64_to_decimal(t.max_position_per_market),
+                    max_total_exposure: f64_to_decimal(t.max_total_exposure),
+                    base_order_size: f64_to_decimal(t.base_order_size),
+                    early_threshold_secs: t.early_threshold_secs,
+                    mid_threshold_secs: t.mid_threshold_secs,
+                    sizing: SizingConfig {
+                        mode: t.sizing.mode,
+                        // Prefer top-level available_balance, fall back to sizing.available_balance
+                        available_balance: f64_to_decimal(t.available_balance.unwrap_or(t.sizing.available_balance)),
+                        max_market_allocation: f64_to_decimal(t.sizing.max_market_allocation),
+                        expected_trades_per_market: t.sizing.expected_trades_per_market,
+                        min_order_size: f64_to_decimal(t.sizing.min_order_size),
+                        max_confidence_multiplier: f64_to_decimal(t.sizing.max_confidence_multiplier),
+                        min_hedge_ratio: f64_to_decimal(t.sizing.min_hedge_ratio),
+                    },
+                }),
             },
             engines: EnginesConfig {
                 arbitrage: ArbitrageEngineConfig {

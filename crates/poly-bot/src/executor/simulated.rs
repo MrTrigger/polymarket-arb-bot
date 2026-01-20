@@ -164,6 +164,79 @@ pub struct SimulatedStats {
     pub volume_traded: Decimal,
     /// Total fees paid.
     pub fees_paid: Decimal,
+    /// Number of settled markets with positive PnL.
+    pub markets_won: u64,
+    /// Number of settled markets with negative or zero PnL.
+    pub markets_lost: u64,
+    /// Peak balance observed (for drawdown calculation).
+    pub peak_balance: Decimal,
+    /// Maximum drawdown observed (peak to trough).
+    pub max_drawdown: Decimal,
+    /// Balance history for Sharpe ratio calculation (timestamp, balance).
+    pub balance_history: Vec<(DateTime<Utc>, Decimal)>,
+}
+
+impl SimulatedStats {
+    /// Calculate win rate as a percentage.
+    pub fn win_rate(&self) -> Option<Decimal> {
+        let total = self.markets_won + self.markets_lost;
+        if total == 0 {
+            None
+        } else {
+            Some(Decimal::new(self.markets_won as i64, 0) / Decimal::new(total as i64, 0))
+        }
+    }
+
+    /// Calculate Sharpe ratio from balance history.
+    /// Uses daily returns, assuming 252 trading days per year.
+    pub fn sharpe_ratio(&self) -> Option<f64> {
+        if self.balance_history.len() < 2 {
+            return None;
+        }
+
+        // Calculate returns between consecutive balance snapshots
+        let returns: Vec<f64> = self
+            .balance_history
+            .windows(2)
+            .filter_map(|w| {
+                let prev = w[0].1;
+                let curr = w[1].1;
+                if prev > Decimal::ZERO {
+                    use rust_decimal::prelude::ToPrimitive;
+                    Some(((curr - prev) / prev).to_f64()?)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if returns.is_empty() {
+            return None;
+        }
+
+        let n = returns.len() as f64;
+        let mean: f64 = returns.iter().sum::<f64>() / n;
+        let variance: f64 = returns.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / n;
+        let std_dev: f64 = variance.sqrt();
+
+        if std_dev <= 0.0 {
+            return None;
+        }
+
+        // Annualize: for 15-minute windows, assume ~96 periods per day, ~252 days/year
+        // Sharpe = (mean * sqrt(periods_per_year)) / std_dev
+        let periods_per_year: f64 = 96.0 * 252.0;
+        Some(mean * periods_per_year.sqrt() / std_dev)
+    }
+
+    /// Get max drawdown as a percentage.
+    pub fn max_drawdown_pct(&self) -> Option<Decimal> {
+        if self.peak_balance > Decimal::ZERO && self.max_drawdown > Decimal::ZERO {
+            Some((self.max_drawdown / self.peak_balance) * Decimal::ONE_HUNDRED)
+        } else {
+            None
+        }
+    }
 }
 
 /// Unified simulated executor for paper trading and backtesting.
@@ -187,8 +260,13 @@ pub struct SimulatedExecutor {
 impl SimulatedExecutor {
     /// Create a new simulated executor with the given configuration.
     pub fn new(config: SimulatedExecutorConfig) -> Self {
+        let initial_balance = config.initial_balance;
+        let mut stats = SimulatedStats::default();
+        stats.peak_balance = initial_balance;
+        stats.balance_history.push((Utc::now(), initial_balance));
+
         Self {
-            balance: config.initial_balance,
+            balance: initial_balance,
             config,
             positions: HashMap::new(),
             orders: HashMap::new(),
@@ -197,7 +275,7 @@ impl SimulatedExecutor {
             simulated_time: Utc::now(),
             order_books: Arc::new(RwLock::new(HashMap::new())),
             market_prices: Arc::new(RwLock::new(HashMap::new())),
-            stats: SimulatedStats::default(),
+            stats,
         }
     }
 
@@ -579,6 +657,26 @@ impl SimulatedExecutor {
         // Update balance with payout
         self.balance += payout;
 
+        // Track win/loss statistics
+        if realized_pnl > Decimal::ZERO {
+            self.stats.markets_won += 1;
+        } else {
+            self.stats.markets_lost += 1;
+        }
+
+        // Track balance history for Sharpe calculation
+        self.stats.balance_history.push((self.current_time(), self.balance));
+
+        // Update peak balance and max drawdown
+        if self.balance > self.stats.peak_balance {
+            self.stats.peak_balance = self.balance;
+        } else {
+            let drawdown = self.stats.peak_balance - self.balance;
+            if drawdown > self.stats.max_drawdown {
+                self.stats.max_drawdown = drawdown;
+            }
+        }
+
         info!(
             event_id = %event_id,
             yes_wins = %yes_wins,
@@ -700,6 +798,10 @@ impl Executor for SimulatedExecutor {
             fees_paid = %self.stats.fees_paid,
             "Simulated executor shutting down"
         );
+    }
+
+    fn simulation_stats(&self) -> Option<SimulatedStats> {
+        Some(self.stats.clone())
     }
 }
 

@@ -49,6 +49,12 @@ const MAX_RETRIES: u32 = 6;
 /// Base delay between retries in milliseconds (public RPC needs longer delays).
 const RETRY_BASE_DELAY_MS: u64 = 12000;
 
+/// Timeout for sending a transaction to the RPC.
+const TX_SEND_TIMEOUT_SECS: u64 = 30;
+
+/// Timeout for waiting for transaction confirmation.
+const TX_CONFIRM_TIMEOUT_SECS: u64 = 120;
+
 sol! {
     #[sol(rpc)]
     interface IERC20 {
@@ -392,10 +398,24 @@ impl AllowanceManager {
                     tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                 }
 
-                match token.approve(target.address, usdc_amount).send().await {
-                    Ok(tx) => {
-                        match tx.watch().await {
-                            Ok(receipt) => {
+                // Send transaction with timeout
+                let send_result = tokio::time::timeout(
+                    Duration::from_secs(TX_SEND_TIMEOUT_SECS),
+                    token.approve(target.address, usdc_amount).send(),
+                )
+                .await;
+
+                match send_result {
+                    Ok(Ok(tx)) => {
+                        // Wait for confirmation with timeout
+                        let confirm_result = tokio::time::timeout(
+                            Duration::from_secs(TX_CONFIRM_TIMEOUT_SECS),
+                            tx.watch(),
+                        )
+                        .await;
+
+                        match confirm_result {
+                            Ok(Ok(receipt)) => {
                                 info!(
                                     target = target.name,
                                     amount = %usdc_amount,
@@ -405,12 +425,18 @@ impl AllowanceManager {
                                 last_error = None;
                                 break;
                             }
-                            Err(e) => {
+                            Ok(Err(e)) => {
                                 last_error = Some(format!("Failed to confirm USDC approve tx: {}", e));
+                            }
+                            Err(_) => {
+                                last_error = Some(format!(
+                                    "USDC approve confirmation timed out after {}s",
+                                    TX_CONFIRM_TIMEOUT_SECS
+                                ));
                             }
                         }
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         let err_str = e.to_string();
                         // Check if this is a rate limit error
                         if err_str.contains("-32090") || err_str.contains("rate limit") || err_str.contains("Too many requests") {
@@ -425,6 +451,12 @@ impl AllowanceManager {
                         }
                         // Not a rate limit error, fail immediately
                         return Err(format!("Failed to send USDC approve tx: {}", e));
+                    }
+                    Err(_) => {
+                        last_error = Some(format!(
+                            "USDC approve send timed out after {}s",
+                            TX_SEND_TIMEOUT_SECS
+                        ));
                     }
                 }
             }
@@ -451,10 +483,24 @@ impl AllowanceManager {
                     tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                 }
 
-                match ctf.setApprovalForAll(target.address, true).send().await {
-                    Ok(tx) => {
-                        match tx.watch().await {
-                            Ok(receipt) => {
+                // Send transaction with timeout
+                let send_result = tokio::time::timeout(
+                    Duration::from_secs(TX_SEND_TIMEOUT_SECS),
+                    ctf.setApprovalForAll(target.address, true).send(),
+                )
+                .await;
+
+                match send_result {
+                    Ok(Ok(tx)) => {
+                        // Wait for confirmation with timeout
+                        let confirm_result = tokio::time::timeout(
+                            Duration::from_secs(TX_CONFIRM_TIMEOUT_SECS),
+                            tx.watch(),
+                        )
+                        .await;
+
+                        match confirm_result {
+                            Ok(Ok(receipt)) => {
                                 info!(
                                     target = target.name,
                                     tx_hash = ?receipt,
@@ -463,12 +509,18 @@ impl AllowanceManager {
                                 last_error = None;
                                 break;
                             }
-                            Err(e) => {
+                            Ok(Err(e)) => {
                                 last_error = Some(format!("Failed to confirm CTF approve tx: {}", e));
+                            }
+                            Err(_) => {
+                                last_error = Some(format!(
+                                    "CTF approve confirmation timed out after {}s",
+                                    TX_CONFIRM_TIMEOUT_SECS
+                                ));
                             }
                         }
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         let err_str = e.to_string();
                         // Check if this is a rate limit error
                         if err_str.contains("-32090") || err_str.contains("rate limit") || err_str.contains("Too many requests") {
@@ -483,6 +535,12 @@ impl AllowanceManager {
                         }
                         // Not a rate limit error, fail immediately
                         return Err(format!("Failed to send CTF approve tx: {}", e));
+                    }
+                    Err(_) => {
+                        last_error = Some(format!(
+                            "CTF approve send timed out after {}s",
+                            TX_SEND_TIMEOUT_SECS
+                        ));
                     }
                 }
             }

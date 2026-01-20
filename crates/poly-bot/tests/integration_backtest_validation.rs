@@ -56,6 +56,7 @@ fn test_pnl_calculation_basic() {
         orders_rejected: 0,
         volume_traded: dec!(1000),
         fees_paid: dec!(1),
+        ..Default::default()
     };
 
     let metrics = MetricsSnapshot {
@@ -340,6 +341,7 @@ fn test_backtest_result_trades_sum() {
         orders_rejected: 10,
         volume_traded: dec!(5000),
         fees_paid: dec!(5),
+        ..Default::default()
     };
 
     // filled + partial + rejected should equal or be less than placed
@@ -359,6 +361,7 @@ fn test_backtest_result_fees_bounded() {
         orders_rejected: 0,
         volume_traded: dec!(5000),
         fees_paid: dec!(5),
+        ..Default::default()
     };
 
     // Fees should be non-negative and less than volume traded
