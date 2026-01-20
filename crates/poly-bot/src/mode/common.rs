@@ -48,9 +48,26 @@ pub async fn run_market_discovery(
                 if !markets.is_empty() {
                     info!("Discovered {} new markets", markets.len());
 
+                    // Only add markets with valid strike prices.
+                    // Markets with strike=0 haven't started yet - discovery will
+                    // fetch historical price when they become active on next poll.
+                    let ready_markets: Vec<_> = markets
+                        .iter()
+                        .filter(|m| !m.strike_price.is_zero())
+                        .collect();
+
+                    if ready_markets.len() < markets.len() {
+                        let pending = markets.len() - ready_markets.len();
+                        info!(
+                            "{} markets ready (with strike), {} pending (strike not yet available)",
+                            ready_markets.len(),
+                            pending
+                        );
+                    }
+
                     // Add discovered markets to the active markets state
                     let mut active = active_markets.write().await;
-                    for market in &markets {
+                    for market in ready_markets {
                         let active_market = ActiveMarket {
                             event_id: market.event_id.clone(),
                             yes_token_id: market.yes_token_id.clone(),

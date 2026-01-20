@@ -132,10 +132,10 @@ async fn run() -> Result<()> {
     }
 
     // Apply window duration override from CLI
-    if let Some(window_str) = &args.window {
-        if let Ok(window_duration) = window_str.parse::<WindowDuration>() {
-            config.window_duration = window_duration;
-        }
+    if let Some(window_str) = &args.window
+        && let Ok(window_duration) = window_str.parse::<WindowDuration>()
+    {
+        config.window_duration = window_duration;
     }
 
     // Initialize logging

@@ -304,8 +304,6 @@ pub struct MultiEngineDecision {
     pub latency_us: u64,
 }
 
-/// Default minimum order size in shares for backtest (most common on Polymarket).
-
 /// Internal market state tracked by the strategy.
 #[derive(Debug)]
 #[allow(dead_code)] // Fields used for debugging and future features
@@ -332,6 +330,10 @@ struct TrackedMarket {
     no_toxic_warning: Option<ToxicFlowWarning>,
     /// Active maker orders for this market (keyed by order_id).
     active_maker_orders: HashMap<String, ActiveMakerOrder>,
+    /// Whether we have a pending arb order (not yet filled/cancelled).
+    pending_arb_order: bool,
+    /// Whether we have a pending directional order (not yet filled/cancelled).
+    pending_directional_order: bool,
     /// Phase-based position manager for this market.
     /// Controls when/how much to trade based on confidence and budget.
     position_manager: position::PositionManager,
@@ -387,6 +389,8 @@ impl TrackedMarket {
             yes_toxic_warning: None,
             no_toxic_warning: None,
             active_maker_orders: HashMap::new(),
+            pending_arb_order: false,
+            pending_directional_order: false,
             position_manager: position::PositionManager::new(position_config),
             min_order_size,
         }
@@ -428,6 +432,7 @@ impl TrackedMarket {
 
     /// Check if we should trade using an externally-provided confidence value.
     /// This allows incorporating signal strength into the EV calculation.
+    #[allow(dead_code)]
     fn should_trade_with_confidence(
         &self,
         confidence: Decimal,
@@ -700,6 +705,8 @@ pub struct StrategyLoop<D: DataSource, E: Executor> {
     multi_obs_sender: Option<mpsc::Sender<MultiEngineDecision>>,
     /// Last status log time for periodic logging.
     last_status_log: std::time::Instant,
+    /// Last skip log time for rate-limited skip logging.
+    last_skip_log: std::time::Instant,
     /// Dynamic ATR tracker for volatility-adjusted position sizing.
     atr_tracker: atr::AtrTracker,
     /// Simulated time for backtest mode (uses event timestamps instead of wall-clock time).
@@ -765,6 +772,7 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             obs_sender: None,
             multi_obs_sender: None,
             last_status_log: std::time::Instant::now(),
+            last_skip_log: std::time::Instant::now(),
             atr_tracker: atr::AtrTracker::default(),
             simulated_time: Utc::now(),
             chaser: PriceChaser::with_defaults(),
@@ -951,10 +959,13 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             if market.asset == event.asset {
                 market.state.spot_price = Some(event.price);
 
-                // For Up/Down markets, if strike is still 0, set it from first spot price
+                // For Up/Down markets, if strike is still 0, set it from first spot price.
+                // NOTE: With the new discovery flow, this should NOT happen - markets
+                // should only be added once they have a valid strike from historical data.
+                // If this triggers, it means discovery failed to fetch historical price.
                 if market.state.strike_price.is_zero() {
-                    info!(
-                        "Setting strike price for Up/Down market {} from spot={}",
+                    warn!(
+                        "FALLBACK: Setting strike for {} from current spot={} (discovery failed to fetch historical price)",
                         market.event_id, event.price
                     );
                     market.state.strike_price = event.price;
@@ -1157,15 +1168,9 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             event.token_id, event.side, event.price, event.size);
 
         // Find the market this token belongs to
-        let event_id = match self.token_to_event.get(&event.token_id) {
-            Some(id) => id.clone(),
-            None => return None,
-        };
+        let event_id = self.token_to_event.get(&event.token_id)?.clone();
 
-        let market = match self.markets.get_mut(&event_id) {
-            Some(m) => m,
-            None => return None,
-        };
+        let market = self.markets.get_mut(&event_id)?;
 
         // Determine which book to update
         let is_yes = event.token_id == market.yes_token_id;
@@ -1234,6 +1239,12 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             let cost = event.size * event.price + event.fee;
             market.inventory.record_fill(event.outcome, event.size, cost);
 
+            // Clear pending order flags on fill
+            // Once a fill arrives, has_position() will also return true,
+            // but clear these for completeness
+            market.pending_arb_order = false;
+            market.pending_directional_order = false;
+
             // Update global state inventory
             let pos = crate::state::InventoryPosition {
                 event_id: event.event_id.clone(),
@@ -1290,12 +1301,13 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
 
     /// Handle new market window.
     fn handle_window_open(&mut self, mut event: WindowOpenEvent) {
-        // For "Up or Down" relative markets, strike_price is 0 from discovery.
-        // Set strike from current spot price (the opening price).
+        // NOTE: With the new discovery flow, markets should only be sent here
+        // once they have a valid strike from Binance historical data.
+        // The strike_price=0 case is a fallback that shouldn't normally happen.
         if event.strike_price.is_zero() {
             if let Some(&spot) = self.spot_prices.get(&event.asset) {
-                info!(
-                    "Window open: {} {} (Up/Down market, setting strike from spot={})",
+                warn!(
+                    "FALLBACK: Window open {} {} with strike=0, using current spot={} (may be inaccurate!)",
                     event.event_id, event.asset, spot
                 );
                 event.strike_price = spot;
@@ -1620,15 +1632,22 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                     // Calculate position size for arb
                     let market = self.markets.get(&event_id).unwrap();
 
-                    // For arb: check if we already have a position.
+                    // For arb: check if we already have a position or pending order.
                     // Arb locks in profit regardless of outcome, so we shouldn't
-                    // keep adding once we're already positioned.
+                    // keep adding once we're already positioned or have an order in flight.
                     if market.has_position() {
                         trace!(
                             "Already have arb position for {}, skipping",
                             event_id
                         );
                         continue; // Silent skip - already have position
+                    }
+                    if market.pending_arb_order {
+                        trace!(
+                            "Already have pending arb order for {}, skipping",
+                            event_id
+                        );
+                        continue; // Silent skip - order already in flight
                     }
 
                     let sizing = self.sizer.calculate_size(
@@ -1694,6 +1713,15 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
 
                     // Use phase-based position management for trade decisions
                     let market = self.markets.get(&event_id).unwrap();
+
+                    // Check if we already have a pending directional order
+                    if market.pending_directional_order {
+                        trace!(
+                            "Already have pending directional order for {}, skipping",
+                            event_id
+                        );
+                        continue; // Silent skip - order already in flight
+                    }
 
                     // Calculate distance in dollars for position manager
                     let distance_dollars = opp.distance * market.strike_price;
@@ -1763,12 +1791,15 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
 
                     let (total_size, pm_confidence, phase) = match trade_decision {
                         position::TradeDecision::Skip(reason) => {
-                            // Log skips at info level for diagnosis
-                            info!(
-                                "⏭️ SKIP {} {} {:?}: signal={:?} dist=${:.2} atr_mult={:.2} conf={:.2} EV={:.3} min_edge={:.3} phase={} price={}",
-                                event_id, asset, reason, opp.signal, distance_dollars.abs(), atr_mult,
-                                pm_conf, ev, min_edge, phase, favorable_price
-                            );
+                            // Rate-limited skip logging (max once per second)
+                            if self.last_skip_log.elapsed() >= std::time::Duration::from_secs(1) {
+                                self.last_skip_log = std::time::Instant::now();
+                                info!(
+                                    "⏭️ SKIP {} {} {:?}: signal={:?} dist=${:.2} atr_mult={:.2} conf={:.2} EV={:.3} min_edge={:.3} phase={} price={}",
+                                    event_id, asset, reason, opp.signal, distance_dollars.abs(), atr_mult,
+                                    pm_conf, ev, min_edge, phase, favorable_price
+                                );
+                            }
                             // Only record decision for meaningful skips, not low confidence
                             if !matches!(reason, position::SkipReason::LowConfidence) {
                                 self.record_multi_decision(
@@ -1891,6 +1922,11 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
         opportunity: &ArbOpportunity,
         sizing: &SizingResult,
     ) -> Result<TradeAction, StrategyError> {
+        // Mark pending BEFORE placing orders to prevent duplicate submissions
+        if let Some(market) = self.markets.get_mut(&opportunity.event_id) {
+            market.pending_arb_order = true;
+        }
+
         // Generate request IDs
         let req_id_base = self.decision_counter;
         self.decision_counter += 1;
@@ -1936,6 +1972,10 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             }
             Err(e) => {
                 warn!("YES order failed: {}", e);
+                // Clear pending flag on failure
+                if let Some(market) = self.markets.get_mut(&opportunity.event_id) {
+                    market.pending_arb_order = false;
+                }
                 if self.state.record_failure(self.config.max_consecutive_failures) {
                     self.state.trip_circuit_breaker();
                     warn!("Circuit breaker tripped after consecutive failures");
@@ -2002,6 +2042,18 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             .unwrap_or(0u64);
         self.state.metrics.add_volume_cents(volume_cents);
 
+        // Clear pending flag only if orders are NOT pending (i.e., filled or rejected)
+        // If orders are pending on the exchange, keep the flag true to prevent duplicates
+        // until we receive fill callbacks
+        let yes_pending = yes_result.as_ref().map(|r| r.is_pending()).unwrap_or(false);
+        let no_pending = no_result.as_ref().map(|r| r.is_pending()).unwrap_or(false);
+
+        if !yes_pending && !no_pending
+            && let Some(market) = self.markets.get_mut(&opportunity.event_id)
+        {
+            market.pending_arb_order = false;
+        }
+
         Ok(TradeAction::Execute)
     }
 
@@ -2024,11 +2076,20 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
     ) -> Result<TradeAction, StrategyError> {
         let event_id = opportunity.event_id.clone();
 
+        // Mark pending BEFORE placing orders to prevent duplicate submissions
+        if let Some(market) = self.markets.get_mut(&event_id) {
+            market.pending_directional_order = true;
+        }
+
         // Get the tracked market for order book access
         let market = match self.markets.get(&event_id) {
             Some(m) => m,
             None => {
                 warn!("No tracked market for directional: {}", event_id);
+                // Clear pending flag since we won't place orders
+                if let Some(market) = self.markets.get_mut(&event_id) {
+                    market.pending_directional_order = false;
+                }
                 return Ok(TradeAction::SkipSizing);
             }
         };
@@ -2163,6 +2224,9 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
         let mut up_filled_cost = Decimal::ZERO;
         let mut down_filled_size = Decimal::ZERO;
         let mut down_filled_cost = Decimal::ZERO;
+        // Track if orders are pending (not immediately filled) for flag management
+        let mut up_pending = false;
+        let mut down_pending = false;
 
         // Determine order type based on execution mode
         // Chasing is disabled in backtest mode (simulated executor fills immediately)
@@ -2259,6 +2323,7 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                     debug!("UP order filled: {} shares, cost={}", up_filled_size, up_filled_cost);
                 }
                 Ok(result) => {
+                    up_pending = result.is_pending();
                     debug!("UP order not filled: {:?}", result);
                 }
                 Err(e) => {
@@ -2356,6 +2421,7 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                     debug!("DOWN order filled: {} shares, cost={}", down_filled_size, down_filled_cost);
                 }
                 Ok(result) => {
+                    down_pending = result.is_pending();
                     debug!("DOWN order not filled: {:?}", result);
                 }
                 Err(e) => {
@@ -2416,6 +2482,14 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
 
             // Record successful trade for metrics tracking
             self.state.record_success();
+        }
+
+        // Clear pending flag only if orders are NOT pending (i.e., filled or rejected)
+        // If orders are pending on the exchange, keep the flag true to prevent duplicates
+        if !up_pending && !down_pending
+            && let Some(market) = self.markets.get_mut(&event_id)
+        {
+            market.pending_directional_order = false;
         }
 
         Ok(TradeAction::Execute)
@@ -3149,68 +3223,55 @@ mod tests {
 
     #[test]
     fn test_calculate_maker_price_wide_spread() {
-        // Wide spread (>3%): 40% from bid toward ask
+        // Current implementation: place at best bid (buy) or best ask (sell)
         let mut book = crate::types::OrderBook::new("test".to_string());
         book.bids.push(PriceLevel::new(dec!(0.40), dec!(100))); // bid
         book.asks.push(PriceLevel::new(dec!(0.50), dec!(100))); // ask
-        // spread = 0.10, mid = 0.45, spread_ratio = 0.10/0.45 = 22% > 3%
 
-        // Buy: price = bid + spread * 0.40 = 0.40 + 0.10 * 0.40 = 0.44
+        // Buy: place at best bid = 0.40
         let buy_price = calculate_maker_price(&book, Side::Buy);
         assert!(buy_price.is_some());
-        assert_eq!(buy_price.unwrap(), dec!(0.44));
+        assert_eq!(buy_price.unwrap(), dec!(0.40));
 
-        // Sell: price = ask - spread * 0.40 = 0.50 - 0.10 * 0.40 = 0.46
+        // Sell: place at best ask = 0.50
         let sell_price = calculate_maker_price(&book, Side::Sell);
         assert!(sell_price.is_some());
-        assert_eq!(sell_price.unwrap(), dec!(0.46));
+        assert_eq!(sell_price.unwrap(), dec!(0.50));
     }
 
     #[test]
     fn test_calculate_maker_price_medium_spread() {
-        // Medium spread (1-3%): 30% from bid toward ask
+        // Current implementation: place at best bid (buy) or best ask (sell)
         let mut book = crate::types::OrderBook::new("test".to_string());
-        book.bids.push(PriceLevel::new(dec!(0.49), dec!(100))); // bid
-        book.asks.push(PriceLevel::new(dec!(0.51), dec!(100))); // ask
-        // spread = 0.02, mid = 0.50, spread_ratio = 0.02/0.50 = 4% -- wait that's > 3%
-        // Let me use different values
-        book.bids.clear();
-        book.asks.clear();
         book.bids.push(PriceLevel::new(dec!(0.495), dec!(100))); // bid
         book.asks.push(PriceLevel::new(dec!(0.505), dec!(100))); // ask
-        // spread = 0.01, mid = 0.50, spread_ratio = 0.01/0.50 = 2% (between 1-3%)
 
-        // Buy: price = bid + spread * 0.30 = 0.495 + 0.01 * 0.30 = 0.498
+        // Buy: place at best bid = 0.495, rounded to 0.50 (banker's rounding)
         let buy_price = calculate_maker_price(&book, Side::Buy);
         assert!(buy_price.is_some());
-        // Rounded to 2 decimal places: 0.50
         assert_eq!(buy_price.unwrap(), dec!(0.50));
 
-        // Sell: price = ask - spread * 0.30 = 0.505 - 0.01 * 0.30 = 0.502
+        // Sell: place at best ask = 0.505, rounded to 0.50 (banker's rounding: .5 rounds to even)
         let sell_price = calculate_maker_price(&book, Side::Sell);
         assert!(sell_price.is_some());
-        // Rounded to 2 decimal places: 0.50
         assert_eq!(sell_price.unwrap(), dec!(0.50));
     }
 
     #[test]
     fn test_calculate_maker_price_tight_spread() {
-        // Tight spread (<1%): at bid for buy, at ask for sell
+        // Current implementation: place at best bid (buy) or best ask (sell)
         let mut book = crate::types::OrderBook::new("test".to_string());
         book.bids.push(PriceLevel::new(dec!(0.498), dec!(100))); // bid
         book.asks.push(PriceLevel::new(dec!(0.502), dec!(100))); // ask
-        // spread = 0.004, mid = 0.50, spread_ratio = 0.004/0.50 = 0.8% < 1%
 
-        // Buy: price = bid + spread * 0 = bid = 0.498
+        // Buy: place at best bid = 0.498, rounded to 0.50
         let buy_price = calculate_maker_price(&book, Side::Buy);
         assert!(buy_price.is_some());
-        // Rounded to 2 decimal places: 0.50
         assert_eq!(buy_price.unwrap(), dec!(0.50));
 
-        // Sell: price = ask - spread * 0 = ask = 0.502
+        // Sell: place at best ask = 0.502, rounded to 0.50
         let sell_price = calculate_maker_price(&book, Side::Sell);
         assert!(sell_price.is_some());
-        // Rounded to 2 decimal places: 0.50
         assert_eq!(sell_price.unwrap(), dec!(0.50));
     }
 
@@ -3230,8 +3291,14 @@ mod tests {
         book.bids.push(PriceLevel::new(dec!(0.45), dec!(100)));
         // No asks
 
-        let price = calculate_maker_price(&book, Side::Buy);
-        assert!(price.is_none());
+        // Buy only needs best_bid, which exists
+        let buy_price = calculate_maker_price(&book, Side::Buy);
+        assert!(buy_price.is_some());
+        assert_eq!(buy_price.unwrap(), dec!(0.45));
+
+        // Sell needs best_ask, which doesn't exist
+        let sell_price = calculate_maker_price(&book, Side::Sell);
+        assert!(sell_price.is_none());
     }
 
     #[test]

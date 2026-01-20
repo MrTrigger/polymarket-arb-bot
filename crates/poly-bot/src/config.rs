@@ -1133,12 +1133,12 @@ impl BotConfig {
     /// Validate configuration and return errors for invalid values.
     pub fn validate(&self) -> Result<()> {
         // Mode-specific validation
-        if self.mode == TradingMode::Live {
-            if self.wallet.private_key.is_none() {
-                bail!("Live mode requires POLY_PRIVATE_KEY environment variable");
-            }
-            // Note: API credentials (api_key, api_secret, api_passphrase) are optional.
-            // If not provided, they will be derived from the private key at startup.
+        // Note: API credentials (api_key, api_secret, api_passphrase) are optional for live mode.
+        // If not provided, they will be derived from the private key at startup.
+        if self.mode == TradingMode::Live
+            && self.wallet.private_key.is_none()
+        {
+            bail!("Live mode requires POLY_PRIVATE_KEY environment variable");
         }
 
         if self.mode == TradingMode::Backtest

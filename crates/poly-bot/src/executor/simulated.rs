@@ -259,6 +259,7 @@ pub struct SimulatedExecutor {
 
 impl SimulatedExecutor {
     /// Create a new simulated executor with the given configuration.
+    #[allow(clippy::field_reassign_with_default)]
     pub fn new(config: SimulatedExecutorConfig) -> Self {
         let initial_balance = config.initial_balance;
         let mut stats = SimulatedStats::default();

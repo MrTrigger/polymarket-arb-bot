@@ -40,8 +40,10 @@ pub struct LiveSdkExecutor {
     /// Private key signer (with chain_id set for Polygon).
     signer: Signer,
     /// Private key hex for allowance manager.
+    #[allow(dead_code)]
     private_key_hex: String,
     /// Shadow bid manager.
+    #[allow(dead_code)]
     shadow_manager: Option<SharedShadowManager>,
     /// Allowance manager for automatic replenishment.
     allowance_manager: Option<SharedAllowanceManager>,

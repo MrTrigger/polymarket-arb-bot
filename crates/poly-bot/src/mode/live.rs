@@ -34,7 +34,7 @@ use crate::dashboard::{
 use crate::data_source::live::{ActiveMarketsState, LiveDataSource, LiveDataSourceConfig};
 use crate::executor::live::LiveExecutorConfig;
 use crate::executor::live_sdk::LiveSdkExecutor;
-use crate::executor::{Executor, OrderRequest, OrderResult, OrderType};
+use crate::executor::{OrderRequest, OrderType};
 use poly_common::types::{Outcome, Side};
 use crate::state::GlobalState;
 use crate::strategy::{StrategyConfig, StrategyLoop};

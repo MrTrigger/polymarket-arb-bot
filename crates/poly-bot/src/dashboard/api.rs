@@ -693,7 +693,7 @@ async fn get_spot_prices(
     }
 
     // Limit minutes to reasonable range (max 8 hours = 480 minutes)
-    let minutes = params.minutes.min(480).max(1);
+    let minutes = params.minutes.clamp(1, 480);
 
     // Try ClickHouse first
     let query = r#"

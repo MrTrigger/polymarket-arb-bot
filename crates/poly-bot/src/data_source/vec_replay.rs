@@ -56,14 +56,14 @@ impl DataSource for VecReplayDataSource {
         self.position += 1;
 
         // Apply speed control if configured
-        if self.speed > 0.0 {
-            if let Some(prev_time) = self.current_time {
-                let delta = event.timestamp() - prev_time;
-                if delta.num_milliseconds() > 0 {
-                    let sleep_ms = (delta.num_milliseconds() as f64 / self.speed) as u64;
-                    if sleep_ms > 0 {
-                        tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)).await;
-                    }
+        if self.speed > 0.0
+            && let Some(prev_time) = self.current_time
+        {
+            let delta = event.timestamp() - prev_time;
+            if delta.num_milliseconds() > 0 {
+                let sleep_ms = (delta.num_milliseconds() as f64 / self.speed) as u64;
+                if sleep_ms > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)).await;
                 }
             }
         }

@@ -193,22 +193,23 @@ impl CsvReplayDataSource {
 
             // Filter by asset if specified
             let asset = parse_asset(&row.asset);
-            if let Some(a) = asset {
-                if !self.config.assets.is_empty() && !self.config.assets.contains(&a) {
-                    continue;
-                }
+            if let Some(a) = asset
+                && !self.config.assets.is_empty()
+                && !self.config.assets.contains(&a)
+            {
+                continue;
             }
 
             // Filter by time if specified
-            if let Some(start) = self.config.start_time {
-                if row.window_end < start {
-                    continue;
-                }
+            if let Some(start) = self.config.start_time
+                && row.window_end < start
+            {
+                continue;
             }
-            if let Some(end) = self.config.end_time {
-                if row.window_start > end {
-                    continue;
-                }
+            if let Some(end) = self.config.end_time
+                && row.window_start > end
+            {
+                continue;
             }
 
             // Build token -> event mapping
@@ -283,15 +284,15 @@ impl CsvReplayDataSource {
             }
 
             // Filter by time
-            if let Some(start) = self.config.start_time {
-                if row.timestamp < start {
-                    continue;
-                }
+            if let Some(start) = self.config.start_time
+                && row.timestamp < start
+            {
+                continue;
             }
-            if let Some(end) = self.config.end_time {
-                if row.timestamp > end {
-                    continue;
-                }
+            if let Some(end) = self.config.end_time
+                && row.timestamp > end
+            {
+                continue;
             }
 
             let event = MarketEvent::SpotPrice(SpotPriceEvent {
@@ -341,15 +342,15 @@ impl CsvReplayDataSource {
             };
 
             // Filter by time
-            if let Some(start) = self.config.start_time {
-                if row.timestamp < start {
-                    continue;
-                }
+            if let Some(start) = self.config.start_time
+                && row.timestamp < start
+            {
+                continue;
             }
-            if let Some(end) = self.config.end_time {
-                if row.timestamp > end {
-                    continue;
-                }
+            if let Some(end) = self.config.end_time
+                && row.timestamp > end
+            {
+                continue;
             }
 
             // Convert price history to a simplified book snapshot
@@ -408,14 +409,14 @@ impl DataSource for CsvReplayDataSource {
         match self.event_queue.pop() {
             Some(timestamped) => {
                 // Apply speed control if configured
-                if self.config.speed > 0.0 {
-                    if let Some(prev_time) = self.current_time {
-                        let delta = timestamped.timestamp - prev_time;
-                        if delta.num_milliseconds() > 0 {
-                            let sleep_ms = (delta.num_milliseconds() as f64 / self.config.speed) as u64;
-                            if sleep_ms > 0 {
-                                tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)).await;
-                            }
+                if self.config.speed > 0.0
+                    && let Some(prev_time) = self.current_time
+                {
+                    let delta = timestamped.timestamp - prev_time;
+                    if delta.num_milliseconds() > 0 {
+                        let sleep_ms = (delta.num_milliseconds() as f64 / self.config.speed) as u64;
+                        if sleep_ms > 0 {
+                            tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)).await;
                         }
                     }
                 }

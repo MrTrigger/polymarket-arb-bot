@@ -865,8 +865,8 @@ impl BacktestMode {
                 // Simple spin-wait to limit concurrency
                 loop {
                     let current = active_count.load(std::sync::atomic::Ordering::SeqCst);
-                    if current < max_workers {
-                        if active_count
+                    if current < max_workers
+                        && active_count
                             .compare_exchange(
                                 current,
                                 current + 1,
@@ -874,9 +874,8 @@ impl BacktestMode {
                                 std::sync::atomic::Ordering::SeqCst,
                             )
                             .is_ok()
-                        {
-                            break;
-                        }
+                    {
+                        break;
                     }
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }

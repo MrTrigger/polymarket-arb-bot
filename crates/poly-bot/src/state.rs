@@ -29,10 +29,11 @@ use crate::dashboard::types::TradeRecord;
 /// Bot operational status.
 ///
 /// Tracks the current state of the bot for display in the dashboard.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum BotStatus {
     /// Bot is initializing (loading config, connecting).
+    #[default]
     Initializing,
     /// Setting up token allowances for trading.
     SettingAllowances,
@@ -99,17 +100,12 @@ impl BotStatus {
     }
 }
 
-impl Default for BotStatus {
-    fn default() -> Self {
-        BotStatus::Initializing
-    }
-}
-
 /// Bot operating mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum BotMode {
     /// Paper trading (simulated).
+    #[default]
     Paper,
     /// Live trading (real money).
     Live,
@@ -141,17 +137,12 @@ impl BotMode {
     }
 }
 
-impl Default for BotMode {
-    fn default() -> Self {
-        BotMode::Paper
-    }
-}
-
 /// Allowance status for live trading.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AllowanceStatus {
     /// Not checked yet.
+    #[default]
     Unknown,
     /// Checking allowances in progress.
     Checking,
@@ -200,12 +191,6 @@ impl AllowanceStatus {
             AllowanceStatus::Pending => "pending",
             AllowanceStatus::Failed => "failed",
         }
-    }
-}
-
-impl Default for AllowanceStatus {
-    fn default() -> Self {
-        AllowanceStatus::Unknown
     }
 }
 

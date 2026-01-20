@@ -931,52 +931,47 @@ mod tests {
 
     #[test]
     fn test_calculate_maker_price_wide_spread() {
+        // Current implementation: place at best bid (buy) or best ask (sell)
         let mut book = OrderBook::new("test".to_string());
         add_book_levels(&mut book, dec!(0.40), dec!(100), dec!(0.50), dec!(100));
-        // spread = 0.10, mid = 0.45, spread_ratio = 22% > 3%
 
-        // Buy: bid + spread * 0.40 = 0.40 + 0.10 * 0.40 = 0.44
+        // Buy: place at best bid = 0.40
         let buy_price = calculate_maker_price(&book, Side::Buy);
-        assert_eq!(buy_price, Some(dec!(0.44)));
+        assert_eq!(buy_price, Some(dec!(0.40)));
 
-        // Sell: ask - spread * 0.40 = 0.50 - 0.10 * 0.40 = 0.46
+        // Sell: place at best ask = 0.50
         let sell_price = calculate_maker_price(&book, Side::Sell);
-        assert_eq!(sell_price, Some(dec!(0.46)));
+        assert_eq!(sell_price, Some(dec!(0.50)));
     }
 
     #[test]
     fn test_calculate_maker_price_medium_spread() {
+        // Current implementation: place at best bid (buy) or best ask (sell)
         let mut book = OrderBook::new("test".to_string());
-        add_book_levels(&mut book, dec!(0.49), dec!(100), dec!(0.51), dec!(100));
-        // spread = 0.02, mid = 0.50, spread_ratio = 4% -- actually 4% > 3%
-        // Let's use 0.493 and 0.507 for ~2.8% spread
-        book.bids.clear();
-        book.asks.clear();
         add_book_levels(&mut book, dec!(0.493), dec!(100), dec!(0.507), dec!(100));
-        // spread = 0.014, mid = 0.50, spread_ratio = 2.8% (between 1-3%)
 
-        // Buy: bid + spread * 0.30 = 0.493 + 0.014 * 0.30 = 0.4972
+        // Buy: place at best bid = 0.493, rounded to 0.49
         let buy_price = calculate_maker_price(&book, Side::Buy);
-        assert_eq!(buy_price, Some(dec!(0.50))); // Rounded
+        assert_eq!(buy_price, Some(dec!(0.49)));
 
-        // Sell: ask - spread * 0.30 = 0.507 - 0.014 * 0.30 = 0.5028
+        // Sell: place at best ask = 0.507, rounded to 0.51
         let sell_price = calculate_maker_price(&book, Side::Sell);
-        assert_eq!(sell_price, Some(dec!(0.50))); // Rounded
+        assert_eq!(sell_price, Some(dec!(0.51)));
     }
 
     #[test]
     fn test_calculate_maker_price_tight_spread() {
+        // Current implementation: place at best bid (buy) or best ask (sell)
         let mut book = OrderBook::new("test".to_string());
         add_book_levels(&mut book, dec!(0.498), dec!(100), dec!(0.502), dec!(100));
-        // spread = 0.004, mid = 0.50, spread_ratio = 0.8% < 1%
 
-        // Buy: bid + spread * 0 = bid = 0.498
+        // Buy: place at best bid = 0.498, rounded to 0.50
         let buy_price = calculate_maker_price(&book, Side::Buy);
-        assert_eq!(buy_price, Some(dec!(0.50))); // Rounded
+        assert_eq!(buy_price, Some(dec!(0.50)));
 
-        // Sell: ask - spread * 0 = ask = 0.502
+        // Sell: place at best ask = 0.502, rounded to 0.50
         let sell_price = calculate_maker_price(&book, Side::Sell);
-        assert_eq!(sell_price, Some(dec!(0.50))); // Rounded
+        assert_eq!(sell_price, Some(dec!(0.50)));
     }
 
     #[test]

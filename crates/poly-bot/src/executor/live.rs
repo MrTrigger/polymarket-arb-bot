@@ -199,10 +199,10 @@ impl Wallet {
 
         // CREATE2 address = keccak256(0xff ++ factory ++ salt ++ init_code_hash)[12:]
         let mut create2_hasher = Keccak256::new();
-        create2_hasher.update(&[0xff]);
+        create2_hasher.update([0xff]);
         create2_hasher.update(factory.as_bytes());
-        create2_hasher.update(&salt);
-        create2_hasher.update(&init_code_hash_bytes);
+        create2_hasher.update(salt);
+        create2_hasher.update(init_code_hash_bytes);
         let create2_hash = create2_hasher.finalize();
 
         // Address is the last 20 bytes
@@ -1693,7 +1693,7 @@ mod tests {
         assert_eq!(config.api_endpoint, endpoints::CLOB_REST);
         assert_eq!(config.order_timeout_ms, 30_000);
         assert!(config.enable_shadow);
-        assert_eq!(config.fee_rate_bps, 0);
+        assert_eq!(config.fee_rate_bps, 1000); // 10% maker fee for crypto up/down markets
     }
 
     #[test]

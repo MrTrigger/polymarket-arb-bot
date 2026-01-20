@@ -690,49 +690,50 @@ mod tests {
     #[test]
     fn test_distance_confidence() {
         // Distance confidence formula: clamp(floor + per_atr * atr_mult, floor, 1.0)
-        // Default floor=0.20, per_atr=0.50
+        // Sweep optimal defaults: floor=0.15, per_atr=0.30
         let pm = PositionManager::with_budget(dec!(1000));
 
-        // 0 ATR: 0.20 + 0.50 * 0 = 0.20 (floor)
-        assert_eq!(pm.distance_confidence(dec!(0.0)), dec!(0.20));
+        // 0 ATR: 0.15 + 0.30 * 0 = 0.15 (floor)
+        assert_eq!(pm.distance_confidence(dec!(0.0)), dec!(0.15));
 
-        // 0.5 ATR: 0.20 + 0.50 * 0.5 = 0.45
-        assert_eq!(pm.distance_confidence(dec!(0.5)), dec!(0.45));
+        // 0.5 ATR: 0.15 + 0.30 * 0.5 = 0.30
+        assert_eq!(pm.distance_confidence(dec!(0.5)), dec!(0.30));
 
-        // 1.0 ATR: 0.20 + 0.50 * 1.0 = 0.70
-        assert_eq!(pm.distance_confidence(dec!(1.0)), dec!(0.70));
+        // 1.0 ATR: 0.15 + 0.30 * 1.0 = 0.45
+        assert_eq!(pm.distance_confidence(dec!(1.0)), dec!(0.45));
 
-        // 1.6 ATR: 0.20 + 0.50 * 1.6 = 1.0 (capped)
-        assert_eq!(pm.distance_confidence(dec!(1.6)), dec!(1.0));
+        // 2.0 ATR: 0.15 + 0.30 * 2.0 = 0.75
+        assert_eq!(pm.distance_confidence(dec!(2.0)), dec!(0.75));
 
-        // 2.0 ATR: 0.20 + 0.50 * 2.0 = 1.2 -> capped to 1.0
-        assert_eq!(pm.distance_confidence(dec!(2.0)), dec!(1.0));
+        // 3.0 ATR: 0.15 + 0.30 * 3.0 = 1.05 -> capped to 1.0
+        assert_eq!(pm.distance_confidence(dec!(3.0)), dec!(1.0));
     }
 
     #[test]
     fn test_calculate_confidence() {
-        // Default ATR is $100, time_conf_floor=0.30, dist_conf params: floor=0.20, per_atr=0.50
+        // Default ATR is $100, time_conf_floor=0.30
+        // Sweep optimal dist_conf params: floor=0.15, per_atr=0.30
         let pm = PositionManager::with_budget(dec!(1000));
         const WINDOW: i64 = 900;
 
         // Early market (840s = 14min), close to strike ($15 = 0.15 ATR)
         // time_conf = 0.30 + 0.70 * (1 - 840/900) = 0.30 + 0.70 * 0.067 ≈ 0.347
-        // dist_conf = 0.20 + 0.50 * 0.15 = 0.275
-        // combined = sqrt(0.347 * 0.275) ≈ 0.31
+        // dist_conf = 0.15 + 0.30 * 0.15 = 0.195
+        // combined = sqrt(0.347 * 0.195) ≈ 0.26
         let conf1 = pm.calculate_confidence(dec!(15), 840, WINDOW);
         assert!(conf1 < dec!(0.50), "Expected low confidence, got {}", conf1);
 
-        // Late market (120s = 2min), far from strike ($150 = 1.5 ATR)
+        // Late market (120s = 2min), far from strike ($200 = 2.0 ATR)
         // time_conf = 0.30 + 0.70 * (1 - 120/900) = 0.30 + 0.70 * 0.867 ≈ 0.907
-        // dist_conf = 0.20 + 0.50 * 1.5 = 0.95
-        // combined = sqrt(0.907 * 0.95) * 1.2 (boost) ≈ 1.0
-        let conf2 = pm.calculate_confidence(dec!(150), 120, WINDOW);
+        // dist_conf = 0.15 + 0.30 * 2.0 = 0.75 (> 0.7, qualifies for boost)
+        // combined = sqrt(0.907 * 0.75) ≈ 0.825 * 1.2 (boost) ≈ 0.99
+        let conf2 = pm.calculate_confidence(dec!(200), 120, WINDOW);
         assert!(conf2 > dec!(0.90), "Expected high confidence, got {}", conf2);
 
         // Late market (60s = 1min), at strike ($5 = 0.05 ATR)
         // time_conf = 0.30 + 0.70 * (1 - 60/900) = 0.30 + 0.70 * 0.933 ≈ 0.953
-        // dist_conf = 0.20 + 0.50 * 0.05 = 0.225
-        // combined = sqrt(0.953 * 0.225) ≈ 0.46
+        // dist_conf = 0.15 + 0.30 * 0.05 = 0.165
+        // combined = sqrt(0.953 * 0.165) ≈ 0.40
         let conf3 = pm.calculate_confidence(dec!(5), 60, WINDOW);
         assert!(conf3 < dec!(0.60), "Expected moderate confidence, got {}", conf3);
     }
