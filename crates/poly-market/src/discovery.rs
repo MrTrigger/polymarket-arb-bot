@@ -24,23 +24,6 @@ const UP_DOWN_KEYWORDS: &[&str] = &["up or down", "higher or lower", "above or b
 /// Binance REST API base URL.
 const BINANCE_API_URL: &str = "https://api.binance.com";
 
-/// Ethereum mainnet RPC URL (free public endpoint).
-/// Used for querying Chainlink price feeds.
-const ETH_RPC_URL: &str = "https://rpc.ankr.com/eth";
-
-/// Chainlink price feed contract addresses on Ethereum mainnet.
-/// These are the same feeds Polymarket uses for market resolution.
-mod chainlink_feeds {
-    /// BTC/USD price feed
-    pub const BTC_USD: &str = "0xF4030086522a5bEEa4988F8cA5B36dbC97BeE88c";
-    /// ETH/USD price feed
-    pub const ETH_USD: &str = "0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419";
-    /// SOL/USD price feed
-    pub const SOL_USD: &str = "0x4ffC43a60e009B551865A93d232E33Fce9f01507";
-    /// XRP/USD price feed (Note: may not be available on mainnet)
-    pub const XRP_USD: &str = "0xCed2660c6Dd1Ffd856A5A82C67f3482d88C50b12";
-}
-
 /// Errors that can occur during market discovery.
 #[derive(Debug, Error)]
 pub enum DiscoveryError {
@@ -170,181 +153,12 @@ impl MarketDiscovery {
         })
     }
 
-    /// Fetch historical price from Chainlink oracle at a specific time.
-    ///
-    /// This queries the same Chainlink price feeds that Polymarket uses for
-    /// market resolution, ensuring our strike price matches theirs exactly.
-    ///
-    /// Searches backwards through Chainlink rounds to find the price that was
-    /// active at the target timestamp.
-    pub async fn fetch_chainlink_price(
-        &self,
-        asset: CryptoAsset,
-        at_time: DateTime<Utc>,
-    ) -> Result<Option<Decimal>, DiscoveryError> {
-        // Get the Chainlink feed address for this asset
-        let feed_address = match asset {
-            CryptoAsset::Btc => chainlink_feeds::BTC_USD,
-            CryptoAsset::Eth => chainlink_feeds::ETH_USD,
-            CryptoAsset::Sol => chainlink_feeds::SOL_USD,
-            CryptoAsset::Xrp => chainlink_feeds::XRP_USD,
-        };
-
-        let target_timestamp = at_time.timestamp() as u64;
-        info!(
-            "Fetching Chainlink historical price for {} at {} (unix={})",
-            asset, at_time, target_timestamp
-        );
-
-        // Function selectors (first 4 bytes of keccak256 hash of function signature)
-        // latestRoundData() = 0xfeaf968c
-        // getRoundData(uint80) = 0x9a6fc8f5
-        // decimals() = 0x313ce567
-        const LATEST_ROUND_DATA: &str = "0xfeaf968c";
-        const GET_ROUND_DATA: &str = "0x9a6fc8f5";
-        const DECIMALS: &str = "0x313ce567";
-
-        // Helper to make eth_call and parse response
-        let make_call = |data: String| {
-            let http = self.http.clone();
-            let feed = feed_address.to_string();
-            async move {
-                let payload = serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "method": "eth_call",
-                    "params": [{"to": feed, "data": data}, "latest"],
-                    "id": 1
-                });
-                let resp = http.post(ETH_RPC_URL).json(&payload).send().await.ok()?;
-                let json: serde_json::Value = resp.json().await.ok()?;
-                json["result"].as_str().map(|s| s.trim_start_matches("0x").to_string())
-            }
-        };
-
-        // Get decimals
-        let decimals_hex = make_call(DECIMALS.to_string()).await.unwrap_or_else(|| "8".to_string());
-        let decimals = u8::from_str_radix(&decimals_hex, 16).unwrap_or(8);
-
-        // Get latest round to find current roundId
-        let latest_result = match make_call(LATEST_ROUND_DATA.to_string()).await {
-            Some(r) if r.len() >= 320 => r,
-            _ => {
-                warn!("Failed to get latest Chainlink round");
-                return Ok(None);
-            }
-        };
-
-        // Parse roundId from latest (first 32 bytes = 64 hex chars)
-        let round_id_hex = &latest_result[0..64];
-        let current_round_id = u128::from_str_radix(round_id_hex, 16).unwrap_or(0);
-
-        // Parse latest round's updatedAt to check if we need to search backwards
-        let latest_updated_at_hex = &latest_result[192..256];
-        let latest_updated_at = u64::from_str_radix(latest_updated_at_hex, 16).unwrap_or(0);
-
-        // If latest round is before or at target time, use it directly
-        if latest_updated_at <= target_timestamp {
-            return self.parse_chainlink_round(&latest_result, decimals, target_timestamp, asset);
-        }
-
-        // Search backwards through rounds to find the one active at target_timestamp
-        // Chainlink roundId format: phaseId (16 bits) << 64 | aggregatorRoundId (64 bits)
-        let phase_id = current_round_id >> 64;
-        let mut aggregator_round = current_round_id & ((1u128 << 64) - 1);
-
-        const MAX_SEARCH_ROUNDS: u32 = 100; // Limit search to avoid excessive RPC calls
-
-        for i in 0..MAX_SEARCH_ROUNDS {
-            if aggregator_round == 0 {
-                warn!("Reached beginning of Chainlink phase, cannot find historical price");
-                break;
-            }
-
-            aggregator_round -= 1;
-            let prev_round_id = (phase_id << 64) | aggregator_round;
-
-            // Encode getRoundData(uint80 _roundId) call
-            // Function selector + roundId padded to 32 bytes
-            let call_data = format!("{}{:064x}", GET_ROUND_DATA, prev_round_id);
-
-            let round_result = match make_call(call_data).await {
-                Some(r) if r.len() >= 320 => r,
-                _ => {
-                    debug!("Round {} doesn't exist or failed", prev_round_id);
-                    continue;
-                }
-            };
-
-            // Parse updatedAt from this round
-            let updated_at_hex = &round_result[192..256];
-            let updated_at = u64::from_str_radix(updated_at_hex, 16).unwrap_or(0);
-
-            if updated_at == 0 {
-                continue; // Invalid round
-            }
-
-            // Found a round that was updated before or at our target time
-            if updated_at <= target_timestamp {
-                info!(
-                    "Found Chainlink round {} after searching {} rounds (updated_at={}, target={})",
-                    prev_round_id, i + 1, updated_at, target_timestamp
-                );
-                return self.parse_chainlink_round(&round_result, decimals, target_timestamp, asset);
-            }
-        }
-
-        warn!(
-            "Could not find Chainlink round for timestamp {} after {} rounds",
-            target_timestamp, MAX_SEARCH_ROUNDS
-        );
-        Ok(None)
-    }
-
-    /// Parse a Chainlink round result and convert to Decimal price.
-    fn parse_chainlink_round(
-        &self,
-        result_hex: &str,
-        decimals: u8,
-        target_timestamp: u64,
-        asset: CryptoAsset,
-    ) -> Result<Option<Decimal>, DiscoveryError> {
-        // Parse the ABI-encoded response (5 x 32 bytes = 160 bytes = 320 hex chars)
-        // roundId (uint80), answer (int256), startedAt (uint256), updatedAt (uint256), answeredInRound (uint80)
-        if result_hex.len() < 320 {
-            warn!("Chainlink response too short: {} chars", result_hex.len());
-            return Ok(None);
-        }
-
-        // Extract answer (bytes 32-64, which is chars 64-128)
-        let answer_hex = &result_hex[64..128];
-        let answer = i128::from_str_radix(answer_hex, 16).unwrap_or(0);
-
-        if answer <= 0 {
-            warn!("Chainlink returned invalid price: {}", answer);
-            return Ok(None);
-        }
-
-        // Extract updatedAt (bytes 96-128, chars 192-256)
-        let updated_at_hex = &result_hex[192..256];
-        let updated_at = u64::from_str_radix(updated_at_hex, 16).unwrap_or(0);
-
-        // Convert from Chainlink's decimal format (usually 8 decimals)
-        let divisor = 10i128.pow(decimals as u32);
-        let price = Decimal::from(answer) / Decimal::from(divisor);
-
-        let time_diff = (updated_at as i64) - (target_timestamp as i64);
-
-        info!(
-            "Chainlink historical price for {} at target {}: ${} (round_time={}, diff={}s)",
-            asset, target_timestamp, price, updated_at, time_diff
-        );
-
-        Ok(Some(price))
-    }
-
     /// Fetch historical spot price from Binance at a specific time.
     ///
-    /// This is used as a fallback when Chainlink query fails.
+    /// We use Binance for both strike AND live prices to maintain consistency.
+    /// This ensures our above/below strike calculations are accurate, even though
+    /// Polymarket uses a different data source (Chainlink Data Streams) for resolution.
+    /// Using the same source for both gives us accurate relative positioning.
     ///
     /// Returns the open price of the 1-minute candle that contains the given timestamp.
     pub async fn fetch_historical_spot_price(
@@ -488,40 +302,25 @@ impl MarketDiscovery {
             // Check if this is a 15-minute crypto market
             if let Some(mut market) = self.parse_crypto_market(&event)? {
                 // For "Up or Down" markets with no strike in title:
-                // If the market is already in progress, fetch historical price.
-                // Try Chainlink first (same oracle Polymarket uses), fall back to Binance.
+                // If the market is already in progress, fetch historical price from Binance.
+                // We use Binance for both strike AND live prices to maintain consistency -
+                // this ensures our above/below strike calculations are accurate even though
+                // Polymarket uses a different data source (Chainlink Data Streams).
                 if market.strike_price.is_zero() && market.is_active() {
-                    // Try Chainlink first - this is the same oracle Polymarket uses
-                    let chainlink_price = self
-                        .fetch_chainlink_price(market.asset, market.window_start)
+                    if let Ok(Some(historical_price)) = self
+                        .fetch_historical_spot_price(market.asset, market.window_start)
                         .await
-                        .ok()
-                        .flatten();
-
-                    if let Some(price) = chainlink_price {
+                    {
                         info!(
-                            "Setting strike for {} from Chainlink at {}: ${}",
-                            market.event_id, market.window_start, price
+                            "Setting strike for {} from Binance at {}: ${}",
+                            market.event_id, market.window_start, historical_price
                         );
-                        market.strike_price = price;
+                        market.strike_price = historical_price;
                     } else {
-                        // Fall back to Binance
-                        warn!("Chainlink query failed, falling back to Binance for strike price");
-                        if let Ok(Some(historical_price)) = self
-                            .fetch_historical_spot_price(market.asset, market.window_start)
-                            .await
-                        {
-                            info!(
-                                "Setting strike for {} from Binance at {}: ${} (fallback)",
-                                market.event_id, market.window_start, historical_price
-                            );
-                            market.strike_price = historical_price;
-                        } else {
-                            warn!(
-                                "Could not fetch historical price for {}, strike will be set from first spot price",
-                                market.event_id
-                            );
-                        }
+                        warn!(
+                            "Could not fetch historical price for {}, strike will be set from first spot price",
+                            market.event_id
+                        );
                     }
                 }
 
@@ -547,7 +346,7 @@ impl MarketDiscovery {
     /// Discover all active markets (including previously seen).
     ///
     /// For "Up or Down" markets that are already in progress, this will
-    /// fetch the historical price from Chainlink (with Binance fallback).
+    /// fetch the historical price from Binance to determine the strike price.
     pub async fn discover_all(&mut self) -> Result<Vec<DiscoveredMarket>, DiscoveryError> {
         let events = self.fetch_active_events().await?;
         let mut markets = Vec::new();
@@ -555,31 +354,18 @@ impl MarketDiscovery {
         for event in events {
             if let Some(mut market) = self.parse_crypto_market(&event)? {
                 // For "Up or Down" markets with no strike in title:
-                // If the market is already in progress, fetch historical price
-                if market.strike_price.is_zero() && market.is_active() {
-                    // Try Chainlink first
-                    let chainlink_price = self
-                        .fetch_chainlink_price(market.asset, market.window_start)
-                        .await
-                        .ok()
-                        .flatten();
-
-                    if let Some(price) = chainlink_price {
-                        debug!(
-                            "Setting strike price for {} from Chainlink: ${}",
-                            market.event_id, price
-                        );
-                        market.strike_price = price;
-                    } else if let Ok(Some(historical_price)) = self
+                // If the market is already in progress, fetch historical price from Binance.
+                if market.strike_price.is_zero()
+                    && market.is_active()
+                    && let Ok(Some(historical_price)) = self
                         .fetch_historical_spot_price(market.asset, market.window_start)
                         .await
-                    {
-                        debug!(
-                            "Setting strike price for {} from Binance (fallback): ${}",
-                            market.event_id, historical_price
-                        );
-                        market.strike_price = historical_price;
-                    }
+                {
+                    debug!(
+                        "Setting strike price for {} from Binance: ${}",
+                        market.event_id, historical_price
+                    );
+                    market.strike_price = historical_price;
                 }
 
                 // Track in known markets
