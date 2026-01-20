@@ -2269,9 +2269,10 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                                 post_only_retries += 1;
                                 if post_only_retries >= MAX_POST_ONLY_RETRIES {
                                     debug!("POST_ONLY max retries reached for UP order");
-                                    break Ok(OrderResult::Pending(crate::executor::PendingOrder {
+                                    // Return Rejected (not Pending) - no real order on exchange
+                                    break Ok(OrderResult::Rejected(crate::executor::OrderRejection {
                                         request_id: format!("dir-{}-up", req_id_base),
-                                        order_id: "post_only_max_retries".to_string(),
+                                        reason: "POST_ONLY max retries reached".to_string(),
                                         timestamp: Utc::now(),
                                     }));
                                 }
@@ -2284,9 +2285,10 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                                     continue;
                                 } else {
                                     debug!("No fresh price available for UP order retry");
-                                    break Ok(OrderResult::Pending(crate::executor::PendingOrder {
+                                    // Return Rejected (not Pending) - no real order on exchange
+                                    break Ok(OrderResult::Rejected(crate::executor::OrderRejection {
                                         request_id: format!("dir-{}-up", req_id_base),
-                                        order_id: "no_fresh_price".to_string(),
+                                        reason: "No fresh price available".to_string(),
                                         timestamp: Utc::now(),
                                     }));
                                 }
@@ -2302,9 +2304,13 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                                     timestamp: Utc::now(),
                                 }));
                             } else {
-                                break Ok(OrderResult::Pending(crate::executor::PendingOrder {
+                                // Return Rejected (not Pending) - chase cancelled any orders
+                                let reason = chase_result.stop_reason
+                                    .map(|r| format!("Chase stopped: {:?}", r))
+                                    .unwrap_or_else(|| "Chase failed".to_string());
+                                break Ok(OrderResult::Rejected(crate::executor::OrderRejection {
                                     request_id: format!("dir-{}-up", req_id_base),
-                                    order_id: "chase_failed".to_string(),
+                                    reason,
                                     timestamp: Utc::now(),
                                 }));
                             }
@@ -2367,9 +2373,10 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                                 post_only_retries += 1;
                                 if post_only_retries >= MAX_POST_ONLY_RETRIES {
                                     debug!("POST_ONLY max retries reached for DOWN order");
-                                    break Ok(OrderResult::Pending(crate::executor::PendingOrder {
+                                    // Return Rejected (not Pending) - no real order on exchange
+                                    break Ok(OrderResult::Rejected(crate::executor::OrderRejection {
                                         request_id: format!("dir-{}-down", req_id_base),
-                                        order_id: "post_only_max_retries".to_string(),
+                                        reason: "POST_ONLY max retries reached".to_string(),
                                         timestamp: Utc::now(),
                                     }));
                                 }
@@ -2382,9 +2389,10 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                                     continue;
                                 } else {
                                     debug!("No fresh price available for DOWN order retry");
-                                    break Ok(OrderResult::Pending(crate::executor::PendingOrder {
+                                    // Return Rejected (not Pending) - no real order on exchange
+                                    break Ok(OrderResult::Rejected(crate::executor::OrderRejection {
                                         request_id: format!("dir-{}-down", req_id_base),
-                                        order_id: "no_fresh_price".to_string(),
+                                        reason: "No fresh price available".to_string(),
                                         timestamp: Utc::now(),
                                     }));
                                 }
@@ -2400,9 +2408,13 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                                     timestamp: Utc::now(),
                                 }));
                             } else {
-                                break Ok(OrderResult::Pending(crate::executor::PendingOrder {
+                                // Return Rejected (not Pending) - chase cancelled any orders
+                                let reason = chase_result.stop_reason
+                                    .map(|r| format!("Chase stopped: {:?}", r))
+                                    .unwrap_or_else(|| "Chase failed".to_string());
+                                break Ok(OrderResult::Rejected(crate::executor::OrderRejection {
                                     request_id: format!("dir-{}-down", req_id_base),
-                                    order_id: "chase_failed".to_string(),
+                                    reason,
                                     timestamp: Utc::now(),
                                 }));
                             }
@@ -3106,8 +3118,11 @@ mod tests {
         let executor = MockExecutor::new(dec!(1000));
         let state = Arc::new(GlobalState::new());
         let config = StrategyConfig::default();
+        // Explicitly enable arb for this test (disabled by default due to fees)
+        let mut engines_config = EnginesConfig::default();
+        engines_config.arbitrage.enabled = true;
 
-        let mut strategy = StrategyLoop::new(data_source, executor, state.clone(), config);
+        let mut strategy = StrategyLoop::with_engines(data_source, executor, state.clone(), config, engines_config);
         state.enable_trading();
 
         let _ = strategy.run().await;

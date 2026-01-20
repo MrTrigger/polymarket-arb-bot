@@ -705,7 +705,10 @@ impl EnginesConfig {
     /// Create a config with only arbitrage enabled (backward compatible).
     pub fn arbitrage_only() -> Self {
         Self {
-            arbitrage: ArbitrageEngineConfig::default(),
+            arbitrage: ArbitrageEngineConfig {
+                enabled: true, // Explicitly enable for arb-only mode
+                ..Default::default()
+            },
             directional: DirectionalEngineConfig {
                 enabled: false,
                 ..Default::default()
@@ -776,7 +779,7 @@ pub struct ArbitrageEngineConfig {
 impl Default for ArbitrageEngineConfig {
     fn default() -> Self {
         Self {
-            enabled: true, // Arbitrage enabled by default (backward compatible)
+            enabled: false, // Disabled: taker fees (~3%) exceed typical arb margins (~2.5%)
             min_margin_early_bps: 250, // 2.5%
             min_margin_mid_bps: 150,   // 1.5%
             min_margin_late_bps: 50,   // 0.5%
@@ -1713,7 +1716,7 @@ struct ArbitrageEngineToml {
 impl Default for ArbitrageEngineToml {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false, // Disabled: taker fees exceed typical arb margins
             min_margin_early_bps: 250,
             min_margin_mid_bps: 150,
             min_margin_late_bps: 50,
@@ -2290,9 +2293,8 @@ mod tests {
     fn test_engines_config_default() {
         let config = EnginesConfig::default();
 
-        // Arbitrage enabled by default
-        assert!(config.arbitrage.enabled);
-        // Directional and maker disabled by default
+        // All engines disabled by default (arb fees exceed margins)
+        assert!(!config.arbitrage.enabled);
         assert!(!config.directional.enabled);
         assert!(!config.maker.enabled);
 
@@ -2332,13 +2334,18 @@ mod tests {
     fn test_engines_config_enabled_engines() {
         let mut config = EnginesConfig::default();
 
-        // Default: only arbitrage enabled
+        // Default: no engines enabled
         let enabled = config.enabled_engines();
-        assert_eq!(enabled.len(), 1);
-        assert_eq!(enabled[0], EngineType::Arbitrage);
+        assert_eq!(enabled.len(), 0);
 
         // Enable directional
         config.directional.enabled = true;
+        let enabled = config.enabled_engines();
+        assert_eq!(enabled.len(), 1);
+        assert_eq!(enabled[0], EngineType::Directional);
+
+        // Enable arbitrage too
+        config.arbitrage.enabled = true;
         let enabled = config.enabled_engines();
         assert_eq!(enabled.len(), 2);
         assert_eq!(enabled[0], EngineType::Arbitrage);
@@ -2363,7 +2370,7 @@ mod tests {
     fn test_arbitrage_engine_config_default() {
         let config = ArbitrageEngineConfig::default();
 
-        assert!(config.enabled);
+        assert!(!config.enabled); // Disabled: taker fees exceed typical arb margins
         assert_eq!(config.min_margin_early_bps, 250);
         assert_eq!(config.min_margin_mid_bps, 150);
         assert_eq!(config.min_margin_late_bps, 50);
@@ -2528,12 +2535,12 @@ mod tests {
 
         let config = BotConfig::from_toml_str(toml).unwrap();
 
-        // Default: only arbitrage enabled
-        assert!(config.engines.arbitrage.enabled);
+        // Default: no engines enabled (arb fees exceed margins)
+        assert!(!config.engines.arbitrage.enabled);
         assert!(!config.engines.directional.enabled);
         assert!(!config.engines.maker.enabled);
 
-        // Default priority
+        // Default priority (still defined even if engines disabled)
         assert_eq!(config.engines.priority[0], EngineType::Arbitrage);
     }
 }

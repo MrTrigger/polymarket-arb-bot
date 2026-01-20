@@ -105,7 +105,7 @@ min_time_remaining_secs = 30
 
 [risk.advanced]
 # Risk evaluation mode: "arb", "directional", or "both"
-risk_mode = "both"
+risk_mode = "directional"
 
 # Trip circuit breaker after this many consecutive failed orders
 max_consecutive_failures = 3

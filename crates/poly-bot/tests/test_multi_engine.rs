@@ -109,8 +109,8 @@ fn test_engine_type_equality() {
 fn test_engines_config_default() {
     let config = EnginesConfig::default();
 
-    // Only arbitrage enabled by default
-    assert!(config.arbitrage.enabled);
+    // No engines enabled by default (arb fees exceed margins)
+    assert!(!config.arbitrage.enabled);
     assert!(!config.directional.enabled);
     assert!(!config.maker.enabled);
 }
@@ -127,11 +127,12 @@ fn test_engines_config_arbitrage_only() {
 #[test]
 fn test_engines_config_any_enabled() {
     let mut config = EnginesConfig::default();
+    assert!(!config.any_enabled()); // Nothing enabled by default
+
+    config.arbitrage.enabled = true;
     assert!(config.any_enabled()); // Arbitrage enabled
 
     config.arbitrage.enabled = false;
-    assert!(!config.any_enabled()); // Nothing enabled
-
     config.directional.enabled = true;
     assert!(config.any_enabled()); // Directional enabled
 }
@@ -139,6 +140,7 @@ fn test_engines_config_any_enabled() {
 #[test]
 fn test_engines_config_enabled_engines() {
     let mut config = EnginesConfig::default();
+    config.arbitrage.enabled = true;
     config.directional.enabled = true;
     config.maker.enabled = true;
 
