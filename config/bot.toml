@@ -215,10 +215,6 @@ lean_up_ratio = 0.65
 # Confidence ratio for neutral (no signal)
 neutral_ratio = 0.50
 
-# Maximum edge factor required at window start (0.08 = 8% EV)
-# Lower values trade more frequently, higher values are more selective
-max_edge_factor = 0.01
-
 [engines.maker]
 # Enable market maker engine (provide liquidity, collect spread)
 enabled = false

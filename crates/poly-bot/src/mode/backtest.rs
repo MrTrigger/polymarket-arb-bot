@@ -1175,11 +1175,6 @@ fn apply_parameter(config: &mut BacktestModeConfig, name: &str, value: f64) {
             config.strategy.final_threshold =
                 Decimal::from_f64_retain(value).unwrap_or_default();
         }
-        // Edge-based mode (minimum EV required at window start)
-        "max_edge_factor" => {
-            config.strategy.max_edge_factor =
-                Decimal::from_f64_retain(value).unwrap_or_default();
-        }
         // Confidence calculation params (EV-based mode)
         "time_conf_floor" => {
             config.strategy.time_conf_floor =

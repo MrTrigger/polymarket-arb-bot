@@ -840,17 +840,6 @@ pub struct DirectionalEngineConfig {
     /// Default: 0.50 (50% UP, 50% DOWN)
     pub neutral_ratio: Decimal,
 
-    // --- Edge Requirement ---
-    // Dynamic edge requirement that decays linearly with time.
-    // At window start: required_confidence = price + max_edge_factor
-    // At window end: required_confidence = price (no edge required)
-
-    /// Maximum edge factor at start of window (as ratio 0-1).
-    /// This decays linearly to 0 at window end.
-    /// Example: 0.20 means 20% edge required at window start.
-    /// Formula: min_edge = max_edge_factor * (time_remaining / window_duration)
-    /// Required confidence = favorable_price + min_edge
-    pub max_edge_factor: Decimal,
 }
 
 impl Default for DirectionalEngineConfig {
@@ -868,8 +857,6 @@ impl Default for DirectionalEngineConfig {
             strong_up_ratio: Decimal::new(78, 2),  // 0.78
             lean_up_ratio: Decimal::new(60, 2),    // 0.60
             neutral_ratio: Decimal::new(50, 2),    // 0.50
-            // Edge requirement
-            max_edge_factor: Decimal::new(20, 2),  // 0.20 = 20% edge at window start
         }
     }
 }
@@ -881,47 +868,18 @@ impl DirectionalEngineConfig {
         Decimal::ONE - up_ratio
     }
 
-    /// Calculate the minimum edge required at the given time.
+    /// Calculate the required confidence for a trade at the given price.
     ///
-    /// The edge requirement decays linearly from `max_edge_factor` at window start
-    /// to 0 at window end.
-    ///
-    /// Formula: `min_edge = max_edge_factor * (seconds_remaining / window_duration_secs)`
-    ///
-    /// # Arguments
-    /// * `seconds_remaining` - Seconds left in the market window
-    /// * `window_duration_secs` - Total window duration in seconds (e.g., 900 for 15min)
-    ///
-    /// # Returns
-    /// The minimum edge required as a decimal (e.g., 0.10 = 10% edge)
-    #[inline]
-    pub fn min_edge(&self, seconds_remaining: i64, window_duration_secs: i64) -> Decimal {
-        if window_duration_secs <= 0 || seconds_remaining <= 0 {
-            return Decimal::ZERO;
-        }
-        let time_factor = Decimal::new(seconds_remaining, 0) / Decimal::new(window_duration_secs, 0);
-        self.max_edge_factor * time_factor
-    }
-
-    /// Calculate the required confidence for a trade at the given price and time.
-    ///
-    /// Formula: `required_confidence = price + min_edge(time)`
+    /// Since EV = confidence - price, we need confidence > price to have positive EV.
     ///
     /// # Arguments
     /// * `favorable_price` - The price of the side we're buying (0-1)
-    /// * `seconds_remaining` - Seconds left in the market window
-    /// * `window_duration_secs` - Total window duration in seconds
     ///
     /// # Returns
-    /// The minimum confidence required to trade (may exceed 1.0, meaning no trade possible)
+    /// The minimum confidence required to trade (equal to the price)
     #[inline]
-    pub fn required_confidence(
-        &self,
-        favorable_price: Decimal,
-        seconds_remaining: i64,
-        window_duration_secs: i64,
-    ) -> Decimal {
-        favorable_price + self.min_edge(seconds_remaining, window_duration_secs)
+    pub fn required_confidence(&self, favorable_price: Decimal) -> Decimal {
+        favorable_price
     }
 
     /// Get allocation ratios for StrongUp signal.
@@ -1194,8 +1152,6 @@ pub struct SweepConfig {
     pub strong_ratios: Vec<f64>,
     /// Lean UP ratio values to sweep.
     pub lean_ratios: Vec<f64>,
-    /// Edge factor values to sweep (minimum EV required at window start).
-    pub edge_factors: Vec<f64>,
     /// Early threshold values to sweep (legacy phase-based mode).
     pub early_thresholds: Vec<f64>,
     /// Final threshold values to sweep (legacy phase-based mode).
@@ -1228,7 +1184,6 @@ impl SweepConfig {
         Ok(Self {
             strong_ratios: toml.sweep.strong_ratios,
             lean_ratios: toml.sweep.lean_ratios,
-            edge_factors: toml.sweep.edge_factors,
             early_thresholds: toml.sweep.early_thresholds,
             final_thresholds: toml.sweep.final_thresholds,
             time_conf_floors: toml.sweep.time_conf_floors,
@@ -1271,12 +1226,7 @@ impl SweepConfig {
             params.push(p);
         }
 
-        // Edge factor (minimum EV required)
-        if let Some(p) = make_param("max_edge_factor", &self.edge_factors) {
-            params.push(p);
-        }
-
-        // Confidence calculation params (EV-based mode)
+        // Confidence calculation params
         if let Some(p) = make_param("time_conf_floor", &self.time_conf_floors) {
             params.push(p);
         }
@@ -1304,7 +1254,6 @@ struct StrategyToml {
 struct SweepToml {
     strong_ratios: Vec<f64>,
     lean_ratios: Vec<f64>,
-    edge_factors: Vec<f64>,
     early_thresholds: Vec<f64>,
     final_thresholds: Vec<f64>,
     time_conf_floors: Vec<f64>,
@@ -1319,7 +1268,6 @@ impl Default for SweepToml {
         Self {
             strong_ratios: Vec::new(),
             lean_ratios: Vec::new(),
-            edge_factors: Vec::new(),
             early_thresholds: Vec::new(),
             final_thresholds: Vec::new(),
             time_conf_floors: Vec::new(),
@@ -1740,7 +1688,6 @@ struct DirectionalEngineToml {
     strong_up_ratio: f64,
     lean_up_ratio: f64,
     neutral_ratio: f64,
-    max_edge_factor: f64,
 }
 
 impl Default for DirectionalEngineToml {
@@ -1756,7 +1703,6 @@ impl Default for DirectionalEngineToml {
             strong_up_ratio: 0.78,
             lean_up_ratio: 0.60,
             neutral_ratio: 0.50,
-            max_edge_factor: 0.20,
         }
     }
 }
@@ -1960,7 +1906,6 @@ impl From<TomlConfig> for BotConfig {
                     strong_up_ratio: f64_to_decimal(toml.engines.directional.strong_up_ratio),
                     lean_up_ratio: f64_to_decimal(toml.engines.directional.lean_up_ratio),
                     neutral_ratio: f64_to_decimal(toml.engines.directional.neutral_ratio),
-                    max_edge_factor: f64_to_decimal(toml.engines.directional.max_edge_factor),
                 },
                 maker: MakerEngineConfig {
                     enabled: toml.engines.maker.enabled,

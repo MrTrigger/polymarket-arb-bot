@@ -418,14 +418,12 @@ impl TrackedMarket {
         distance_dollars: Decimal,
         seconds_remaining: i64,
         favorable_price: Decimal,
-        max_edge_factor: Decimal,
         window_duration_secs: i64,
     ) -> position::TradeDecision {
         self.position_manager.should_trade(
             distance_dollars,
             seconds_remaining,
             favorable_price,
-            max_edge_factor,
             window_duration_secs,
         )
     }
@@ -438,14 +436,12 @@ impl TrackedMarket {
         confidence: Decimal,
         seconds_remaining: i64,
         favorable_price: Decimal,
-        max_edge_factor: Decimal,
         window_duration_secs: i64,
     ) -> position::TradeDecision {
         self.position_manager.should_trade_with_confidence(
             confidence,
             seconds_remaining,
             favorable_price,
-            max_edge_factor,
             window_duration_secs,
         )
     }
@@ -504,11 +500,6 @@ pub struct StrategyConfig {
     /// Minimum confidence for final phase (<2 min remaining).
     pub final_threshold: Decimal,
 
-    /// Maximum edge factor (minimum EV required at window start).
-    /// When > 0, uses EV-based: trade if (confidence - price) >= min_edge
-    /// When = 0, uses phase-based thresholds (legacy mode).
-    pub max_edge_factor: Decimal,
-
     // Confidence calculation params (EV-based mode)
     /// Minimum time confidence at window start (default 0.30).
     /// Formula: time_conf = floor + (1 - floor) * (1 - time_ratio)
@@ -541,13 +532,11 @@ impl Default for StrategyConfig {
             max_consecutive_failures: 3,
             block_on_toxic_high: true,
             window_duration_secs: 900, // 15-minute windows by default
-            // Legacy phase-based thresholds (used when max_edge_factor = 0)
+            // Legacy phase-based thresholds
             early_threshold: dec!(0.80),
             build_threshold: dec!(0.60),
             core_threshold: dec!(0.50),
             final_threshold: dec!(0.40),
-            // EV-based mode: trade if (confidence - price) >= min_edge
-            max_edge_factor: dec!(0.08), // 8% EV required at window start (sweep optimal)
             // Confidence calculation params
             time_conf_floor: dec!(0.30),     // 30% confidence at window start
             dist_conf_floor: dec!(0.15),     // 15% minimum for tiny moves (sweep optimal)
@@ -578,13 +567,12 @@ impl StrategyConfig {
             max_consecutive_failures: 3,
             block_on_toxic_high: true,
             window_duration_secs,
-            // Legacy phase thresholds (used when max_edge_factor = 0)
+            // Legacy phase thresholds
             early_threshold: dec!(0.80),
             build_threshold: dec!(0.60),
             core_threshold: dec!(0.50),
             final_threshold: dec!(0.40),
-            // EV-based mode params (sweep optimal)
-            max_edge_factor: dec!(0.08),
+            // Confidence calculation params
             time_conf_floor: dec!(0.30),
             dist_conf_floor: dec!(0.15),
             dist_conf_per_atr: dec!(0.30),
@@ -623,8 +611,7 @@ impl StrategyConfig {
             build_threshold,
             core_threshold,
             final_threshold,
-            // EV-based mode params (sweep optimal)
-            max_edge_factor: dec!(0.08),
+            // Confidence calculation params
             time_conf_floor: dec!(0.30),
             dist_conf_floor: dec!(0.15),
             dist_conf_per_atr: dec!(0.30),
@@ -995,10 +982,6 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                     let time_conf = dec!(0.30) + dec!(0.70) * (Decimal::ONE - time_ratio);
                     let dist_conf = (dec!(0.20) + dec!(0.50) * atr_mult).min(Decimal::ONE);
 
-                    // Calculate threshold
-                    let max_edge_factor = self.engines_config.directional.max_edge_factor;
-                    let min_edge = max_edge_factor * time_ratio;
-
                     // Use best ask as favorable price estimate (conservative)
                     let favorable_price = if event.price > market.strike_price {
                         // Price above strike - YES is favorable
@@ -1008,7 +991,9 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                         market.state.no_book.best_ask().unwrap_or(dec!(0.50))
                     };
 
+                    // EV = confidence - price. Trade if EV >= 0 (confidence >= price)
                     let ev = pm_conf - favorable_price;
+                    let min_edge = Decimal::ZERO;
                     let would_trade = ev >= min_edge;
 
                     let snapshot = crate::state::ConfidenceSnapshot::new(
@@ -1754,24 +1739,16 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                     let time_conf = dec!(0.30) + dec!(0.70) * (Decimal::ONE - time_ratio); // default params
                     let dist_conf = (dec!(0.20) + dec!(0.50) * atr_mult).min(Decimal::ONE); // default params
 
-                    // Calculate EV and min_edge for logging (matches position.rs logic)
+                    // Calculate EV for logging (matches position.rs logic)
+                    // EV = confidence - price. Trade if EV >= 0 (confidence >= price)
                     let favorable_price = opp.favorable_price();
-                    let max_edge_factor = self.engines_config.directional.max_edge_factor;
-                    let (ev, min_edge) = if max_edge_factor > Decimal::ZERO {
-                        // EV-based: EV = confidence - price, trade if EV >= min_edge
-                        let time_factor = Decimal::new(seconds_remaining, 0) / Decimal::new(window_duration_secs, 0);
-                        let edge = max_edge_factor * time_factor;
-                        (pm_conf - favorable_price, edge)
-                    } else {
-                        // Legacy phase-based thresholds
-                        (Decimal::ZERO, Decimal::ZERO)
-                    };
+                    let ev = pm_conf - favorable_price;
+                    let min_edge = Decimal::ZERO;
 
                     trace!(
-                        "📈 Confidence {} {}: dist${:.2} atr${:.2} atr_mult={:.2} | time_conf={:.2} dist_conf={:.2} | conf={:.2} EV={:.3} min_edge={:.3} ({})",
+                        "📈 Confidence {} {}: dist${:.2} atr${:.2} atr_mult={:.2} | time_conf={:.2} dist_conf={:.2} | conf={:.2} EV={:.3}",
                         event_id, asset, distance_dollars.abs(), atr, atr_mult,
-                        time_conf, dist_conf, pm_conf, ev, min_edge,
-                        if max_edge_factor > Decimal::ZERO { "EV-based" } else { "phase-based" },
+                        time_conf, dist_conf, pm_conf, ev,
                     );
 
                     // Sync confidence data to GlobalState for dashboard display
@@ -1790,12 +1767,11 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                     );
                     self.state.market_data.update_confidence(&event_id, snapshot);
 
-                    // Check if we should trade based on EV-based threshold and budget
+                    // Check if we should trade based on EV threshold and budget
                     let trade_decision = market.should_trade(
                         distance_dollars,
                         seconds_remaining,
                         favorable_price,
-                        max_edge_factor,
                         window_duration_secs,
                     );
 
