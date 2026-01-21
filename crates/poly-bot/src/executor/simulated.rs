@@ -174,6 +174,14 @@ pub struct SimulatedStats {
     pub max_drawdown: Decimal,
     /// Balance history for Sharpe ratio calculation (timestamp, balance).
     pub balance_history: Vec<(DateTime<Utc>, Decimal)>,
+    /// Gross profit from winning markets (sum of positive PnLs).
+    pub gross_profit: Decimal,
+    /// Gross loss from losing markets (sum of negative PnLs, stored as positive).
+    pub gross_loss: Decimal,
+    /// Timestamp when current drawdown started (None if at peak).
+    pub drawdown_start: Option<DateTime<Utc>>,
+    /// Maximum drawdown duration in seconds.
+    pub max_drawdown_duration_secs: i64,
 }
 
 impl SimulatedStats {
@@ -233,6 +241,121 @@ impl SimulatedStats {
     pub fn max_drawdown_pct(&self) -> Option<Decimal> {
         if self.peak_balance > Decimal::ZERO && self.max_drawdown > Decimal::ZERO {
             Some((self.max_drawdown / self.peak_balance) * Decimal::ONE_HUNDRED)
+        } else {
+            None
+        }
+    }
+
+    /// Calculate profit factor (gross profit / gross loss).
+    /// A value > 1 indicates profitability.
+    pub fn profit_factor(&self) -> Option<f64> {
+        if self.gross_loss <= Decimal::ZERO {
+            // No losses - infinite profit factor, return None
+            if self.gross_profit > Decimal::ZERO {
+                return Some(f64::INFINITY);
+            }
+            return None;
+        }
+
+        use rust_decimal::prelude::ToPrimitive;
+        let pf = self.gross_profit / self.gross_loss;
+        pf.to_f64()
+    }
+
+    /// Calculate Sortino ratio (like Sharpe but only penalizes downside volatility).
+    /// Uses daily returns, assuming 252 trading days per year.
+    pub fn sortino_ratio(&self) -> Option<f64> {
+        if self.balance_history.len() < 2 {
+            return None;
+        }
+
+        // Calculate returns between consecutive balance snapshots
+        let returns: Vec<f64> = self
+            .balance_history
+            .windows(2)
+            .filter_map(|w| {
+                let prev = w[0].1;
+                let curr = w[1].1;
+                if prev > Decimal::ZERO {
+                    use rust_decimal::prelude::ToPrimitive;
+                    Some(((curr - prev) / prev).to_f64()?)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if returns.is_empty() {
+            return None;
+        }
+
+        let n = returns.len() as f64;
+        let mean: f64 = returns.iter().sum::<f64>() / n;
+
+        // Calculate downside deviation (only negative returns)
+        let downside_returns: Vec<f64> = returns.iter().filter(|&&r| r < 0.0).copied().collect();
+
+        if downside_returns.is_empty() {
+            // No downside - excellent, but can't compute ratio
+            return None;
+        }
+
+        let downside_variance: f64 =
+            downside_returns.iter().map(|r| r.powi(2)).sum::<f64>() / n;
+        let downside_dev: f64 = downside_variance.sqrt();
+
+        if downside_dev <= 0.0 {
+            return None;
+        }
+
+        // Annualize: for 15-minute windows, assume ~96 periods per day, ~252 days/year
+        let periods_per_year: f64 = 96.0 * 252.0;
+        Some(mean * periods_per_year.sqrt() / downside_dev)
+    }
+
+    /// Calculate Calmar ratio (annualized return / max drawdown).
+    /// Higher is better - measures return per unit of drawdown risk.
+    pub fn calmar_ratio(&self) -> Option<f64> {
+        if self.balance_history.len() < 2 {
+            return None;
+        }
+
+        let max_dd_pct = self.max_drawdown_pct()?;
+        if max_dd_pct <= Decimal::ZERO {
+            return None;
+        }
+
+        // Calculate total return
+        let initial = self.balance_history.first()?.1;
+        let final_bal = self.balance_history.last()?.1;
+
+        if initial <= Decimal::ZERO {
+            return None;
+        }
+
+        use rust_decimal::prelude::ToPrimitive;
+        let total_return = ((final_bal - initial) / initial).to_f64()?;
+
+        // Annualize the return (assuming the backtest period)
+        // For now, use a simple approximation based on number of samples
+        // With 15-min windows: samples / 96 = days, * 252 = annual factor
+        let samples = self.balance_history.len() as f64;
+        let days = samples / 96.0;
+        let annual_factor = if days > 0.0 { 252.0 / days } else { 1.0 };
+        let annualized_return = total_return * annual_factor;
+
+        let max_dd_f64 = (max_dd_pct / Decimal::ONE_HUNDRED).to_f64()?;
+        if max_dd_f64 <= 0.0 {
+            return None;
+        }
+
+        Some(annualized_return / max_dd_f64)
+    }
+
+    /// Get the maximum drawdown duration in seconds.
+    pub fn max_drawdown_duration(&self) -> Option<i64> {
+        if self.max_drawdown_duration_secs > 0 {
+            Some(self.max_drawdown_duration_secs)
         } else {
             None
         }
@@ -658,20 +781,34 @@ impl SimulatedExecutor {
         // Update balance with payout
         self.balance += payout;
 
-        // Track win/loss statistics
+        // Track win/loss statistics and profit/loss amounts
         if realized_pnl > Decimal::ZERO {
             self.stats.markets_won += 1;
+            self.stats.gross_profit += realized_pnl;
         } else {
             self.stats.markets_lost += 1;
+            self.stats.gross_loss += realized_pnl.abs();
         }
 
         // Track balance history for Sharpe calculation
-        self.stats.balance_history.push((self.current_time(), self.balance));
+        let current_time = self.current_time();
+        self.stats.balance_history.push((current_time, self.balance));
 
-        // Update peak balance and max drawdown
-        if self.balance > self.stats.peak_balance {
+        // Update peak balance, max drawdown, and drawdown duration
+        if self.balance >= self.stats.peak_balance {
+            // At or above peak - record drawdown duration if we were in a drawdown
+            if let Some(dd_start) = self.stats.drawdown_start.take() {
+                let duration_secs = (current_time - dd_start).num_seconds();
+                if duration_secs > self.stats.max_drawdown_duration_secs {
+                    self.stats.max_drawdown_duration_secs = duration_secs;
+                }
+            }
             self.stats.peak_balance = self.balance;
         } else {
+            // In drawdown - start tracking if not already
+            if self.stats.drawdown_start.is_none() {
+                self.stats.drawdown_start = Some(current_time);
+            }
             let drawdown = self.stats.peak_balance - self.balance;
             if drawdown > self.stats.max_drawdown {
                 self.stats.max_drawdown = drawdown;

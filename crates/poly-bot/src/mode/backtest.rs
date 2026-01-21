@@ -218,10 +218,18 @@ pub struct BacktestResult {
     pub opportunities_skipped: u64,
     /// Win rate (if applicable).
     pub win_rate: Option<Decimal>,
+    /// Profit factor (gross profit / gross loss).
+    pub profit_factor: Option<f64>,
     /// Sharpe ratio (if applicable).
     pub sharpe_ratio: Option<f64>,
+    /// Sortino ratio (like Sharpe, but only penalizes downside volatility).
+    pub sortino_ratio: Option<f64>,
+    /// Calmar ratio (annualized return / max drawdown).
+    pub calmar_ratio: Option<f64>,
     /// Maximum drawdown.
     pub max_drawdown: Option<Decimal>,
+    /// Maximum drawdown duration in seconds.
+    pub max_drawdown_duration_secs: Option<i64>,
     /// Parameters used (for sweep mode).
     pub parameters: HashMap<String, f64>,
     /// Execution duration.
@@ -261,8 +269,12 @@ impl BacktestResult {
             opportunities_detected: metrics.opportunities_detected,
             opportunities_skipped: metrics.trades_skipped,
             win_rate: stats.win_rate(),
+            profit_factor: stats.profit_factor(),
             sharpe_ratio: stats.sharpe_ratio(),
+            sortino_ratio: stats.sortino_ratio(),
+            calmar_ratio: stats.calmar_ratio(),
             max_drawdown: stats.max_drawdown_pct(),
+            max_drawdown_duration_secs: stats.max_drawdown_duration(),
             parameters: HashMap::new(),
             duration_secs,
         }
@@ -329,6 +341,18 @@ impl PnLReport {
         } else {
             report.push_str("Win Rate:             N/A (no settled markets)\n");
         }
+        if let Some(pf) = self.result.profit_factor {
+            if pf.is_infinite() {
+                report.push_str("Profit Factor:        Inf (no losses)\n");
+            } else {
+                report.push_str(&format!(
+                    "Profit Factor:        {:.2}\n",
+                    pf
+                ));
+            }
+        } else {
+            report.push_str("Profit Factor:        N/A\n");
+        }
         if let Some(sharpe) = self.result.sharpe_ratio {
             report.push_str(&format!(
                 "Sharpe Ratio:         {:.2}\n",
@@ -337,13 +361,48 @@ impl PnLReport {
         } else {
             report.push_str("Sharpe Ratio:         N/A (insufficient data)\n");
         }
+        if let Some(sortino) = self.result.sortino_ratio {
+            report.push_str(&format!(
+                "Sortino Ratio:        {:.2}\n",
+                sortino
+            ));
+        } else {
+            report.push_str("Sortino Ratio:        N/A\n");
+        }
+        if let Some(calmar) = self.result.calmar_ratio {
+            report.push_str(&format!(
+                "Calmar Ratio:         {:.2}\n",
+                calmar
+            ));
+        } else {
+            report.push_str("Calmar Ratio:         N/A\n");
+        }
         if let Some(max_dd) = self.result.max_drawdown {
             report.push_str(&format!(
-                "Max Drawdown:         {:.2}%\n\n",
+                "Max Drawdown:         {:.2}%\n",
                 max_dd
             ));
         } else {
-            report.push_str("Max Drawdown:         N/A\n\n");
+            report.push_str("Max Drawdown:         N/A\n");
+        }
+        if let Some(dd_secs) = self.result.max_drawdown_duration_secs {
+            // Format duration nicely
+            let mins = dd_secs / 60;
+            if mins < 60 {
+                report.push_str(&format!(
+                    "Max DD Duration:      {} min\n\n",
+                    mins
+                ));
+            } else {
+                let hours = mins / 60;
+                let remaining_mins = mins % 60;
+                report.push_str(&format!(
+                    "Max DD Duration:      {}h {}m\n\n",
+                    hours, remaining_mins
+                ));
+            }
+        } else {
+            report.push_str("Max DD Duration:      N/A\n\n");
         }
 
         report.push_str("─── TRADING ACTIVITY ──────────────────────────────────────\n");
@@ -1289,8 +1348,12 @@ mod tests {
             opportunities_detected: 100,
             opportunities_skipped: 5,
             win_rate: None,
+            profit_factor: None,
             sharpe_ratio: None,
+            sortino_ratio: None,
+            calmar_ratio: None,
             max_drawdown: None,
+            max_drawdown_duration_secs: None,
             parameters: HashMap::new(),
             duration_secs: 60.5,
         };
