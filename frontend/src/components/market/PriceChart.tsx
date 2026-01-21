@@ -242,17 +242,20 @@ export function PriceChart({ market, trades }: PriceChartProps) {
       topColor: "rgba(34, 197, 94, 0.4)",
       bottomColor: "rgba(34, 197, 94, 0.0)",
       lineWidth: 2,
+      lastValueVisible: false, // Hide the horizontal "last value" line
+      priceLineVisible: false, // Hide price line extension to Y-axis
       priceFormat: {
         type: "custom",
         formatter: (value: number) => `${(value * 100).toFixed(0)}%`,
       },
     });
 
-    // Threshold line series (dashed)
+    // Threshold line series
     const thresholdSeries = chart.addSeries(LineSeries, {
       color: "#f59e0b", // amber-500
-      lineWidth: 1,
-      lineStyle: 2, // dashed
+      lineWidth: 2,
+      lastValueVisible: false, // Hide the horizontal "last value" line
+      priceLineVisible: false, // Hide price line extension to Y-axis
       priceFormat: {
         type: "custom",
         formatter: (value: number) => `${(value * 100).toFixed(0)}%`,
@@ -481,7 +484,6 @@ export function PriceChart({ market, trades }: PriceChartProps) {
 
     // Update threshold series
     const lastThresholdPoint = thresholdDataRef.current[thresholdDataRef.current.length - 1];
-    // Threshold line shows: price + threshold (the level confidence needs to exceed)
     const thresholdLevel = confidenceData.favorablePrice + confidenceData.threshold;
     if (lastThresholdPoint && lastThresholdPoint.time === timeValue) {
       lastThresholdPoint.value = thresholdLevel;
@@ -501,7 +503,6 @@ export function PriceChart({ market, trades }: PriceChartProps) {
     thresholdSeriesRef.current.setData(thresholdDataRef.current as LineData<Time>[]);
 
     // Auto-scale the confidence chart to show ALL historical data points
-    // Iterate through all data to find true min/max (like price chart does)
     confSeriesRef.current.applyOptions({
       autoscaleInfoProvider: () => {
         const confData = confDataRef.current;
@@ -509,7 +510,7 @@ export function PriceChart({ market, trades }: PriceChartProps) {
 
         if (confData.length === 0 && threshData.length === 0) return null;
 
-        // Find min/max from all confidence data
+        // Find min/max from all confidence and threshold data
         let minValue = Infinity;
         let maxValue = -Infinity;
 
@@ -518,7 +519,6 @@ export function PriceChart({ market, trades }: PriceChartProps) {
           if (point.value > maxValue) maxValue = point.value;
         }
 
-        // Include threshold data in the range
         for (const point of threshData) {
           if (point.value < minValue) minValue = point.value;
           if (point.value > maxValue) maxValue = point.value;
@@ -678,7 +678,7 @@ export function PriceChart({ market, trades }: PriceChartProps) {
             <span>Confidence</span>
           </div>
           <div className="flex items-center gap-1">
-            <div className="h-0.5 w-4 border-t-2 border-dashed border-amber-500" />
+            <div className="h-0.5 w-4 bg-amber-500" />
             <span>Threshold</span>
           </div>
           <div className="flex items-center gap-1">
