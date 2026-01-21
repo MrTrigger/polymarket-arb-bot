@@ -146,6 +146,10 @@ pub struct DirectionalConfig {
     pub max_spread_ratio: Decimal,
     /// Minimum depth required on favorable side (in dollars).
     pub min_favorable_depth: Decimal,
+    /// UP allocation ratio for StrongUp signal (0.0-1.0).
+    pub strong_up_ratio: Decimal,
+    /// UP allocation ratio for LeanUp signal (0.0-1.0).
+    pub lean_up_ratio: Decimal,
 }
 
 impl Default for DirectionalConfig {
@@ -155,6 +159,8 @@ impl Default for DirectionalConfig {
             max_combined_cost: dec!(0.995), // At least 0.5% margin
             max_spread_ratio: dec!(0.10), // Max 10% spread
             min_favorable_depth: dec!(100), // At least $100 depth
+            strong_up_ratio: dec!(0.82), // 82% UP for StrongUp
+            lean_up_ratio: dec!(0.65), // 65% UP for LeanUp
         }
     }
 }
@@ -268,13 +274,17 @@ impl DirectionalDetector {
 
         let confidence = ConfidenceCalculator::calculate(&factors);
 
+        // Use config ratios based on signal type
+        let up_ratio = self.up_ratio_for_signal(signal);
+        let down_ratio = Decimal::ONE - up_ratio;
+
         Ok(DirectionalOpportunity {
             event_id: state.event_id.clone(),
             yes_token_id: state.yes_book.token_id.clone(),
             no_token_id: state.no_book.token_id.clone(),
             signal,
-            up_ratio: signal.up_ratio(),
-            down_ratio: signal.down_ratio(),
+            up_ratio,
+            down_ratio,
             confidence,
             spot_price,
             strike_price: state.strike_price,
@@ -287,6 +297,18 @@ impl DirectionalDetector {
             no_imbalance,
             detected_at_ms: chrono::Utc::now().timestamp_millis(),
         })
+    }
+
+    /// Get the UP ratio for a given signal using config values.
+    #[inline]
+    fn up_ratio_for_signal(&self, signal: Signal) -> Decimal {
+        match signal {
+            Signal::StrongUp => self.config.strong_up_ratio,
+            Signal::LeanUp => self.config.lean_up_ratio,
+            Signal::Neutral => dec!(0.50),
+            Signal::LeanDown => Decimal::ONE - self.config.lean_up_ratio,
+            Signal::StrongDown => Decimal::ONE - self.config.strong_up_ratio,
+        }
     }
 
     /// Quick check if directional opportunity might exist.

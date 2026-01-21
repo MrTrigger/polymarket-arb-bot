@@ -422,6 +422,7 @@ fn test_directional_config_custom() {
         max_combined_cost: dec!(0.98),  // 2% minimum margin
         max_spread_ratio: dec!(0.05),   // 5% max spread
         min_favorable_depth: dec!(500), // $500 minimum depth
+        ..Default::default()
     };
 
     let detector = DirectionalDetector::with_config(config);
@@ -442,6 +443,7 @@ fn test_directional_config_spread_check() {
         max_combined_cost: dec!(0.995),
         max_spread_ratio: dec!(0.02),  // Very tight 2% max spread
         min_favorable_depth: dec!(100),
+        ..Default::default()
     };
 
     let detector = DirectionalDetector::with_config(config);

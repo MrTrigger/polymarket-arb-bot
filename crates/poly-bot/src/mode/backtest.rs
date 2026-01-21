@@ -1158,24 +1158,7 @@ fn apply_parameter(config: &mut BacktestModeConfig, name: &str, value: f64) {
         "min_fill_ratio" => {
             config.executor.min_fill_ratio = Decimal::from_f64_retain(value).unwrap_or_default();
         }
-        // Phase-based confidence thresholds (for directional trading)
-        "early_threshold" => {
-            config.strategy.early_threshold =
-                Decimal::from_f64_retain(value).unwrap_or_default();
-        }
-        "build_threshold" => {
-            config.strategy.build_threshold =
-                Decimal::from_f64_retain(value).unwrap_or_default();
-        }
-        "core_threshold" => {
-            config.strategy.core_threshold =
-                Decimal::from_f64_retain(value).unwrap_or_default();
-        }
-        "final_threshold" => {
-            config.strategy.final_threshold =
-                Decimal::from_f64_retain(value).unwrap_or_default();
-        }
-        // Confidence calculation params (EV-based mode)
+        // Confidence calculation params
         "time_conf_floor" => {
             config.strategy.time_conf_floor =
                 Decimal::from_f64_retain(value).unwrap_or_default();
@@ -1186,6 +1169,11 @@ fn apply_parameter(config: &mut BacktestModeConfig, name: &str, value: f64) {
         }
         "dist_conf_per_atr" => {
             config.strategy.dist_conf_per_atr =
+                Decimal::from_f64_retain(value).unwrap_or_default();
+        }
+        // Edge requirement (quality filter)
+        "max_edge_factor" => {
+            config.strategy.max_edge_factor =
                 Decimal::from_f64_retain(value).unwrap_or_default();
         }
         // Allocation ratios
@@ -1362,26 +1350,4 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    #[test]
-    fn test_apply_phase_threshold_parameters() {
-        let mut config = BacktestModeConfig::default();
-
-        // Verify defaults
-        assert_eq!(config.strategy.early_threshold, dec!(0.80));
-        assert_eq!(config.strategy.build_threshold, dec!(0.60));
-        assert_eq!(config.strategy.core_threshold, dec!(0.50));
-        assert_eq!(config.strategy.final_threshold, dec!(0.40));
-
-        // Apply phase threshold parameters
-        apply_parameter(&mut config, "early_threshold", 0.85);
-        apply_parameter(&mut config, "build_threshold", 0.70);
-        apply_parameter(&mut config, "core_threshold", 0.55);
-        apply_parameter(&mut config, "final_threshold", 0.35);
-
-        // Verify updated values (use approximate comparison for f64 -> Decimal conversion)
-        assert!(config.strategy.early_threshold > dec!(0.84) && config.strategy.early_threshold < dec!(0.86));
-        assert!(config.strategy.build_threshold > dec!(0.69) && config.strategy.build_threshold < dec!(0.71));
-        assert!(config.strategy.core_threshold > dec!(0.54) && config.strategy.core_threshold < dec!(0.56));
-        assert!(config.strategy.final_threshold > dec!(0.34) && config.strategy.final_threshold < dec!(0.36));
-    }
 }

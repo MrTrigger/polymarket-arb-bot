@@ -14,41 +14,34 @@
 strong_up_ratio = 0.82    # Strong UP: 82% YES, 18% NO
 lean_up_ratio = 0.65      # Lean UP: 65% YES, 35% NO
 
-# Phase confidence thresholds (legacy mode, 0.0 to 1.0)
-# Lower = more trades, higher risk
-early_threshold = 0.80    # >10 min remaining
-build_threshold = 0.60    # 5-10 min remaining
-core_threshold = 0.50     # 2-5 min remaining
-final_threshold = 0.40    # <2 min remaining
-
 # Confidence calculation params
-# Trade if: confidence >= price (EV >= 0)
 # time_conf = time_conf_floor + (1 - time_conf_floor) * (1 - time_ratio)
 # dist_conf = clamp(dist_conf_floor + dist_conf_per_atr * atr_multiple, floor, 1.0)
 time_conf_floor = 0.30    # Min confidence from time at window start
-dist_conf_floor = 0.15    # Min confidence for tiny moves (sweep optimal)
-dist_conf_per_atr = 0.30  # Confidence gained per ATR of movement (sweep optimal)
+dist_conf_floor = 0.20    # Min confidence for tiny moves (sweep optimal)
+dist_conf_per_atr = 0.40  # Confidence gained per ATR of movement (sweep optimal)
+
+# Edge requirement (quality filter)
+# Trade if: EV = (confidence - price) >= min_edge
+# min_edge = max_edge_factor * (time_remaining / window_duration)
+# Higher value = stricter filter early in window, more selective trading
+max_edge_factor = 0.20    # 20% EV required at window start, decays to 0
 
 [sweep]
 # Parameter sweep configuration
 # Run: cargo run -p poly-bot --release -- --mode backtest
 
 # Always swept
-#strong_ratios = [0.75, 0.78, 0.80, 0.82, 0.85, 0.88, 0.90]
-#lean_ratios = [0.55, 0.60, 0.65, 0.70]
+strong_ratios = [0.75, 0.78, 0.80, 0.82, 0.85]
+lean_ratios = [0.55, 0.60, 0.65, 0.70]
 
-# Confidence calculation params sweep
-# Results from 54-run sweep (2026-01-10 to 2026-01-12, BTC):
-# - dist_conf_floor: 0.15 best (avg $5272 vs $5057 for 0.05)
-# - dist_conf_per_atr: 0.30 best (avg $5217)
-# - time_conf_floor: minimal impact (0.25 slightly better avg)
-time_conf_floors = [0.30, 0.35, 0.4]
-dist_conf_floors = [0.10, 0.15, 0.2]
-dist_conf_per_atrs = [0.30, 0.35, 0.4]
+# Edge factor sweep (quality filter)
+edge_factors = [0.10, 0.15, 0.20, 0.25, 0.30]
 
-# Legacy phase mode sweep
-# early_thresholds = [0.75, 0.80, 0.85]
-# final_thresholds = [0.35, 0.40, 0.45]
+# Confidence calculation params sweep (commented out by default)
+#time_conf_floors = [0.25, 0.30, 0.35]
+#dist_conf_floors = [0.15, 0.2, 0.25]
+#dist_conf_per_atrs = [0.4, 0.45, 0.5]
 
 results_file = "sweep_results.json"
 

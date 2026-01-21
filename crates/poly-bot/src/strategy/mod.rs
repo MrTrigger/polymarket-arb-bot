@@ -365,12 +365,7 @@ impl TrackedMarket {
         let position_config = position::PositionConfig {
             total_budget: market_budget,
             atr,
-            // Phase-based thresholds (legacy mode)
-            early_threshold: strategy_config.early_threshold,
-            build_threshold: strategy_config.build_threshold,
-            core_threshold: strategy_config.core_threshold,
-            final_threshold: strategy_config.final_threshold,
-            // EV-based confidence params
+            // Confidence calculation params
             time_conf_floor: strategy_config.time_conf_floor,
             dist_conf_floor: strategy_config.dist_conf_floor,
             dist_conf_per_atr: strategy_config.dist_conf_per_atr,
@@ -418,12 +413,14 @@ impl TrackedMarket {
         distance_dollars: Decimal,
         seconds_remaining: i64,
         favorable_price: Decimal,
+        max_edge_factor: Decimal,
         window_duration_secs: i64,
     ) -> position::TradeDecision {
         self.position_manager.should_trade(
             distance_dollars,
             seconds_remaining,
             favorable_price,
+            max_edge_factor,
             window_duration_secs,
         )
     }
@@ -436,12 +433,14 @@ impl TrackedMarket {
         confidence: Decimal,
         seconds_remaining: i64,
         favorable_price: Decimal,
+        max_edge_factor: Decimal,
         window_duration_secs: i64,
     ) -> position::TradeDecision {
         self.position_manager.should_trade_with_confidence(
             confidence,
             seconds_remaining,
             favorable_price,
+            max_edge_factor,
             window_duration_secs,
         )
     }
@@ -490,17 +489,7 @@ pub struct StrategyConfig {
     /// Used for edge requirement calculation in directional trading.
     pub window_duration_secs: i64,
 
-    // Phase-based confidence thresholds (configurable via sweep)
-    /// Minimum confidence for early phase (>10 min remaining).
-    pub early_threshold: Decimal,
-    /// Minimum confidence for build phase (5-10 min remaining).
-    pub build_threshold: Decimal,
-    /// Minimum confidence for core phase (2-5 min remaining).
-    pub core_threshold: Decimal,
-    /// Minimum confidence for final phase (<2 min remaining).
-    pub final_threshold: Decimal,
-
-    // Confidence calculation params (EV-based mode)
+    // Confidence calculation params
     /// Minimum time confidence at window start (default 0.30).
     /// Formula: time_conf = floor + (1 - floor) * (1 - time_ratio)
     pub time_conf_floor: Decimal,
@@ -509,6 +498,12 @@ pub struct StrategyConfig {
     /// Confidence gained per ATR of movement (default 0.50).
     /// Formula: dist_conf = clamp(floor + per_atr * atr_multiple, floor, 1.0)
     pub dist_conf_per_atr: Decimal,
+
+    // Edge requirement (quality filter)
+    /// Maximum edge required at window start (decays to 0 at window end).
+    /// Formula: min_edge = max_edge_factor * (time_remaining / window_duration)
+    /// Trade if: EV = (confidence - price) >= min_edge
+    pub max_edge_factor: Decimal,
 
     // Allocation ratios for directional trading (configurable via sweep)
     /// Strong UP signal allocation ratio (0.0-1.0).
@@ -532,15 +527,12 @@ impl Default for StrategyConfig {
             max_consecutive_failures: 3,
             block_on_toxic_high: true,
             window_duration_secs: 900, // 15-minute windows by default
-            // Legacy phase-based thresholds
-            early_threshold: dec!(0.80),
-            build_threshold: dec!(0.60),
-            core_threshold: dec!(0.50),
-            final_threshold: dec!(0.40),
             // Confidence calculation params
             time_conf_floor: dec!(0.30),     // 30% confidence at window start
             dist_conf_floor: dec!(0.15),     // 15% minimum for tiny moves (sweep optimal)
             dist_conf_per_atr: dec!(0.30),   // +30% per ATR of movement (sweep optimal)
+            // Edge requirement (quality filter)
+            max_edge_factor: dec!(0.20),     // 20% EV required at window start (decays to 0)
             // Allocation ratios (optimized via param sweep)
             strong_up_ratio: dec!(0.82),
             lean_up_ratio: dec!(0.65),
@@ -567,54 +559,12 @@ impl StrategyConfig {
             max_consecutive_failures: 3,
             block_on_toxic_high: true,
             window_duration_secs,
-            // Legacy phase thresholds
-            early_threshold: dec!(0.80),
-            build_threshold: dec!(0.60),
-            core_threshold: dec!(0.50),
-            final_threshold: dec!(0.40),
             // Confidence calculation params
             time_conf_floor: dec!(0.30),
             dist_conf_floor: dec!(0.15),
             dist_conf_per_atr: dec!(0.30),
-            // Allocation ratios (optimized via param sweep)
-            strong_up_ratio: dec!(0.82),
-            lean_up_ratio: dec!(0.65),
-            execution: crate::config::ExecutionConfig::default(),
-            is_backtest: false,
-        }
-    }
-
-    /// Create from trading config with custom phase thresholds.
-    pub fn from_trading_config_with_phases(
-        config: &TradingConfig,
-        window_duration_secs: i64,
-        early_threshold: Decimal,
-        build_threshold: Decimal,
-        core_threshold: Decimal,
-        final_threshold: Decimal,
-    ) -> Self {
-        Self {
-            arb_thresholds: ArbThresholds {
-                early: config.min_margin_early,
-                mid: config.min_margin_mid,
-                late: config.min_margin_late,
-                early_threshold_secs: config.early_threshold_secs,
-                mid_threshold_secs: config.mid_threshold_secs,
-                min_time_remaining_secs: config.min_time_remaining_secs,
-            },
-            sizing_config: SizingConfig::from_trading_config(config),
-            toxic_config: ToxicFlowConfig::default(),
-            max_consecutive_failures: 3,
-            block_on_toxic_high: true,
-            window_duration_secs,
-            early_threshold,
-            build_threshold,
-            core_threshold,
-            final_threshold,
-            // Confidence calculation params
-            time_conf_floor: dec!(0.30),
-            dist_conf_floor: dec!(0.15),
-            dist_conf_per_atr: dec!(0.30),
+            // Edge requirement (quality filter)
+            max_edge_factor: dec!(0.20),
             // Allocation ratios (optimized via param sweep)
             strong_up_ratio: dec!(0.82),
             lean_up_ratio: dec!(0.65),
@@ -724,12 +674,14 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
         engines_config: EnginesConfig,
     ) -> Self {
         let arb_detector = ArbDetector::new(config.arb_thresholds.clone());
-        // Create directional detector with config from engines_config
+        // Create directional detector with config from engines_config and strategy config
         let directional_config = DirectionalConfig {
             min_seconds_remaining: engines_config.directional.min_seconds_remaining as i64,
             max_combined_cost: engines_config.directional.max_combined_cost,
             max_spread_ratio: Decimal::from(engines_config.directional.max_spread_bps) / dec!(10000),
             min_favorable_depth: engines_config.directional.min_favorable_depth,
+            strong_up_ratio: config.strong_up_ratio,
+            lean_up_ratio: config.lean_up_ratio,
         };
         let directional_detector = DirectionalDetector::with_config(directional_config);
         let maker_detector = MakerDetector::new();
@@ -991,9 +943,10 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                         market.state.no_book.best_ask().unwrap_or(dec!(0.50))
                     };
 
-                    // EV = confidence - price. Trade if EV >= 0 (confidence >= price)
+                    // EV-based decision with time-decaying edge requirement
                     let ev = pm_conf - favorable_price;
-                    let min_edge = Decimal::ZERO;
+                    let time_factor = Decimal::new(seconds_remaining.max(0), 0) / Decimal::new(window_duration_secs, 0);
+                    let min_edge = self.config.max_edge_factor * time_factor;
                     let would_trade = ev >= min_edge;
 
                     let snapshot = crate::state::ConfidenceSnapshot::new(
@@ -1740,10 +1693,10 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                     let dist_conf = (dec!(0.20) + dec!(0.50) * atr_mult).min(Decimal::ONE); // default params
 
                     // Calculate EV for logging (matches position.rs logic)
-                    // EV = confidence - price. Trade if EV >= 0 (confidence >= price)
+                    // EV-based with time-decaying edge requirement
                     let favorable_price = opp.favorable_price();
                     let ev = pm_conf - favorable_price;
-                    let min_edge = Decimal::ZERO;
+                    let min_edge = self.config.max_edge_factor * time_ratio;
 
                     trace!(
                         "📈 Confidence {} {}: dist${:.2} atr${:.2} atr_mult={:.2} | time_conf={:.2} dist_conf={:.2} | conf={:.2} EV={:.3}",
@@ -1772,6 +1725,7 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                         distance_dollars,
                         seconds_remaining,
                         favorable_price,
+                        self.config.max_edge_factor,
                         window_duration_secs,
                     );
 

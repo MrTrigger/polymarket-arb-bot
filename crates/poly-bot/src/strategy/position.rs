@@ -114,17 +114,7 @@ pub struct PositionConfig {
     /// Distance confidence is measured in ATR multiples.
     pub atr: Decimal,
 
-    // Phase-based thresholds (legacy mode)
-    /// Minimum confidence for early phase (>10 min remaining).
-    pub early_threshold: Decimal,
-    /// Minimum confidence for build phase (5-10 min remaining).
-    pub build_threshold: Decimal,
-    /// Minimum confidence for core phase (2-5 min remaining).
-    pub core_threshold: Decimal,
-    /// Minimum confidence for final phase (<2 min remaining).
-    pub final_threshold: Decimal,
-
-    // --- Confidence calculation parameters (EV-based mode) ---
+    // --- Confidence calculation parameters ---
     // Time confidence formula: time_conf = time_conf_floor + (1 - time_conf_floor) * (1 - time_ratio)
     // Where time_ratio = seconds_remaining / window_duration
     // At window start: time_conf = time_conf_floor
@@ -155,12 +145,7 @@ impl Default for PositionConfig {
             min_hedge_ratio: dec!(0.20),
             trades_per_phase: 15,
             atr: dec!(100), // Default ATR suitable for BTC
-            // Legacy phase-based thresholds
-            early_threshold: dec!(0.80),
-            build_threshold: dec!(0.60),
-            core_threshold: dec!(0.50),
-            final_threshold: dec!(0.40),
-            // EV-based confidence calculation params (sweep optimal)
+            // Confidence calculation params (sweep optimal)
             time_conf_floor: dec!(0.30),     // 30% confidence at window start
             dist_conf_floor: dec!(0.15),     // 15% minimum for tiny moves (sweep optimal)
             dist_conf_per_atr: dec!(0.30),   // +30% per ATR of movement (sweep optimal)
@@ -183,17 +168,6 @@ impl PositionConfig {
             total_budget,
             atr,
             ..Default::default()
-        }
-    }
-
-    /// Get the minimum confidence threshold for a given phase.
-    /// Uses configurable thresholds instead of hardcoded Phase::min_confidence().
-    pub fn threshold_for_phase(&self, phase: Phase) -> Decimal {
-        match phase {
-            Phase::Early => self.early_threshold,
-            Phase::Build => self.build_threshold,
-            Phase::Core => self.core_threshold,
-            Phase::Final => self.final_threshold,
         }
     }
 
@@ -393,20 +367,23 @@ impl PositionManager {
 
     /// Decide whether to trade and with what size.
     ///
-    /// Uses EV-based decision logic:
+    /// Uses EV-based decision logic with time-decaying edge requirement:
     ///   EV = confidence - favorable_price
-    ///   Trade if EV >= 0 (confidence >= price)
+    ///   min_edge = max_edge_factor * (time_remaining / window_duration)
+    ///   Trade if EV >= min_edge
     ///
     /// # Arguments
     /// * `distance_dollars` - Distance from strike in dollars (for confidence calculation)
     /// * `seconds_remaining` - Seconds left in the market window
     /// * `favorable_price` - Price of the dominant side we're buying (for EV calculation)
+    /// * `max_edge_factor` - Minimum EV required at window start (decays to 0)
     /// * `window_duration_secs` - Total window duration in seconds (e.g., 900 for 15min)
     pub fn should_trade(
         &self,
         distance_dollars: Decimal,
         seconds_remaining: i64,
         favorable_price: Decimal,
+        max_edge_factor: Decimal,
         window_duration_secs: i64,
     ) -> TradeDecision {
         let confidence = self.calculate_confidence(distance_dollars, seconds_remaining, window_duration_secs);
@@ -414,6 +391,7 @@ impl PositionManager {
             confidence,
             seconds_remaining,
             favorable_price,
+            max_edge_factor,
             window_duration_secs,
         )
     }
@@ -423,25 +401,39 @@ impl PositionManager {
     /// This allows callers to incorporate additional factors (like signal strength)
     /// into the confidence calculation before making the trade decision.
     ///
+    /// Uses EV-based decision logic with time-decaying edge requirement:
+    ///   EV = confidence - favorable_price
+    ///   min_edge = max_edge_factor * (time_remaining / window_duration)
+    ///   Trade if EV >= min_edge
+    ///
     /// # Arguments
     /// * `confidence` - Pre-calculated confidence (0.0 to 1.0), including any signal boosts
     /// * `seconds_remaining` - Seconds left in the market window
     /// * `favorable_price` - Price of the dominant side we're buying (for EV calculation)
+    /// * `max_edge_factor` - Minimum EV required at window start (decays to 0)
     /// * `window_duration_secs` - Total window duration in seconds (e.g., 900 for 15min)
     pub fn should_trade_with_confidence(
         &self,
         confidence: Decimal,
         seconds_remaining: i64,
         favorable_price: Decimal,
-        _window_duration_secs: i64,
+        max_edge_factor: Decimal,
+        window_duration_secs: i64,
     ) -> TradeDecision {
         let minutes = Decimal::new(seconds_remaining, 0) / dec!(60);
         let phase = Phase::from_minutes(minutes);
 
-        // EV-based: expected value must be non-negative
-        // EV = P(win) * profit - P(lose) * loss = confidence - price
-        // Trade if confidence >= price (EV >= 0)
-        let should_skip = confidence < favorable_price;
+        // EV-based: expected value must exceed time-decaying minimum edge
+        // EV = confidence - price
+        // min_edge decays linearly: max_edge_factor at start, 0 at end
+        let ev = confidence - favorable_price;
+        let time_factor = if window_duration_secs > 0 {
+            Decimal::new(seconds_remaining.max(0), 0) / Decimal::new(window_duration_secs, 0)
+        } else {
+            Decimal::ZERO
+        };
+        let min_edge = max_edge_factor * time_factor;
+        let should_skip = ev < min_edge;
 
         if should_skip {
             return TradeDecision::Skip(SkipReason::LowConfidence);
@@ -717,9 +709,10 @@ mod tests {
     fn test_should_trade_low_confidence_skips() {
         let pm = PositionManager::with_budget(dec!(1000));
 
-        // Early phase with low distance -> confidence < price -> skip
-        // Confidence ~0.25 (low distance) < 0.50 price -> skip
-        let decision = pm.should_trade(dec!(25), 840, dec!(0.50), 900);
+        // Early phase with low distance -> EV < min_edge -> skip
+        // At 14 min: edge = 0.20 * (840/900) = 0.187
+        // Confidence ~0.25, price 0.50 -> EV = -0.25 < 0.187 -> skip
+        let decision = pm.should_trade(dec!(25), 840, dec!(0.50), dec!(0.20), 900);
         assert!(matches!(decision, TradeDecision::Skip(SkipReason::LowConfidence)));
     }
 
@@ -728,9 +721,9 @@ mod tests {
         let pm = PositionManager::with_budget(dec!(1000));
 
         // Final phase with high distance and low favorable price
-        // $150 = 1.5 ATR -> dist_conf=1.00, with time_conf=1.00 -> confidence ~0.90
-        // 0.90 >= 0.30 price -> should trade
-        let decision = pm.should_trade(dec!(150), 90, dec!(0.30), 900);
+        // At 1.5 min: edge = 0.20 * (90/900) = 0.02
+        // $150 = 1.5 ATR -> confidence ~0.90, price 0.30 -> EV = 0.60 >= 0.02 -> trade
+        let decision = pm.should_trade(dec!(150), 90, dec!(0.30), dec!(0.20), 900);
         assert!(decision.is_trade(), "Expected trade, got {:?}", decision);
     }
 
@@ -746,7 +739,7 @@ mod tests {
         // Spend all budget
         pm.total_spent = dec!(100);
 
-        let decision = pm.should_trade(dec!(80), 90, dec!(0.30), 900);
+        let decision = pm.should_trade(dec!(80), 90, dec!(0.30), dec!(0.20), 900);
         assert!(matches!(decision, TradeDecision::Skip(SkipReason::TotalBudgetExhausted)));
     }
 
@@ -773,7 +766,7 @@ mod tests {
 
         // At 1 min with $150 distance (1.5 ATR): confidence is high
         // But Final phase budget is exhausted
-        let decision = pm.should_trade(dec!(150), 60, dec!(0.30), 900);
+        let decision = pm.should_trade(dec!(150), 60, dec!(0.30), dec!(0.20), 900);
         assert!(matches!(decision, TradeDecision::Skip(SkipReason::PhaseBudgetExhausted)),
             "Expected PhaseBudgetExhausted, got {:?}", decision);
     }
@@ -819,48 +812,51 @@ mod tests {
 
     #[test]
     fn test_spec_example_simulation() {
-        // Test with EV-based decision logic
+        // Test with EV-based decision logic + time-decaying edge requirement
         // Budget: $1,000 | Default ATR: $100
+        // max_edge_factor: 0.20, window_duration: 900 secs
         // favorable_price: 0.50 for all tests
         // Confidence params: time_floor=0.30, dist_floor=0.15, dist_per_atr=0.30
         //
-        // EV-based logic: trade if confidence >= price
+        // EV-based logic: trade if (confidence - price) >= min_edge
+        // where min_edge = max_edge_factor * time_ratio
         let pm = PositionManager::with_budget(dec!(1000));
 
         // [14.0m = 840s] $15 (0.15 ATR)
-        // time_conf = 0.30 + 0.70*0.067 = 0.35, dist_conf = 0.20 + 0.50*0.15 = 0.28
-        // conf ≈ 0.31 < 0.50 price -> SKIP
-        let d1 = pm.should_trade(dec!(15), 840, dec!(0.50), 900);
+        // time_conf = 0.30 + 0.70*0.067 = 0.35, dist_conf = 0.15 + 0.30*0.15 = 0.20
+        // conf ≈ 0.26, EV = 0.26 - 0.50 = -0.24, min_edge = 0.20*0.93 = 0.19 -> SKIP
+        let d1 = pm.should_trade(dec!(15), 840, dec!(0.50), dec!(0.20), 900);
         assert!(matches!(d1, TradeDecision::Skip(SkipReason::LowConfidence)));
 
         // [12.0m = 720s] $22 (0.22 ATR)
-        // time_conf = 0.30 + 0.70*0.20 = 0.44, dist_conf = 0.20 + 0.50*0.22 = 0.31
-        // conf ≈ 0.37 < 0.50 price -> SKIP
-        let d2 = pm.should_trade(dec!(22), 720, dec!(0.50), 900);
+        // time_conf = 0.30 + 0.70*0.20 = 0.44, dist_conf = 0.15 + 0.30*0.22 = 0.22
+        // conf ≈ 0.31, EV = 0.31 - 0.50 = -0.19, min_edge = 0.20*0.80 = 0.16 -> SKIP
+        let d2 = pm.should_trade(dec!(22), 720, dec!(0.50), dec!(0.20), 900);
         assert!(matches!(d2, TradeDecision::Skip(SkipReason::LowConfidence)));
 
         // [10.0m = 600s] $35 (0.35 ATR)
-        // time_conf = 0.30 + 0.70*0.33 = 0.53, dist_conf = 0.20 + 0.50*0.35 = 0.38
-        // conf ≈ 0.45 < 0.50 price -> SKIP
-        let d3 = pm.should_trade(dec!(35), 600, dec!(0.50), 900);
+        // time_conf = 0.30 + 0.70*0.33 = 0.53, dist_conf = 0.15 + 0.30*0.35 = 0.26
+        // conf ≈ 0.37, EV = 0.37 - 0.50 = -0.13, min_edge = 0.20*0.67 = 0.13 -> SKIP
+        let d3 = pm.should_trade(dec!(35), 600, dec!(0.50), dec!(0.20), 900);
         assert!(matches!(d3, TradeDecision::Skip(SkipReason::LowConfidence)));
 
         // [8.5m = 510s] $60 (0.60 ATR)
         // time_conf = 0.30 + 0.70*0.43 = 0.60, dist_conf = 0.15 + 0.30*0.60 = 0.33
-        // conf = sqrt(0.60 * 0.33) ≈ 0.45 < 0.50 price -> SKIP
-        let d4 = pm.should_trade(dec!(60), 510, dec!(0.50), 900);
-        assert!(matches!(d4, TradeDecision::Skip(SkipReason::LowConfidence)));
+        // conf = sqrt(0.60 * 0.33) ≈ 0.45, EV = 0.45 - 0.50 = -0.05, min_edge = 0.20*0.57 = 0.11 -> SKIP
+        let d4 = pm.should_trade(dec!(60), 510, dec!(0.50), dec!(0.20), 900);
+        assert!(matches!(d4, TradeDecision::Skip(SkipReason::LowConfidence)),
+            "Expected skip at 8.5m with $60 distance, got {:?}", d4);
 
         // [2.0m = 120s] $70 (0.70 ATR)
         // time_conf = 0.30 + 0.70*0.87 = 0.91, dist_conf = 0.15 + 0.30*0.70 = 0.36
-        // conf = sqrt(0.91 * 0.36) ≈ 0.57 >= 0.50 price -> TRADE
-        let d5 = pm.should_trade(dec!(70), 120, dec!(0.50), 900);
+        // conf = sqrt(0.91 * 0.36) ≈ 0.57, EV = 0.57 - 0.50 = 0.07, min_edge = 0.20*0.13 = 0.03 -> TRADE
+        let d5 = pm.should_trade(dec!(70), 120, dec!(0.50), dec!(0.20), 900);
         assert!(d5.is_trade(), "Expected trade at 2m with $70 distance, got {:?}", d5);
 
         // [1.0m = 60s] $100 (1.0 ATR)
         // time_conf = 0.30 + 0.70*0.93 = 0.95, dist_conf = 0.15 + 0.30*1.0 = 0.45
-        // conf = sqrt(0.95 * 0.45) ≈ 0.65 >= 0.50 price -> TRADE
-        let d6 = pm.should_trade(dec!(100), 60, dec!(0.50), 900);
+        // conf = sqrt(0.95 * 0.45) ≈ 0.65, EV = 0.65 - 0.50 = 0.15, min_edge = 0.20*0.07 = 0.01 -> TRADE
+        let d6 = pm.should_trade(dec!(100), 60, dec!(0.50), dec!(0.20), 900);
         assert!(d6.is_trade(), "Expected trade at 1m with $100 distance, got {:?}", d6);
     }
 }

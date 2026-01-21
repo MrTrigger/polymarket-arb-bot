@@ -588,21 +588,11 @@ impl Default for BacktestConfig {
     }
 }
 
-/// Phase-based strategy configuration.
+/// Phase-based budget allocation configuration.
 ///
-/// Controls confidence thresholds and budget allocation per market phase.
-/// Optimized via parameter sweep (18.2% ROI on 14 days, 180 markets).
+/// Controls budget allocation per market phase.
 #[derive(Debug, Clone)]
 pub struct PhaseConfig {
-    /// Minimum confidence threshold for early phase (>10 min remaining).
-    pub early_threshold: Decimal,
-    /// Minimum confidence threshold for build phase (5-10 min remaining).
-    pub build_threshold: Decimal,
-    /// Minimum confidence threshold for core phase (2-5 min remaining).
-    pub core_threshold: Decimal,
-    /// Minimum confidence threshold for final phase (<2 min remaining).
-    pub final_threshold: Decimal,
-
     /// Budget allocation for early phase (0.0-1.0).
     pub early_budget: Decimal,
     /// Budget allocation for build phase (0.0-1.0).
@@ -616,12 +606,6 @@ pub struct PhaseConfig {
 impl Default for PhaseConfig {
     fn default() -> Self {
         Self {
-            // Optimized thresholds from param sweep (18.2% ROI)
-            early_threshold: Decimal::new(80, 2),  // 0.80
-            build_threshold: Decimal::new(60, 2),  // 0.60
-            core_threshold: Decimal::new(50, 2),   // 0.50
-            final_threshold: Decimal::new(40, 2),  // 0.40
-
             // Standard budget allocation
             early_budget: Decimal::new(15, 2),     // 0.15 = 15%
             build_budget: Decimal::new(25, 2),     // 0.25 = 25%
@@ -632,17 +616,6 @@ impl Default for PhaseConfig {
 }
 
 impl PhaseConfig {
-    /// Get threshold for a given phase.
-    pub fn threshold_for_phase(&self, phase: &str) -> Decimal {
-        match phase {
-            "early" => self.early_threshold,
-            "build" => self.build_threshold,
-            "core" => self.core_threshold,
-            "final" => self.final_threshold,
-            _ => self.early_threshold, // Default to most conservative
-        }
-    }
-
     /// Get budget allocation for a given phase.
     pub fn budget_for_phase(&self, phase: &str) -> Decimal {
         match phase {
@@ -1152,19 +1125,18 @@ pub struct SweepConfig {
     pub strong_ratios: Vec<f64>,
     /// Lean UP ratio values to sweep.
     pub lean_ratios: Vec<f64>,
-    /// Early threshold values to sweep (legacy phase-based mode).
-    pub early_thresholds: Vec<f64>,
-    /// Final threshold values to sweep (legacy phase-based mode).
-    pub final_thresholds: Vec<f64>,
-    /// Time confidence floor values to sweep (EV-based mode).
+    /// Time confidence floor values to sweep.
     /// This is the minimum confidence from time at window start.
     pub time_conf_floors: Vec<f64>,
-    /// Distance confidence floor values to sweep (EV-based mode).
+    /// Distance confidence floor values to sweep.
     /// This is the minimum confidence for tiny moves.
     pub dist_conf_floors: Vec<f64>,
-    /// Distance confidence per ATR values to sweep (EV-based mode).
+    /// Distance confidence per ATR values to sweep.
     /// This is the confidence gained per ATR of movement.
     pub dist_conf_per_atrs: Vec<f64>,
+    /// Edge factor values to sweep (quality filter).
+    /// This is the minimum EV required at window start.
+    pub edge_factors: Vec<f64>,
     /// Output file for sweep results.
     pub results_file: String,
 }
@@ -1184,11 +1156,10 @@ impl SweepConfig {
         Ok(Self {
             strong_ratios: toml.sweep.strong_ratios,
             lean_ratios: toml.sweep.lean_ratios,
-            early_thresholds: toml.sweep.early_thresholds,
-            final_thresholds: toml.sweep.final_thresholds,
             time_conf_floors: toml.sweep.time_conf_floors,
             dist_conf_floors: toml.sweep.dist_conf_floors,
             dist_conf_per_atrs: toml.sweep.dist_conf_per_atrs,
+            edge_factors: toml.sweep.edge_factors,
             results_file: toml.sweep.results_file,
         })
     }
@@ -1210,14 +1181,6 @@ impl SweepConfig {
             }
         }
 
-        // Phase thresholds
-        if let Some(p) = make_param("early_threshold", &self.early_thresholds) {
-            params.push(p);
-        }
-        if let Some(p) = make_param("final_threshold", &self.final_thresholds) {
-            params.push(p);
-        }
-
         // Allocation ratios
         if let Some(p) = make_param("strong_up_ratio", &self.strong_ratios) {
             params.push(p);
@@ -1234,6 +1197,11 @@ impl SweepConfig {
             params.push(p);
         }
         if let Some(p) = make_param("dist_conf_per_atr", &self.dist_conf_per_atrs) {
+            params.push(p);
+        }
+
+        // Edge factor (quality filter)
+        if let Some(p) = make_param("max_edge_factor", &self.edge_factors) {
             params.push(p);
         }
 
@@ -1254,11 +1222,10 @@ struct StrategyToml {
 struct SweepToml {
     strong_ratios: Vec<f64>,
     lean_ratios: Vec<f64>,
-    early_thresholds: Vec<f64>,
-    final_thresholds: Vec<f64>,
     time_conf_floors: Vec<f64>,
     dist_conf_floors: Vec<f64>,
     dist_conf_per_atrs: Vec<f64>,
+    edge_factors: Vec<f64>,
     results_file: String,
 }
 
@@ -1268,11 +1235,10 @@ impl Default for SweepToml {
         Self {
             strong_ratios: Vec::new(),
             lean_ratios: Vec::new(),
-            early_thresholds: Vec::new(),
-            final_thresholds: Vec::new(),
             time_conf_floors: Vec::new(),
             dist_conf_floors: Vec::new(),
             dist_conf_per_atrs: Vec::new(),
+            edge_factors: Vec::new(),
             results_file: "sweep_results.json".to_string(),
         }
     }
@@ -1595,10 +1561,6 @@ impl Default for BacktestToml {
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 struct PhasesToml {
-    early_threshold: f64,
-    build_threshold: f64,
-    core_threshold: f64,
-    final_threshold: f64,
     early_budget: f64,
     build_budget: f64,
     core_budget: f64,
@@ -1608,11 +1570,6 @@ struct PhasesToml {
 impl Default for PhasesToml {
     fn default() -> Self {
         Self {
-            // Optimized thresholds from param sweep (18.2% ROI)
-            early_threshold: 0.80,
-            build_threshold: 0.60,
-            core_threshold: 0.50,
-            final_threshold: 0.40,
             // Standard budget allocation
             early_budget: 0.15,
             build_budget: 0.25,
@@ -1922,10 +1879,6 @@ impl From<TomlConfig> for BotConfig {
                 priority: parse_priority(&toml.engines.priority),
             },
             phases: PhaseConfig {
-                early_threshold: f64_to_decimal(toml.phases.early_threshold),
-                build_threshold: f64_to_decimal(toml.phases.build_threshold),
-                core_threshold: f64_to_decimal(toml.phases.core_threshold),
-                final_threshold: f64_to_decimal(toml.phases.final_threshold),
                 early_budget: f64_to_decimal(toml.phases.early_budget),
                 build_budget: f64_to_decimal(toml.phases.build_budget),
                 core_budget: f64_to_decimal(toml.phases.core_budget),
