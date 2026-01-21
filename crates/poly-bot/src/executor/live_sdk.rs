@@ -226,15 +226,19 @@ impl LiveSdkExecutor {
         // Now query the balance
         match client.balance_allowance(request).await {
             Ok(response) => {
+                // Balance from API is in atomic units (6 decimals for USDC)
+                // Convert to USDC by dividing by 1,000,000
+                let usdc_balance = response.balance / Decimal::new(1_000_000, 0);
                 info!(
-                    balance = %response.balance,
+                    balance_atomic = %response.balance,
+                    balance_usdc = %usdc_balance,
                     allowances = ?response.allowances,
                     "Fetched balance from Polymarket"
                 );
-                // Update local balance cache
+                // Update local balance cache with USDC value
                 let mut balance = self.balance.write().await;
-                *balance = response.balance;
-                Ok(response.balance)
+                *balance = usdc_balance;
+                Ok(usdc_balance)
             }
             Err(e) => {
                 warn!(error = %e, "Failed to fetch balance from Polymarket");
