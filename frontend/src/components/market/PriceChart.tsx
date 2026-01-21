@@ -500,20 +500,46 @@ export function PriceChart({ market, trades }: PriceChartProps) {
     confSeriesRef.current.setData(confDataRef.current as LineData<Time>[]);
     thresholdSeriesRef.current.setData(thresholdDataRef.current as LineData<Time>[]);
 
-    // Auto-scale the confidence chart to zoom in on the data range
-    // Don't force start at 0 - let it focus on the actual confidence/threshold values
-    const dataMax = Math.max(confidenceData.confidence, thresholdLevel);
-    const dataMin = Math.min(confidenceData.confidence, thresholdLevel);
-    const dataRange = dataMax - dataMin;
-    // Add 20% padding on each side for visual breathing room
-    const padding = Math.max(dataRange * 0.2, 0.05);
+    // Auto-scale the confidence chart to show ALL historical data points
+    // Iterate through all data to find true min/max (like price chart does)
     confSeriesRef.current.applyOptions({
-      autoscaleInfoProvider: () => ({
-        priceRange: {
-          minValue: Math.max(0, dataMin - padding),
-          maxValue: Math.min(1.0, dataMax + padding),
-        },
-      }),
+      autoscaleInfoProvider: () => {
+        const confData = confDataRef.current;
+        const threshData = thresholdDataRef.current;
+
+        if (confData.length === 0 && threshData.length === 0) return null;
+
+        // Find min/max from all confidence data
+        let minValue = Infinity;
+        let maxValue = -Infinity;
+
+        for (const point of confData) {
+          if (point.value < minValue) minValue = point.value;
+          if (point.value > maxValue) maxValue = point.value;
+        }
+
+        // Include threshold data in the range
+        for (const point of threshData) {
+          if (point.value < minValue) minValue = point.value;
+          if (point.value > maxValue) maxValue = point.value;
+        }
+
+        // Handle edge case where no valid data exists
+        if (!isFinite(minValue) || !isFinite(maxValue)) {
+          return null;
+        }
+
+        // Add 20% padding on each side for visual breathing room
+        const dataRange = maxValue - minValue;
+        const padding = Math.max(dataRange * 0.2, 0.05);
+
+        return {
+          priceRange: {
+            minValue: Math.max(0, minValue - padding),
+            maxValue: Math.min(1.0, maxValue + padding),
+          },
+        };
+      },
     });
 
     // Color confidence line based on whether it's above threshold
