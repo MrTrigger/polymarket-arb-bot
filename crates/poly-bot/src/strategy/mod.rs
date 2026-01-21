@@ -1239,6 +1239,16 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             let cost = event.size * event.price + event.fee;
             market.inventory.record_fill(event.outcome, event.size, cost);
 
+            // CRITICAL: Update position manager budget to prevent over-trading.
+            // Without this, fills via WebSocket don't reduce the budget, allowing
+            // unlimited orders until the account is empty.
+            let seconds_remaining = market.state.seconds_remaining;
+            let (up_cost, down_cost) = match event.outcome {
+                Outcome::Yes => (cost, Decimal::ZERO),
+                Outcome::No => (Decimal::ZERO, cost),
+            };
+            market.record_trade(cost, up_cost, down_cost, seconds_remaining);
+
             // Clear pending order flags on fill
             // Once a fill arrives, has_position() will also return true,
             // but clear these for completeness

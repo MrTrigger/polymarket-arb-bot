@@ -35,7 +35,7 @@ log_level = "info"
 available_balance = 1000.0
 
 # Maximum position size per market in USDC
-max_position_per_market = 1000.0
+max_position_per_market = 300.0
 
 # Maximum total exposure across all markets in USDC
 max_total_exposure = 1000.0
@@ -70,7 +70,7 @@ available_balance = 1000.0
 max_position_per_market = 1000.0
 
 # Maximum total exposure across all markets in USDC
-max_total_exposure = 5000.0
+max_total_exposure = 1000.0
 
 # Base order size in USDC (minimum 5 shares on Polymarket)
 base_order_size = 75.0
