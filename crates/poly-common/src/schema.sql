@@ -268,7 +268,7 @@ CREATE TABLE IF NOT EXISTS market_sessions (
     volume Decimal(18, 8),
     fees Decimal(18, 8),
     -- Outcome
-    settlement_outcome Nullable(LowCardinality(String)),  -- 'YES', 'NO', null if not settled
+    settlement_outcome Nullable(String),  -- 'YES', 'NO', null if not settled
     settlement_pnl Nullable(Decimal(18, 8))
 ) ENGINE = ReplacingMergeTree(window_end)
 ORDER BY (session_id, event_id)

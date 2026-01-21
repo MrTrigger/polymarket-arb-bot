@@ -349,6 +349,8 @@ impl PriceChaser {
                     filled = %total_filled(&fills),
                     "Chase timeout reached"
                 );
+                // Cancel pending order before returning
+                cancel_pending_order(executor, &current_order_id).await;
                 return Ok(build_result(
                     fills,
                     remaining_size,
@@ -366,6 +368,8 @@ impl PriceChaser {
                     min = %self.config.min_chase_size,
                     "Remaining size below minimum, stopping"
                 );
+                // Cancel pending order before returning
+                cancel_pending_order(executor, &current_order_id).await;
                 return Ok(build_result(
                     fills,
                     remaining_size,
@@ -590,6 +594,8 @@ impl PriceChaser {
                                 iterations = iteration,
                                 "Ceiling reached, stopping chase"
                             );
+                            // Cancel pending order before returning
+                            cancel_pending_order(executor, &current_order_id).await;
                             return Ok(build_result(
                                 fills,
                                 remaining_size,
@@ -609,6 +615,8 @@ impl PriceChaser {
                     let floor = self.calculate_ceiling(Side::Sell, other_leg_price);
                     if bumped < floor {
                         if current_price <= floor {
+                            // Cancel pending order before returning
+                            cancel_pending_order(executor, &current_order_id).await;
                             return Ok(build_result(
                                 fills,
                                 remaining_size,
@@ -693,6 +701,20 @@ impl PriceChaser {
                 elapsed_ms: start.elapsed().as_millis() as u64,
                 fills: Vec::new(),
             }),
+        }
+    }
+}
+
+/// Cancel pending order if it exists.
+/// Used for cleanup before returning from chase loop.
+async fn cancel_pending_order<E: Executor>(
+    executor: &mut E,
+    order_id: &Option<String>,
+) {
+    if let Some(id) = order_id {
+        match executor.cancel_order(id).await {
+            Ok(_) => debug!(order_id = %id, "Cancelled pending order on chase exit"),
+            Err(e) => debug!(order_id = %id, error = %e, "Failed to cancel pending order on chase exit"),
         }
     }
 }

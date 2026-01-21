@@ -24,7 +24,7 @@ use super::allowance::{AllowanceConfig, AllowanceManager, SharedAllowanceManager
 use super::live::LiveExecutorConfig;
 use super::shadow::{ShadowManager, SharedShadowManager};
 use super::{
-    Executor, ExecutorError, OrderCancellation, OrderFill, OrderRequest,
+    Executor, ExecutorError, OrderCancellation, OrderFill, OrderRejection, OrderRequest,
     OrderResult, OrderType, PartialOrderFill, PendingOrder,
 };
 use crate::config::{ShadowConfig, WalletConfig};
@@ -324,10 +324,28 @@ impl Executor for LiveSdkExecutor {
             .await
             .map_err(|e| ExecutorError::Internal(format!("Failed to sign order: {}", e)))?;
 
-        let response = client
-            .post_order(signed_order)
-            .await
-            .map_err(|e| ExecutorError::Rejected(format!("Order rejected: {}", e)))?;
+        let response = match client.post_order(signed_order).await {
+            Ok(r) => r,
+            Err(e) => {
+                let error_msg = format!("{}", e);
+                // Check if this is a POST_ONLY rejection (order would cross book)
+                // or a balance issue - these should be OrderResult::Rejected, not ExecutorError
+                let is_rejection = error_msg.contains("crosses book")
+                    || error_msg.contains("post-only")
+                    || error_msg.contains("post only")
+                    || error_msg.contains("not enough balance")
+                    || error_msg.contains("allowance");
+
+                if is_rejection {
+                    return Ok(OrderResult::Rejected(OrderRejection {
+                        request_id: request.request_id.clone(),
+                        reason: format!("Order rejected: {}", error_msg),
+                        timestamp: Utc::now(),
+                    }));
+                }
+                return Err(ExecutorError::Rejected(format!("Order rejected: {}", e)));
+            }
+        };
 
         let order_id = response.order_id;
         info!(request_id = %request.request_id, order_id = %order_id, "Order submitted via SDK");
@@ -399,42 +417,106 @@ impl Executor for LiveSdkExecutor {
     }
 
     async fn order_status(&self, order_id: &str) -> Option<OrderResult> {
-        let orders = self.orders.read().await;
-        orders.get(order_id).map(|tracked| {
-            match tracked.status {
-                TrackedOrderStatus::Pending => OrderResult::Pending(PendingOrder {
+        // Get tracked order info for request_id
+        let tracked = {
+            let orders = self.orders.read().await;
+            orders.get(order_id).cloned()
+        };
+        let tracked = tracked?;
+
+        // Query the exchange for real-time status
+        let client = match self.create_authenticated_client().await {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(error = %e, "Failed to create client for order status check");
+                // Fall back to cached status
+                return Some(OrderResult::Pending(PendingOrder {
                     request_id: tracked.request.request_id.clone(),
                     order_id: tracked.order_id.clone(),
                     timestamp: Utc::now(),
-                }),
-                TrackedOrderStatus::Filled => OrderResult::Filled(OrderFill {
-                    request_id: tracked.request.request_id.clone(),
-                    order_id: tracked.order_id.clone(),
-                    size: tracked.filled_size,
-                    price: tracked.avg_fill_price,
-                    fee: tracked.total_fee,
-                    timestamp: Utc::now(),
-                }),
-                TrackedOrderStatus::PartiallyFilled => OrderResult::PartialFill(PartialOrderFill {
-                    request_id: tracked.request.request_id.clone(),
-                    order_id: tracked.order_id.clone(),
-                    requested_size: tracked.request.size,
-                    filled_size: tracked.filled_size,
-                    avg_price: tracked.avg_fill_price,
-                    fee: tracked.total_fee,
-                    timestamp: Utc::now(),
-                }),
-                TrackedOrderStatus::Cancelled | TrackedOrderStatus::Expired => {
-                    OrderResult::Cancelled(OrderCancellation {
-                        request_id: tracked.request.request_id.clone(),
-                        order_id: tracked.order_id.clone(),
-                        filled_size: tracked.filled_size,
-                        unfilled_size: tracked.request.size - tracked.filled_size,
-                        timestamp: Utc::now(),
-                    })
+                }));
+            }
+        };
+
+        match client.order(order_id).await {
+            Ok(response) => {
+                use polymarket_client_sdk::clob::types::OrderStatusType;
+
+                let request_id = tracked.request.request_id.clone();
+                let filled_size = response.size_matched;
+                let original_size = response.original_size;
+                let price = response.price;
+
+                match response.status {
+                    OrderStatusType::Matched => {
+                        // Fully filled
+                        // Update cache
+                        {
+                            let mut orders = self.orders.write().await;
+                            if let Some(t) = orders.get_mut(order_id) {
+                                t.status = TrackedOrderStatus::Filled;
+                                t.filled_size = filled_size;
+                                t.avg_fill_price = price;
+                            }
+                        }
+                        Some(OrderResult::Filled(OrderFill {
+                            request_id,
+                            order_id: order_id.to_string(),
+                            size: filled_size,
+                            price,
+                            fee: Decimal::ZERO, // Fee not in response
+                            timestamp: Utc::now(),
+                        }))
+                    }
+                    OrderStatusType::Live | OrderStatusType::Delayed => {
+                        // Still pending, check for partial fill
+                        if filled_size > Decimal::ZERO {
+                            Some(OrderResult::PartialFill(PartialOrderFill {
+                                request_id,
+                                order_id: order_id.to_string(),
+                                requested_size: original_size,
+                                filled_size,
+                                avg_price: price,
+                                fee: Decimal::ZERO,
+                                timestamp: Utc::now(),
+                            }))
+                        } else {
+                            Some(OrderResult::Pending(PendingOrder {
+                                request_id,
+                                order_id: order_id.to_string(),
+                                timestamp: Utc::now(),
+                            }))
+                        }
+                    }
+                    OrderStatusType::Canceled | OrderStatusType::Unmatched => {
+                        Some(OrderResult::Cancelled(OrderCancellation {
+                            request_id,
+                            order_id: order_id.to_string(),
+                            filled_size,
+                            unfilled_size: original_size - filled_size,
+                            timestamp: Utc::now(),
+                        }))
+                    }
+                    _ => {
+                        // Unknown status, treat as pending
+                        Some(OrderResult::Pending(PendingOrder {
+                            request_id,
+                            order_id: order_id.to_string(),
+                            timestamp: Utc::now(),
+                        }))
+                    }
                 }
             }
-        })
+            Err(e) => {
+                debug!(order_id = %order_id, error = %e, "Failed to query order status");
+                // Fall back to cached pending
+                Some(OrderResult::Pending(PendingOrder {
+                    request_id: tracked.request.request_id.clone(),
+                    order_id: tracked.order_id.clone(),
+                    timestamp: Utc::now(),
+                }))
+            }
+        }
     }
 
     fn pending_orders(&self) -> Vec<PendingOrder> {
@@ -448,7 +530,7 @@ impl Executor for LiveSdkExecutor {
     }
 
     async fn shutdown(&mut self) {
-        // Stop allowance manager first
+        // Stop allowance manager
         if let Some(ref manager) = self.allowance_manager {
             info!("Stopping allowance manager");
             manager.stop().await;

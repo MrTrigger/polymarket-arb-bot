@@ -1,7 +1,7 @@
 //! Live data source using WebSocket connections.
 //!
-//! Connects to Binance and Polymarket WebSockets to receive real-time
-//! market data for live trading.
+//! Connects to Binance WebSocket for spot prices and uses the official
+//! Polymarket SDK WebSocket for orderbook data.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -13,22 +13,19 @@ use futures_util::{SinkExt, StreamExt};
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use tokio::sync::{broadcast, mpsc, RwLock};
-use tokio::time::{interval, timeout};
+use tokio::time::interval;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
-use poly_common::types::{CryptoAsset, Side};
+use alloy::primitives::U256;
+use poly_common::types::CryptoAsset;
+use polymarket_client_sdk::clob::ws::Client as PolyWsClient;
 
-use super::{
-    BookDeltaEvent, BookSnapshotEvent, DataSource, DataSourceError, MarketEvent, SpotPriceEvent,
-};
+use super::{BookSnapshotEvent, DataSource, DataSourceError, MarketEvent, SpotPriceEvent};
 use crate::types::PriceLevel;
 
 /// Binance WebSocket URL.
 const BINANCE_WS_URL: &str = "wss://stream.binance.com:9443/ws";
-
-/// Polymarket CLOB WebSocket URL.
-const CLOB_WS_URL: &str = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
 
 /// Configuration for the live data source.
 #[derive(Debug, Clone)]
@@ -43,8 +40,6 @@ pub struct LiveDataSourceConfig {
     pub event_buffer_size: usize,
     /// Binance ping interval.
     pub binance_ping_interval: Duration,
-    /// CLOB ping interval (Polymarket requires every 10s).
-    pub clob_ping_interval: Duration,
 }
 
 impl Default for LiveDataSourceConfig {
@@ -60,7 +55,6 @@ impl Default for LiveDataSourceConfig {
             heartbeat_interval: Duration::from_secs(5),
             event_buffer_size: 10_000,
             binance_ping_interval: Duration::from_secs(30),
-            clob_ping_interval: Duration::from_secs(9),
         }
     }
 }
@@ -106,25 +100,25 @@ impl LiveDataSource {
         let (shutdown_tx, _) = broadcast::channel(16);
         let active_markets: ActiveMarketsState = Arc::new(RwLock::new(HashMap::new()));
 
-        // Spawn connection tasks
+        // Spawn Binance connection task
         let binance_shutdown = shutdown_tx.subscribe();
         let binance_tx = event_tx.clone();
         let binance_config = config.clone();
         tokio::spawn(async move {
-            if let Err(e) = run_binance_connection(binance_config, binance_tx, binance_shutdown).await
+            if let Err(e) =
+                run_binance_connection(binance_config, binance_tx, binance_shutdown).await
             {
                 error!("Binance connection error: {}", e);
             }
         });
 
+        // Spawn Polymarket SDK WebSocket connection task
         let clob_shutdown = shutdown_tx.subscribe();
         let clob_tx = event_tx.clone();
         let clob_markets = Arc::clone(&active_markets);
-        let clob_config = config.clone();
         tokio::spawn(async move {
-            if let Err(e) = run_clob_connection(clob_config, clob_tx, clob_markets, clob_shutdown).await
-            {
-                error!("CLOB connection error: {}", e);
+            if let Err(e) = run_sdk_clob_connection(clob_tx, clob_markets, clob_shutdown).await {
+                error!("CLOB SDK connection error: {}", e);
             }
         });
 
@@ -265,7 +259,10 @@ async fn run_binance_connection(
                 return Ok(());
             }
             Err(e) => {
-                warn!("Binance connection error: {}, reconnecting in {:?}", e, reconnect_delay);
+                warn!(
+                    "Binance connection error: {}, reconnecting in {:?}",
+                    e, reconnect_delay
+                );
 
                 tokio::select! {
                     _ = tokio::time::sleep(reconnect_delay) => {}
@@ -289,7 +286,8 @@ async fn run_binance_session(
 ) -> Result<(), DataSourceError> {
     info!("Connecting to Binance WebSocket at {}", BINANCE_WS_URL);
 
-    let connect_result = timeout(config.connect_timeout, connect_async(BINANCE_WS_URL)).await;
+    let connect_result =
+        tokio::time::timeout(config.connect_timeout, connect_async(BINANCE_WS_URL)).await;
 
     let (ws_stream, _) = match connect_result {
         Ok(Ok((stream, response))) => (stream, response),
@@ -391,61 +389,12 @@ fn parse_binance_trade(text: &str) -> Option<MarketEvent> {
     }))
 }
 
-/// CLOB subscription message.
-#[derive(Debug, serde::Serialize)]
-struct ClobSubscribeMessage {
-    assets_ids: Vec<String>,
-    #[serde(rename = "type")]
-    msg_type: &'static str,
-}
+// ============================================================================
+// Polymarket SDK WebSocket Connection
+// ============================================================================
 
-/// CLOB order level.
-#[derive(Debug, Deserialize)]
-struct OrderSummary {
-    price: String,
-    size: String,
-}
-
-/// CLOB book message.
-#[derive(Debug, Deserialize)]
-struct BookMessage {
-    #[allow(dead_code)]
-    event_type: String,
-    asset_id: String,
-    market: String,
-    timestamp: String,
-    bids: Vec<OrderSummary>,
-    asks: Vec<OrderSummary>,
-}
-
-/// CLOB price change.
-#[derive(Debug, Deserialize)]
-struct PriceChangeEntry {
-    price: String,
-    size: String,
-    side: String,
-}
-
-/// CLOB price change message.
-#[derive(Debug, Deserialize)]
-struct PriceChangeMessage {
-    #[allow(dead_code)]
-    event_type: String,
-    asset_id: String,
-    market: String,
-    timestamp: String,
-    price_changes: Vec<PriceChangeEntry>,
-}
-
-/// Generic CLOB message for type detection.
-#[derive(Debug, Deserialize)]
-struct GenericClobMessage {
-    event_type: Option<String>,
-}
-
-/// Run Polymarket CLOB WebSocket connection.
-async fn run_clob_connection(
-    config: LiveDataSourceConfig,
+/// Run Polymarket CLOB WebSocket connection using the official SDK.
+async fn run_sdk_clob_connection(
     tx: mpsc::Sender<MarketEvent>,
     active_markets: ActiveMarketsState,
     mut shutdown: broadcast::Receiver<()>,
@@ -456,7 +405,7 @@ async fn run_clob_connection(
 
     loop {
         if shutdown.try_recv().is_ok() {
-            info!("CLOB connection: shutdown signal received");
+            info!("CLOB SDK connection: shutdown signal received");
             return Ok(());
         }
 
@@ -464,7 +413,7 @@ async fn run_clob_connection(
         let token_ids = get_token_ids(&active_markets).await;
         if token_ids.is_empty() {
             if !logged_waiting {
-                info!("CLOB connection: waiting for markets to be discovered...");
+                info!("CLOB SDK connection: waiting for markets to be discovered...");
                 logged_waiting = true;
             }
             // Poll for markets every 5 seconds
@@ -473,7 +422,7 @@ async fn run_clob_connection(
                     continue;
                 }
                 _ = shutdown.recv() => {
-                    info!("CLOB connection: shutdown while waiting for markets");
+                    info!("CLOB SDK connection: shutdown while waiting for markets");
                     return Ok(());
                 }
             }
@@ -482,26 +431,29 @@ async fn run_clob_connection(
         // Markets available, reset the waiting flag
         logged_waiting = false;
 
-        match run_clob_session(&config, &tx, &active_markets, &mut shutdown).await {
+        match run_sdk_clob_session(&tx, &active_markets, &mut shutdown).await {
             Ok(()) => {
-                info!("CLOB connection: clean shutdown");
+                info!("CLOB SDK connection: clean shutdown");
                 return Ok(());
             }
             Err(e) => {
                 // Check if we still have markets - if not, go back to waiting state
                 let current_tokens = get_token_ids(&active_markets).await;
                 if current_tokens.is_empty() {
-                    debug!("CLOB connection closed, no active markets");
+                    debug!("CLOB SDK connection closed, no active markets");
                     reconnect_delay = Duration::from_secs(1);
                     continue;
                 }
 
-                warn!("CLOB connection error: {}, reconnecting in {:?}", e, reconnect_delay);
+                warn!(
+                    "CLOB SDK connection error: {}, reconnecting in {:?}",
+                    e, reconnect_delay
+                );
 
                 tokio::select! {
                     _ = tokio::time::sleep(reconnect_delay) => {}
                     _ = shutdown.recv() => {
-                        info!("CLOB connection: shutdown during reconnect");
+                        info!("CLOB SDK connection: shutdown during reconnect");
                         return Ok(());
                     }
                 }
@@ -512,107 +464,139 @@ async fn run_clob_connection(
     }
 }
 
-/// Run a single CLOB WebSocket session.
-async fn run_clob_session(
-    config: &LiveDataSourceConfig,
+/// Run a single CLOB WebSocket session using the SDK.
+async fn run_sdk_clob_session(
     tx: &mpsc::Sender<MarketEvent>,
     active_markets: &ActiveMarketsState,
     shutdown: &mut broadcast::Receiver<()>,
 ) -> Result<(), DataSourceError> {
-    info!("Connecting to Polymarket CLOB WebSocket at {}", CLOB_WS_URL);
+    info!("Connecting to Polymarket CLOB WebSocket via SDK");
 
-    let connect_result = timeout(config.connect_timeout, connect_async(CLOB_WS_URL)).await;
+    // Create SDK WebSocket client
+    let client = PolyWsClient::default();
 
-    let (ws_stream, _) = match connect_result {
-        Ok(Ok((stream, response))) => (stream, response),
-        Ok(Err(e)) => return Err(DataSourceError::Connection(e.to_string())),
-        Err(_) => return Err(DataSourceError::Timeout),
-    };
+    // Get token IDs to subscribe to (as strings)
+    let token_id_strings = get_token_ids(active_markets).await;
 
-    info!("Connected to Polymarket CLOB WebSocket");
-
-    let (mut write, mut read) = ws_stream.split();
-
-    // Get token IDs to subscribe to
-    let token_ids = get_token_ids(active_markets).await;
-
-    if !token_ids.is_empty() {
-        let subscribe_msg = ClobSubscribeMessage {
-            assets_ids: token_ids.clone(),
-            msg_type: "market",
-        };
-
-        let msg = serde_json::to_string(&subscribe_msg)
-            .map_err(|e| DataSourceError::Parse(e.to_string()))?;
-        write
-            .send(Message::Text(msg))
-            .await
-            .map_err(|e| DataSourceError::WebSocket(e.to_string()))?;
-
-        info!("Subscribed to {} CLOB tokens", token_ids.len());
+    if token_id_strings.is_empty() {
+        return Err(DataSourceError::Connection(
+            "No tokens to subscribe to".to_string(),
+        ));
     }
 
-    // Build token_id -> event_id mapping
+    // Convert string token IDs to U256 for SDK
+    let token_ids: Vec<U256> = token_id_strings
+        .iter()
+        .filter_map(|s| U256::from_str_radix(s, 10).ok())
+        .collect();
+
+    if token_ids.is_empty() {
+        return Err(DataSourceError::Connection(
+            "Failed to parse any token IDs".to_string(),
+        ));
+    }
+
+    info!("Subscribing to {} tokens via SDK", token_ids.len());
+
+    // Build token_id -> event_id mapping (using string keys)
     let token_event_map = build_token_event_map(active_markets).await;
 
-    let mut ping_timer = interval(config.clob_ping_interval);
+    // Subscribe to orderbook updates using the SDK
+    let stream = client
+        .subscribe_orderbook(token_ids)
+        .map_err(|e| DataSourceError::Connection(format!("SDK subscription failed: {}", e)))?;
+
+    let mut stream = Box::pin(stream);
+
+    info!("Connected and subscribed to CLOB via SDK");
+
+    // Track subscribed tokens for dynamic subscription updates
+    let subscribed_tokens: std::collections::HashSet<String> =
+        token_id_strings.into_iter().collect();
     let mut subscription_check = interval(Duration::from_secs(30));
-    let mut subscribed_tokens: std::collections::HashSet<String> = token_ids.into_iter().collect();
 
     loop {
         tokio::select! {
-            msg = read.next() => {
-                match msg {
-                    Some(Ok(Message::Text(text))) => {
-                        if let Some(event) = parse_clob_message(&text, &token_event_map)
-                            && tx.send(event).await.is_err()
-                        {
+            book_result = stream.next() => {
+                match book_result {
+                    Some(Ok(book)) => {
+                        // Convert U256 asset_id to string for our internal types
+                        let asset_id_str = book.asset_id.to_string();
+
+                        // Look up event_id from our mapping
+                        let event_id = token_event_map
+                            .get(&asset_id_str)
+                            .cloned()
+                            .unwrap_or_else(|| format!("{:?}", book.market));
+
+                        // SDK price/size are already Decimal
+                        let bids: Vec<PriceLevel> = book
+                            .bids
+                            .iter()
+                            .map(|b| PriceLevel::new(b.price, b.size))
+                            .collect();
+
+                        let asks: Vec<PriceLevel> = book
+                            .asks
+                            .iter()
+                            .map(|a| PriceLevel::new(a.price, a.size))
+                            .collect();
+
+                        // Use timestamp from SDK (i64 milliseconds) or current time
+                        let timestamp = Utc
+                            .timestamp_millis_opt(book.timestamp)
+                            .single()
+                            .unwrap_or_else(Utc::now);
+
+                        let event = MarketEvent::BookSnapshot(BookSnapshotEvent {
+                            token_id: asset_id_str.clone(),
+                            event_id,
+                            bids,
+                            asks,
+                            timestamp,
+                        });
+
+                        trace!(
+                            token_id = %asset_id_str,
+                            bids = book.bids.len(),
+                            asks = book.asks.len(),
+                            "Received orderbook update from SDK"
+                        );
+
+                        if tx.send(event).await.is_err() {
                             return Err(DataSourceError::StreamEnded);
                         }
                     }
-                    Some(Ok(Message::Ping(data))) => {
-                        write.send(Message::Pong(data)).await
-                            .map_err(|e| DataSourceError::WebSocket(e.to_string()))?;
-                    }
-                    Some(Ok(Message::Close(_))) => {
-                        return Err(DataSourceError::StreamEnded);
-                    }
                     Some(Err(e)) => {
-                        return Err(DataSourceError::WebSocket(e.to_string()));
+                        return Err(DataSourceError::WebSocket(format!("SDK stream error: {}", e)));
                     }
                     None => {
                         return Err(DataSourceError::StreamEnded);
                     }
-                    _ => {}
                 }
             }
-            _ = ping_timer.tick() => {
-                write.send(Message::Text("PING".to_string())).await
-                    .map_err(|e| DataSourceError::WebSocket(e.to_string()))?;
-            }
             _ = subscription_check.tick() => {
-                // Check for new markets
+                // Check for new markets - need to reconnect to add new subscriptions
                 let current_tokens = get_token_ids(active_markets).await;
                 let new_tokens: Vec<String> = current_tokens
-                    .into_iter()
-                    .filter(|t| !subscribed_tokens.contains(t))
+                    .iter()
+                    .filter(|t| !subscribed_tokens.contains(*t))
+                    .cloned()
                     .collect();
 
                 if !new_tokens.is_empty() {
-                    let sub_msg = serde_json::json!({
-                        "assets_ids": new_tokens,
-                        "operation": "subscribe"
-                    });
-                    write.send(Message::Text(sub_msg.to_string())).await
-                        .map_err(|e| DataSourceError::WebSocket(e.to_string()))?;
-
-                    for token in new_tokens {
-                        subscribed_tokens.insert(token);
-                    }
+                    info!(
+                        "New markets discovered ({} tokens), reconnecting to add subscriptions",
+                        new_tokens.len()
+                    );
+                    // Return to trigger reconnection with new subscriptions
+                    return Err(DataSourceError::Connection(
+                        "Reconnecting to add new market subscriptions".to_string(),
+                    ));
                 }
             }
             _ = shutdown.recv() => {
-                info!("CLOB session: shutdown signal received");
+                info!("CLOB SDK session: shutdown signal received");
                 return Ok(());
             }
         }
@@ -637,101 +621,6 @@ async fn build_token_event_map(active_markets: &ActiveMarketsState) -> HashMap<S
         map.insert(market.no_token_id.clone(), market.event_id.clone());
     }
     map
-}
-
-/// Parse a CLOB message into a MarketEvent.
-fn parse_clob_message(text: &str, token_event_map: &HashMap<String, String>) -> Option<MarketEvent> {
-    // Skip non-JSON messages like PONG
-    let generic: GenericClobMessage = serde_json::from_str(text).ok()?;
-
-    match generic.event_type.as_deref()? {
-        "book" => parse_book_message(text, token_event_map),
-        "price_change" => parse_price_change_message(text, token_event_map),
-        _ => None,
-    }
-}
-
-/// Parse a book (snapshot) message.
-fn parse_book_message(text: &str, token_event_map: &HashMap<String, String>) -> Option<MarketEvent> {
-    let book: BookMessage = serde_json::from_str(text).ok()?;
-
-    let event_id = token_event_map
-        .get(&book.asset_id)
-        .cloned()
-        .unwrap_or_else(|| book.market.clone());
-
-    let bids: Vec<PriceLevel> = book
-        .bids
-        .iter()
-        .filter_map(|o| {
-            let price: Decimal = o.price.parse().ok()?;
-            let size: Decimal = o.size.parse().ok()?;
-            Some(PriceLevel::new(price, size))
-        })
-        .collect();
-
-    let asks: Vec<PriceLevel> = book
-        .asks
-        .iter()
-        .filter_map(|o| {
-            let price: Decimal = o.price.parse().ok()?;
-            let size: Decimal = o.size.parse().ok()?;
-            Some(PriceLevel::new(price, size))
-        })
-        .collect();
-
-    let timestamp = parse_timestamp(&book.timestamp)?;
-
-    Some(MarketEvent::BookSnapshot(BookSnapshotEvent {
-        token_id: book.asset_id,
-        event_id,
-        bids,
-        asks,
-        timestamp,
-    }))
-}
-
-/// Parse a price_change (delta) message.
-fn parse_price_change_message(
-    text: &str,
-    token_event_map: &HashMap<String, String>,
-) -> Option<MarketEvent> {
-    let msg: PriceChangeMessage = serde_json::from_str(text).ok()?;
-
-    let event_id = token_event_map
-        .get(&msg.asset_id)
-        .cloned()
-        .unwrap_or_else(|| msg.market.clone());
-
-    // Process only the first price change for simplicity
-    // In practice, we might want to emit multiple events
-    let change = msg.price_changes.first()?;
-
-    let side = match change.side.to_lowercase().as_str() {
-        "buy" | "bid" => Side::Buy,
-        "sell" | "ask" => Side::Sell,
-        _ => return None,
-    };
-
-    let price: Decimal = change.price.parse().ok()?;
-    let size: Decimal = change.size.parse().ok()?;
-    let timestamp = parse_timestamp(&msg.timestamp)?;
-
-    Some(MarketEvent::BookDelta(BookDeltaEvent {
-        token_id: msg.asset_id,
-        event_id,
-        side,
-        price,
-        size,
-        timestamp,
-    }))
-}
-
-/// Parse a timestamp from milliseconds string.
-fn parse_timestamp(ts: &str) -> Option<DateTime<Utc>> {
-    ts.parse::<i64>()
-        .ok()
-        .and_then(|ms| Utc.timestamp_millis_opt(ms).single())
 }
 
 #[cfg(test)]
@@ -766,64 +655,6 @@ mod tests {
         let msg = r#"{"result":null,"id":1}"#;
         let event = parse_binance_trade(msg);
         assert!(event.is_none());
-    }
-
-    #[test]
-    fn test_parse_book_message() {
-        let msg = r#"{
-            "event_type": "book",
-            "asset_id": "token123",
-            "market": "event456",
-            "timestamp": "1704067200000",
-            "hash": "abc",
-            "bids": [{"price": "0.45", "size": "100"}],
-            "asks": [{"price": "0.55", "size": "150"}]
-        }"#;
-
-        let token_event_map = HashMap::new();
-        let event = parse_clob_message(msg, &token_event_map);
-
-        assert!(event.is_some());
-        if let Some(MarketEvent::BookSnapshot(e)) = event {
-            assert_eq!(e.token_id, "token123");
-            assert_eq!(e.bids.len(), 1);
-            assert_eq!(e.asks.len(), 1);
-            assert_eq!(e.bids[0].price, dec!(0.45));
-            assert_eq!(e.asks[0].price, dec!(0.55));
-        } else {
-            panic!("Expected BookSnapshot event");
-        }
-    }
-
-    #[test]
-    fn test_parse_price_change_message() {
-        let msg = r#"{
-            "event_type": "price_change",
-            "asset_id": "token123",
-            "market": "event456",
-            "timestamp": "1704067200000",
-            "price_changes": [{"price": "0.46", "size": "50", "side": "buy"}]
-        }"#;
-
-        let token_event_map = HashMap::new();
-        let event = parse_clob_message(msg, &token_event_map);
-
-        assert!(event.is_some());
-        if let Some(MarketEvent::BookDelta(e)) = event {
-            assert_eq!(e.token_id, "token123");
-            assert_eq!(e.side, Side::Buy);
-            assert_eq!(e.price, dec!(0.46));
-            assert_eq!(e.size, dec!(50));
-        } else {
-            panic!("Expected BookDelta event");
-        }
-    }
-
-    #[test]
-    fn test_parse_timestamp() {
-        let ts = parse_timestamp("1704067200000");
-        assert!(ts.is_some());
-        assert_eq!(ts.unwrap().timestamp_millis(), 1704067200000);
     }
 
     #[test]
