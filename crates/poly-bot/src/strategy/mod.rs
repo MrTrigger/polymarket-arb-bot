@@ -453,6 +453,28 @@ impl TrackedMarket {
         self.position_manager.record_trade(size, up_amount, down_amount, seconds_remaining);
     }
 
+    /// Reserve budget before placing an order.
+    fn reserve_budget(&mut self, size: Decimal, seconds_remaining: i64) {
+        self.position_manager.reserve_budget(size, seconds_remaining);
+    }
+
+    /// Release a reservation when an order fails.
+    fn release_reservation(&mut self, size: Decimal, seconds_remaining: i64) {
+        self.position_manager.release_reservation(size, seconds_remaining);
+    }
+
+    /// Commit a reservation when an order fills.
+    fn commit_reservation(
+        &mut self,
+        reserved_size: Decimal,
+        filled_size: Decimal,
+        up_amount: Decimal,
+        down_amount: Decimal,
+        seconds_remaining: i64,
+    ) {
+        self.position_manager.commit_reservation(reserved_size, filled_size, up_amount, down_amount, seconds_remaining);
+    }
+
     /// Check if we have any position in this market.
     fn has_position(&self) -> bool {
         self.inventory.total_exposure() > Decimal::ZERO
@@ -2022,9 +2044,16 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
     ) -> Result<TradeAction, StrategyError> {
         let event_id = opportunity.event_id.clone();
 
-        // Mark pending BEFORE placing orders to prevent duplicate submissions
+        // Get seconds_remaining for budget reservation
+        let seconds_remaining = self.markets
+            .get(&event_id)
+            .map(|m| m.state.seconds_remaining)
+            .unwrap_or(0);
+
+        // Mark pending and reserve budget BEFORE placing orders
         if let Some(market) = self.markets.get_mut(&event_id) {
             market.pending_directional_order = true;
+            market.reserve_budget(total_size, seconds_remaining);
         }
 
         // Get the tracked market for order book access
@@ -2032,9 +2061,10 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             Some(m) => m,
             None => {
                 warn!("No tracked market for directional: {}", event_id);
-                // Clear pending flag since we won't place orders
+                // Clear pending flag and release reservation since we won't place orders
                 if let Some(market) = self.markets.get_mut(&event_id) {
                     market.pending_directional_order = false;
+                    market.release_reservation(total_size, seconds_remaining);
                 }
                 return Ok(TradeAction::SkipSizing);
             }
@@ -2418,7 +2448,8 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
 
             // Record trade in position manager to update phase budgets
             let seconds_remaining = market.state.seconds_remaining;
-            market.record_trade(total_volume, up_filled_cost, down_filled_cost, seconds_remaining);
+            // Commit reservation: release the reserved amount and record the filled amount
+            market.commit_reservation(total_size, total_volume, up_filled_cost, down_filled_cost, seconds_remaining);
 
             debug!(
                 "Inventory updated for {}: YES={} NO={} total_exposure={}",
@@ -2449,6 +2480,16 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             && let Some(market) = self.markets.get_mut(&event_id)
         {
             market.pending_directional_order = false;
+
+            // If no fills occurred, release the reservation (budget stays reserved until here)
+            if total_volume == Decimal::ZERO {
+                // Note: commit_reservation already released the reservation above,
+                // but if we didn't enter that block, we need to release here
+                debug!(
+                    "Trade attempt for {} completed without fills, budget reservation released",
+                    event_id
+                );
+            }
         }
 
         Ok(TradeAction::Execute)

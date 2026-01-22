@@ -389,31 +389,39 @@ impl Executor for LiveSdkExecutor {
         Ok(OrderResult::Pending(pending_order))
     }
 
-    async fn cancel_order(&mut self, request_id: &str) -> Result<OrderCancellation, ExecutorError> {
-        let order_id = {
-            let mapping = self.request_to_order.read().await;
-            mapping.get(request_id).cloned()
+    async fn cancel_order(&mut self, order_id: &str) -> Result<OrderCancellation, ExecutorError> {
+        // The chaser passes order_id directly, but we might also receive request_id
+        // Try order_id first, then fall back to looking up via request_id mapping
+        let actual_order_id = {
+            // Check if this looks like an order_id (0x...) or request_id (dir-N-...)
+            if order_id.starts_with("0x") {
+                order_id.to_string()
+            } else {
+                // It's a request_id, look up the order_id
+                let mapping = self.request_to_order.read().await;
+                mapping.get(order_id).cloned().ok_or_else(|| {
+                    ExecutorError::Internal(format!("Order not found for request: {}", order_id))
+                })?
+            }
         };
-
-        let order_id = order_id.ok_or_else(|| {
-            ExecutorError::Internal(format!("Order not found for request: {}", request_id))
-        })?;
 
         let client = self.create_authenticated_client().await?;
         client
-            .cancel_order(&order_id)
+            .cancel_order(&actual_order_id)
             .await
             .map_err(|e| ExecutorError::Internal(format!("Failed to cancel order: {}", e)))?;
 
         // Remove from pending
         {
             let mut pending = self.pending.write().await;
-            pending.retain(|p| p.order_id != order_id);
+            pending.retain(|p| p.order_id != actual_order_id);
         }
 
+        info!(order_id = %actual_order_id, "Order cancelled");
+
         Ok(OrderCancellation {
-            request_id: request_id.to_string(),
-            order_id,
+            request_id: order_id.to_string(), // Could be request_id or order_id
+            order_id: actual_order_id,
             filled_size: Decimal::ZERO,
             unfilled_size: Decimal::ZERO, // TODO: Get from response
             timestamp: Utc::now(),

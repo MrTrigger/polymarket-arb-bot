@@ -177,6 +177,10 @@ impl PositionConfig {
     }
 }
 
+/// Maximum failed trade attempts per phase before giving up.
+/// This prevents infinite retries when orders consistently fail to fill.
+pub const MAX_FAILED_ATTEMPTS_PER_PHASE: u32 = 3;
+
 /// Reason for skipping a trade.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SkipReason {
@@ -190,6 +194,8 @@ pub enum SkipReason {
     PositionLimitExceeded,
     /// Order size below minimum.
     BelowMinimumSize,
+    /// Too many failed attempts in this phase.
+    TooManyFailedAttempts,
 }
 
 impl std::fmt::Display for SkipReason {
@@ -200,6 +206,7 @@ impl std::fmt::Display for SkipReason {
             SkipReason::TotalBudgetExhausted => write!(f, "total budget exhausted"),
             SkipReason::PositionLimitExceeded => write!(f, "position limit exceeded"),
             SkipReason::BelowMinimumSize => write!(f, "order size below minimum"),
+            SkipReason::TooManyFailedAttempts => write!(f, "too many failed attempts in phase"),
         }
     }
 }
@@ -244,6 +251,12 @@ pub struct PositionManager {
     phase_spent: HashMap<Phase, Decimal>,
     /// Total amount spent.
     total_spent: Decimal,
+    /// Amount reserved (pending orders) per phase.
+    phase_reserved: HashMap<Phase, Decimal>,
+    /// Total amount reserved (pending orders).
+    total_reserved: Decimal,
+    /// Failed attempt count per phase (limited to prevent infinite retries).
+    phase_failed_attempts: HashMap<Phase, u32>,
     /// Current UP exposure (0.0 to 1.0).
     up_exposure: Decimal,
     /// Current DOWN exposure (0.0 to 1.0).
@@ -261,10 +274,25 @@ impl PositionManager {
         phase_spent.insert(Phase::Core, Decimal::ZERO);
         phase_spent.insert(Phase::Final, Decimal::ZERO);
 
+        let mut phase_reserved = HashMap::new();
+        phase_reserved.insert(Phase::Early, Decimal::ZERO);
+        phase_reserved.insert(Phase::Build, Decimal::ZERO);
+        phase_reserved.insert(Phase::Core, Decimal::ZERO);
+        phase_reserved.insert(Phase::Final, Decimal::ZERO);
+
+        let mut phase_failed_attempts = HashMap::new();
+        phase_failed_attempts.insert(Phase::Early, 0);
+        phase_failed_attempts.insert(Phase::Build, 0);
+        phase_failed_attempts.insert(Phase::Core, 0);
+        phase_failed_attempts.insert(Phase::Final, 0);
+
         Self {
             config,
             phase_spent,
             total_spent: Decimal::ZERO,
+            phase_reserved,
+            total_reserved: Decimal::ZERO,
+            phase_failed_attempts,
             up_exposure: Decimal::ZERO,
             down_exposure: Decimal::ZERO,
             trade_count: 0,
@@ -439,21 +467,28 @@ impl PositionManager {
             return TradeDecision::Skip(SkipReason::LowConfidence);
         }
 
-        // 2. Check total budget
-        let total_remaining = self.config.total_budget - self.total_spent;
+        // 2. Check total budget (accounting for reserved amounts from pending orders)
+        let total_remaining = self.config.total_budget - self.total_spent - self.total_reserved;
         if total_remaining <= Decimal::ZERO {
             return TradeDecision::Skip(SkipReason::TotalBudgetExhausted);
         }
 
-        // 3. Check phase budget
+        // 3. Check phase budget (accounting for reserved amounts)
         let phase_budget = self.config.phase_budget(phase);
         let phase_spent = self.phase_spent.get(&phase).copied().unwrap_or(Decimal::ZERO);
-        let phase_remaining = phase_budget - phase_spent;
+        let phase_reserved = self.phase_reserved.get(&phase).copied().unwrap_or(Decimal::ZERO);
+        let phase_remaining = phase_budget - phase_spent - phase_reserved;
         if phase_remaining <= Decimal::ZERO {
             return TradeDecision::Skip(SkipReason::PhaseBudgetExhausted);
         }
 
-        // 4. Calculate size
+        // 4. Check failed attempt limit for this phase
+        let failed_attempts = self.phase_failed_attempts.get(&phase).copied().unwrap_or(0);
+        if failed_attempts >= MAX_FAILED_ATTEMPTS_PER_PHASE {
+            return TradeDecision::Skip(SkipReason::TooManyFailedAttempts);
+        }
+
+        // 5. Calculate size
         let size = self.calculate_size(phase_remaining, total_remaining, confidence);
 
         // 5. Check minimum size
@@ -518,6 +553,47 @@ impl PositionManager {
         self.trade_count += 1;
     }
 
+    /// Reserve budget before placing an order.
+    /// This prevents the same budget from being allocated to multiple concurrent orders.
+    pub fn reserve_budget(&mut self, size: Decimal, seconds_remaining: i64) {
+        let phase = Phase::from_seconds(seconds_remaining);
+        *self.phase_reserved.entry(phase).or_insert(Decimal::ZERO) += size;
+        self.total_reserved += size;
+    }
+
+    /// Release a reservation when an order fails or is cancelled.
+    pub fn release_reservation(&mut self, size: Decimal, seconds_remaining: i64) {
+        let phase = Phase::from_seconds(seconds_remaining);
+        let reserved = self.phase_reserved.entry(phase).or_insert(Decimal::ZERO);
+        *reserved = (*reserved - size).max(Decimal::ZERO);
+        self.total_reserved = (self.total_reserved - size).max(Decimal::ZERO);
+    }
+
+    /// Commit a reservation when an order completes.
+    /// If filled: moves amount from reserved to spent.
+    /// If not filled: releases reservation and records a failed attempt.
+    pub fn commit_reservation(
+        &mut self,
+        reserved_size: Decimal,
+        filled_size: Decimal,
+        up_amount: Decimal,
+        down_amount: Decimal,
+        seconds_remaining: i64,
+    ) {
+        let phase = Phase::from_seconds(seconds_remaining);
+
+        // Release the reservation
+        self.release_reservation(reserved_size, seconds_remaining);
+
+        if filled_size > Decimal::ZERO {
+            // Record the actual filled amount as spent
+            self.record_trade(filled_size, up_amount, down_amount, seconds_remaining);
+        } else {
+            // No fill - record a failed attempt for this phase
+            *self.phase_failed_attempts.entry(phase).or_insert(0) += 1;
+        }
+    }
+
     /// Get current phase spending summary.
     pub fn phase_summary(&self) -> HashMap<Phase, (Decimal, Decimal)> {
         let mut summary = HashMap::new();
@@ -558,7 +634,14 @@ impl PositionManager {
         for spent in self.phase_spent.values_mut() {
             *spent = Decimal::ZERO;
         }
+        for reserved in self.phase_reserved.values_mut() {
+            *reserved = Decimal::ZERO;
+        }
+        for failed in self.phase_failed_attempts.values_mut() {
+            *failed = 0;
+        }
         self.total_spent = Decimal::ZERO;
+        self.total_reserved = Decimal::ZERO;
         self.up_exposure = Decimal::ZERO;
         self.down_exposure = Decimal::ZERO;
         self.trade_count = 0;
