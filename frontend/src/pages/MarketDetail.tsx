@@ -35,28 +35,35 @@ export function MarketDetail() {
     ? markets[currentIndex + 1]
     : null;
 
-  // Auto-navigate when current market expires (disappears from list)
+  // Auto-navigate when current market expires (time runs out or disappears from list)
   useEffect(() => {
-    // Only auto-navigate if we're initialized, have markets, but current market is gone
     if (!initialized || markets.length === 0) return;
-    if (market) return; // Market still exists, no need to navigate
+
+    // Check if we should navigate away from current market
+    const shouldNavigate = !market || market.seconds_remaining <= 0;
+    if (!shouldNavigate) return;
 
     const lastAsset = lastAssetRef.current;
 
-    // Find next market - prefer same asset, then any market
+    // Find next market - prefer same asset with time remaining, then any market with time
     let nextMarketToShow = lastAsset
-      ? markets.find((m) => m.asset === lastAsset)
+      ? markets.find((m) => m.asset === lastAsset && m.seconds_remaining > 0 && m.event_id !== eventId)
       : null;
 
-    // If no market with same asset, pick the first available
-    if (!nextMarketToShow && markets.length > 0) {
-      nextMarketToShow = markets[0];
+    // If no market with same asset, pick any market with time remaining
+    if (!nextMarketToShow) {
+      nextMarketToShow = markets.find((m) => m.seconds_remaining > 0 && m.event_id !== eventId);
+    }
+
+    // Last resort: any market that's not the current one
+    if (!nextMarketToShow) {
+      nextMarketToShow = markets.find((m) => m.event_id !== eventId);
     }
 
     if (nextMarketToShow) {
       navigate(`/market/${nextMarketToShow.event_id}`, { replace: true });
     }
-  }, [initialized, markets, market, navigate]);
+  }, [initialized, markets, market, eventId, navigate]);
 
   // Keyboard navigation (left/right arrows)
   useEffect(() => {

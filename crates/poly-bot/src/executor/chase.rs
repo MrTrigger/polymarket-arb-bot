@@ -72,7 +72,7 @@ impl Default for ChaseConfig {
             enabled: true,
             step_size: Decimal::new(1, 2),        // 0.01 (Polymarket tick size)
             check_interval_ms: 500,               // 500ms
-            max_chase_time_ms: 30000,             // 30 seconds
+            max_chase_time_ms: 5000,              // 5 seconds (was 30, too slow)
             min_chase_size: Decimal::new(1, 0),   // 1 share minimum
             min_margin: Decimal::new(5, 3),       // 0.5% minimum margin
         }
@@ -328,8 +328,17 @@ impl PriceChaser {
     {
         // If chasing disabled, just place the order once
         if !self.config.enabled {
+            info!(token_id = %request.token_id, "Chase disabled, placing single order");
             return self.place_without_chase(executor, request).await;
         }
+
+        info!(
+            token_id = %request.token_id,
+            side = ?request.side,
+            price = %request.price.unwrap_or_default(),
+            size = %request.size,
+            "Starting chase loop"
+        );
 
         let start = Instant::now();
         let ceiling = self.calculate_ceiling(request.side, other_leg_price);
@@ -559,6 +568,25 @@ impl PriceChaser {
                     }
 
                     Err(e) => {
+                        // Check if this is a "market closed" error (orderbook no longer exists)
+                        let error_str = e.to_string();
+                        let is_market_closed = error_str.contains("does not exist")
+                            || error_str.contains("orderbook")
+                            || error_str.contains("market closed")
+                            || error_str.contains("market is closed");
+
+                        if is_market_closed {
+                            warn!(error = %e, "Market closed/orderbook removed during chase");
+                            return Ok(build_result(
+                                fills,
+                                remaining_size,
+                                current_price,
+                                start.elapsed().as_millis() as u64,
+                                iteration,
+                                Some(ChaseStopReason::MarketClosed),
+                            ));
+                        }
+
                         warn!(error = %e, "Executor error during chase");
                         return Ok(build_result(
                             fills,
@@ -616,7 +644,14 @@ impl PriceChaser {
 
             // Check if market price has moved away from our order
             // Only cancel and replace if the best price is different from ours
-            if let Some(best_price) = get_best_price() {
+            let best_price_opt = get_best_price();
+            if best_price_opt.is_none() && iteration == 1 {
+                warn!(
+                    token_id = %request.token_id,
+                    "Chase: price provider returned None - orderbook may not be in state"
+                );
+            }
+            if let Some(best_price) = best_price_opt {
                 let price_moved = match request.side {
                     // For buy orders: if best bid moved up, we should follow
                     Side::Buy => best_price > current_price,
@@ -836,7 +871,7 @@ mod tests {
         assert!(config.enabled);
         assert_eq!(config.step_size, dec!(0.01)); // Polymarket tick size
         assert_eq!(config.check_interval_ms, 500);
-        assert_eq!(config.max_chase_time_ms, 30000);
+        assert_eq!(config.max_chase_time_ms, 5000); // Reduced from 30s for faster iteration
     }
 
     #[test]

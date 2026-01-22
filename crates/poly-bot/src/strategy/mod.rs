@@ -52,6 +52,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, trace, warn};
 
 use poly_common::types::{CryptoAsset, Outcome, Side};
+use crate::executor::chase::ChaseConfig;
 
 // ============================================================================
 // Active Maker Order Tracking
@@ -167,7 +168,7 @@ use crate::data_source::{
 use crate::executor::{Executor, ExecutorError, OrderRequest, OrderResult, OrderType};
 use crate::executor::chase::{ChaseStopReason, PriceChaser};
 use crate::state::{ActiveWindow, GlobalState};
-use crate::types::{EngineType, Inventory, MarketState, OrderBook};
+use crate::types::{EngineType, Inventory, MarketState};
 
 pub use arb::{ArbDetector, ArbOpportunity, ArbRejection, ArbThresholds};
 pub use confidence::{
@@ -194,36 +195,7 @@ pub use aggregator::{
     AggregatedDecision, DecisionAggregator, DecisionSummary, EngineDecision,
 };
 
-// ============================================================================
-// Maker Price Calculation
-// ============================================================================
-
 use rust_decimal_macros::dec;
-
-/// Calculate optimal maker price inside the spread.
-///
-/// The maker price is positioned inside the bid-ask spread based on spread width:
-/// - Wide spread (>3%): Place 40% from bid toward ask
-/// - Medium spread (1-3%): Place 30% from bid toward ask
-/// - Tight spread (<1%): Place at bid price
-///
-/// Calculate maker price by placing right at the best bid (for buys) or best ask (for sells).
-/// With POST_ONLY orders, the order is rejected if it would fill immediately,
-/// so we're guaranteed to be a maker. Price chasing will update if the market moves.
-fn calculate_maker_price(book: &OrderBook, side: Side) -> Option<Decimal> {
-    match side {
-        Side::Buy => {
-            // For buying, place at best bid to be a maker
-            let bid = book.best_bid()?;
-            Some(bid.round_dp(2))
-        }
-        Side::Sell => {
-            // For selling, place at best ask to be a maker
-            let ask = book.best_ask()?;
-            Some(ask.round_dp(2))
-        }
-    }
-}
 
 /// Errors that can occur in the strategy loop.
 #[derive(Debug, Error)]
@@ -336,6 +308,9 @@ struct TrackedMarket {
     pending_arb_order: bool,
     /// Whether we have a pending directional order (not yet filled/cancelled).
     pending_directional_order: bool,
+    /// Last simulated timestamp when we placed an order (for cooldown).
+    /// Uses DateTime<Utc> to work correctly in both live and backtest modes.
+    last_order_timestamp: Option<DateTime<Utc>>,
     /// Phase-based position manager for this market.
     /// Controls when/how much to trade based on confidence and budget.
     position_manager: position::PositionManager,
@@ -389,6 +364,7 @@ impl TrackedMarket {
             active_maker_orders: HashMap::new(),
             pending_arb_order: false,
             pending_directional_order: false,
+            last_order_timestamp: None,
             position_manager: position::PositionManager::new(position_config),
             min_order_size,
         }
@@ -716,6 +692,12 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
         // Create confidence sizer with the available balance from sizing config
         let confidence_sizer = ConfidenceSizer::with_balance(config.sizing_config.base_order_size * Decimal::from(200u32));
 
+        // Extract chase config values before moving config into struct
+        let chase_enabled = config.execution.chase_enabled && !config.is_backtest;
+        let chase_step_size = config.execution.chase_step_size;
+        let chase_check_interval_ms = config.execution.chase_check_interval_ms;
+        let max_chase_time_ms = config.execution.max_chase_time_ms;
+
         Self {
             data_source,
             executor,
@@ -739,7 +721,13 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             last_skip_log: std::time::Instant::now(),
             atr_tracker: atr::AtrTracker::default(),
             simulated_time: Utc::now(),
-            chaser: PriceChaser::with_defaults(),
+            chaser: PriceChaser::new(ChaseConfig::from_execution_config(
+                chase_enabled,
+                chase_step_size,
+                chase_check_interval_ms,
+                max_chase_time_ms,
+                dec!(0.005), // 0.5% minimum margin
+            )),
         }
     }
 
@@ -903,7 +891,7 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
 
     /// Handle spot price update.
     fn handle_spot_price(&mut self, event: SpotPriceEvent) {
-        trace!("Spot price: {} @ {}", event.asset, event.price);
+        debug!("📈 Spot price: {} @ {}", event.asset, event.price);
 
         // Update local cache
         self.spot_prices.insert(event.asset, event.price);
@@ -1554,6 +1542,10 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
 
             // Skip if no opportunity detected by any engine
             if !aggregated.should_act() {
+                debug!(
+                    "⚪ No signal for {}: dist too small or no clear direction",
+                    event_id
+                );
                 continue;
             }
 
@@ -1696,6 +1688,30 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                             event_id
                         );
                         continue; // Silent skip - order already in flight
+                    }
+
+                    // Cooldown check: don't spam orders (wait 2 seconds between attempts)
+                    // Skip cooldown for market orders - they fill immediately so no spam concern
+                    // Uses simulated time (window_end - seconds_remaining) to work in both live and backtest
+                    let is_market_mode = matches!(
+                        self.config.execution.execution_mode,
+                        crate::config::ExecutionMode::Market
+                    );
+                    if !is_market_mode {
+                        const ORDER_COOLDOWN_SECS: i64 = 2;
+                        let current_time = market.window_end - chrono::Duration::seconds(market.state.seconds_remaining);
+                        if let Some(last_timestamp) = market.last_order_timestamp {
+                            let elapsed = (current_time - last_timestamp).num_seconds();
+                            if elapsed < ORDER_COOLDOWN_SECS {
+                                trace!(
+                                    "Cooldown active for {}: {}s since last order (need {}s)",
+                                    event_id,
+                                    elapsed,
+                                    ORDER_COOLDOWN_SECS
+                                );
+                                continue;
+                            }
+                        }
                     }
 
                     // Calculate distance in dollars for position manager
@@ -2050,15 +2066,22 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             .map(|m| m.state.seconds_remaining)
             .unwrap_or(0);
 
-        // Mark pending and reserve budget BEFORE placing orders
+        // Mark pending, set cooldown timer, and reserve budget BEFORE placing orders
         if let Some(market) = self.markets.get_mut(&event_id) {
             market.pending_directional_order = true;
+            // Use simulated time for cooldown (works in both live and backtest)
+            let current_time = market.window_end - chrono::Duration::seconds(market.state.seconds_remaining);
+            market.last_order_timestamp = Some(current_time);
             market.reserve_budget(total_size, seconds_remaining);
         }
 
-        // Get the tracked market for order book access
-        let market = match self.markets.get(&event_id) {
-            Some(m) => m,
+        // Get the tracked market data (only what we need, no stale orderbook clones)
+        let (yes_token_id, no_token_id, min_order_size) = match self.markets.get(&event_id) {
+            Some(m) => (
+                m.yes_token_id.clone(),
+                m.no_token_id.clone(),
+                m.min_order_size,
+            ),
             None => {
                 warn!("No tracked market for directional: {}", event_id);
                 // Clear pending flag and release reservation since we won't place orders
@@ -2070,25 +2093,52 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             }
         };
 
-        // Get order books
-        let (yes_book, no_book) = (&market.state.yes_book, &market.state.no_book);
+        // Fetch FRESH prices from REST API - WebSocket cache may be stale due to chase blocking
+        let (up_price, down_price) = {
+            // Try REST API first for truly fresh prices
+            let up_bbo = self.executor.fetch_fresh_bbo(&yes_token_id).await;
+            let down_bbo = self.executor.fetch_fresh_bbo(&no_token_id).await;
 
-        // Calculate maker prices (inside the spread)
-        let up_price = match calculate_maker_price(yes_book, Side::Buy) {
-            Some(p) => p,
-            None => {
-                debug!("Cannot calculate UP maker price for {}", event_id);
-                return Ok(TradeAction::SkipSizing);
+            match (up_bbo, down_bbo) {
+                (Some((up_bid, _up_ask)), Some((down_bid, _down_ask))) => {
+                    info!(
+                        event_id = %event_id,
+                        up_bid = %up_bid,
+                        down_bid = %down_bid,
+                        "Using FRESH prices from REST API"
+                    );
+                    (up_bid, down_bid)
+                }
+                _ => {
+                    // Fallback to WebSocket cache if API fails
+                    warn!(event_id = %event_id, "REST API failed, falling back to WebSocket cache");
+                    let up_price = match self.state.market_data.order_books.get(&yes_token_id) {
+                        Some(live_book) => live_book.best_bid,
+                        None => {
+                            warn!(token_id = %yes_token_id, "No orderbook for UP token, skipping");
+                            return Ok(TradeAction::SkipSizing);
+                        }
+                    };
+                    let down_price = match self.state.market_data.order_books.get(&no_token_id) {
+                        Some(live_book) => live_book.best_bid,
+                        None => {
+                            warn!(token_id = %no_token_id, "No orderbook for DOWN token, skipping");
+                            return Ok(TradeAction::SkipSizing);
+                        }
+                    };
+                    (up_price, down_price)
+                }
             }
         };
 
-        let down_price = match calculate_maker_price(no_book, Side::Buy) {
-            Some(p) => p,
-            None => {
-                debug!("Cannot calculate DOWN maker price for {}", event_id);
-                return Ok(TradeAction::SkipSizing);
-            }
-        };
+        if up_price <= Decimal::ZERO {
+            debug!("Invalid UP price {} for {}", up_price, event_id);
+            return Ok(TradeAction::SkipSizing);
+        }
+        if down_price <= Decimal::ZERO {
+            debug!("Invalid DOWN price {} for {}", down_price, event_id);
+            return Ok(TradeAction::SkipSizing);
+        }
 
         // Linear hedge sizing based on distance from strike
         // Instead of discrete buckets (Strong=82%, Lean=65%), use continuous function
@@ -2138,10 +2188,7 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             }
         }
 
-        // Extract token IDs and min_order_size before we need to borrow self.markets mutably
-        let yes_token_id = market.yes_token_id.clone();
-        let no_token_id = market.no_token_id.clone();
-        let min_order_size = market.min_order_size;
+        // token IDs and min_order_size already extracted above
 
         // Convert USDC amounts to share counts
         // The executor expects size in SHARES, not USDC
@@ -2229,15 +2276,22 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                 timestamp: Utc::now(),
             };
 
+            // Clean up any orphaned orders for this token before placing new ones
+            // This must happen BEFORE placing orders, regardless of chase setting
+            match self.executor.cancel_orders_for_token(&yes_token_id).await {
+                Ok(count) if count > 0 => {
+                    info!(count = count, token_id = %yes_token_id, "Cleaned up orphan orders for UP token");
+                }
+                Err(e) => {
+                    warn!(error = %e, token_id = %yes_token_id, "Failed to cleanup orphan orders for UP token");
+                }
+                _ => {}
+            }
+
             // Use chaser for limit orders if chase is enabled
             // The other_leg_price is the NO price (for arb ceiling calculation)
             let other_leg_price = down_price;
             let up_result = if use_chase {
-                // Clean up any orphaned orders for this token before placing new ones
-                if let Err(e) = self.executor.cancel_orders_for_token(&yes_token_id).await {
-                    debug!(error = %e, token_id = %yes_token_id, "Failed to cleanup orphan orders (continuing anyway)");
-                }
-
                 const MAX_POST_ONLY_RETRIES: u32 = 3;
                 let mut current_order = up_order;
                 let mut post_only_retries = 0u32;
@@ -2254,6 +2308,18 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                     match self.chaser.chase_order_with_market(&mut self.executor, current_order.clone(), other_leg_price, get_best_price).await {
                         Ok(chase_result) => {
                             // Check if POST_ONLY rejection - retry with fresh price
+                            // Check if market closed - remove from tracking
+                            if chase_result.stop_reason == Some(ChaseStopReason::MarketClosed) {
+                                warn!(event_id = %event_id, "Market closed during UP order chase, removing from tracking");
+                                self.markets.remove(&event_id);
+                                self.state.market_data.active_windows.remove(&event_id);
+                                break Ok(OrderResult::Rejected(crate::executor::OrderRejection {
+                                    request_id: format!("dir-{}-up", req_id_base),
+                                    reason: "Market closed".to_string(),
+                                    timestamp: Utc::now(),
+                                }));
+                            }
+
                             if chase_result.stop_reason == Some(ChaseStopReason::PostOnlyRejected) {
                                 post_only_retries += 1;
                                 if post_only_retries >= MAX_POST_ONLY_RETRIES {
@@ -2267,20 +2333,22 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                                 }
                                 // Small delay before retry
                                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                                // Get fresh price from orderbook
-                                if let Some(fresh_price) = calculate_maker_price(yes_book, Side::Buy) {
-                                    current_order.price = Some(fresh_price);
-                                    debug!(retry = post_only_retries, fresh_price = %fresh_price, "Retrying UP order with fresh price");
-                                    continue;
-                                } else {
-                                    debug!("No fresh price available for UP order retry");
-                                    // Return Rejected (not Pending) - no real order on exchange
-                                    break Ok(OrderResult::Rejected(crate::executor::OrderRejection {
-                                        request_id: format!("dir-{}-up", req_id_base),
-                                        reason: "No fresh price available".to_string(),
-                                        timestamp: Utc::now(),
-                                    }));
+                                // Get fresh price from LIVE state
+                                if let Some(live_book) = self.state.market_data.order_books.get(&yes_token_id) {
+                                    let fresh_price = live_book.best_bid;
+                                    if fresh_price > Decimal::ZERO {
+                                        current_order.price = Some(fresh_price);
+                                        debug!(retry = post_only_retries, fresh_price = %fresh_price, "Retrying UP order with fresh price");
+                                        continue;
+                                    }
                                 }
+                                debug!("No fresh price available for UP order retry");
+                                // Return Rejected (not Pending) - no real order on exchange
+                                break Ok(OrderResult::Rejected(crate::executor::OrderRejection {
+                                    request_id: format!("dir-{}-up", req_id_base),
+                                    reason: "No fresh price available".to_string(),
+                                    timestamp: Utc::now(),
+                                }));
                             }
 
                             if chase_result.success || chase_result.filled_size > Decimal::ZERO {
@@ -2346,15 +2414,22 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                 timestamp: Utc::now(),
             };
 
+            // Clean up any orphaned orders for this token before placing new ones
+            // This must happen BEFORE placing orders, regardless of chase setting
+            match self.executor.cancel_orders_for_token(&no_token_id).await {
+                Ok(count) if count > 0 => {
+                    info!(count = count, token_id = %no_token_id, "Cleaned up orphan orders for DOWN token");
+                }
+                Err(e) => {
+                    warn!(error = %e, token_id = %no_token_id, "Failed to cleanup orphan orders for DOWN token");
+                }
+                _ => {}
+            }
+
             // Use chaser for limit orders if chase is enabled
             // The other_leg_price is the YES price (for arb ceiling calculation)
             let other_leg_price = up_price;
             let down_result = if use_chase {
-                // Clean up any orphaned orders for this token before placing new ones
-                if let Err(e) = self.executor.cancel_orders_for_token(&no_token_id).await {
-                    debug!(error = %e, token_id = %no_token_id, "Failed to cleanup orphan orders (continuing anyway)");
-                }
-
                 const MAX_POST_ONLY_RETRIES: u32 = 3;
                 let mut current_order = down_order;
                 let mut post_only_retries = 0u32;
@@ -2370,6 +2445,18 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                     };
                     match self.chaser.chase_order_with_market(&mut self.executor, current_order.clone(), other_leg_price, get_best_price).await {
                         Ok(chase_result) => {
+                            // Check if market closed - remove from tracking
+                            if chase_result.stop_reason == Some(ChaseStopReason::MarketClosed) {
+                                warn!(event_id = %event_id, "Market closed during DOWN order chase, removing from tracking");
+                                self.markets.remove(&event_id);
+                                self.state.market_data.active_windows.remove(&event_id);
+                                break Ok(OrderResult::Rejected(crate::executor::OrderRejection {
+                                    request_id: format!("dir-{}-down", req_id_base),
+                                    reason: "Market closed".to_string(),
+                                    timestamp: Utc::now(),
+                                }));
+                            }
+
                             // Check if POST_ONLY rejection - retry with fresh price
                             if chase_result.stop_reason == Some(ChaseStopReason::PostOnlyRejected) {
                                 post_only_retries += 1;
@@ -2384,20 +2471,22 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                                 }
                                 // Small delay before retry
                                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                                // Get fresh price from orderbook
-                                if let Some(fresh_price) = calculate_maker_price(no_book, Side::Buy) {
-                                    current_order.price = Some(fresh_price);
-                                    debug!(retry = post_only_retries, fresh_price = %fresh_price, "Retrying DOWN order with fresh price");
-                                    continue;
-                                } else {
-                                    debug!("No fresh price available for DOWN order retry");
-                                    // Return Rejected (not Pending) - no real order on exchange
-                                    break Ok(OrderResult::Rejected(crate::executor::OrderRejection {
-                                        request_id: format!("dir-{}-down", req_id_base),
-                                        reason: "No fresh price available".to_string(),
-                                        timestamp: Utc::now(),
-                                    }));
+                                // Get fresh price from LIVE state
+                                if let Some(live_book) = self.state.market_data.order_books.get(&no_token_id) {
+                                    let fresh_price = live_book.best_bid;
+                                    if fresh_price > Decimal::ZERO {
+                                        current_order.price = Some(fresh_price);
+                                        debug!(retry = post_only_retries, fresh_price = %fresh_price, "Retrying DOWN order with fresh price");
+                                        continue;
+                                    }
                                 }
+                                debug!("No fresh price available for DOWN order retry");
+                                // Return Rejected (not Pending) - no real order on exchange
+                                break Ok(OrderResult::Rejected(crate::executor::OrderRejection {
+                                    request_id: format!("dir-{}-down", req_id_base),
+                                    reason: "No fresh price available".to_string(),
+                                    timestamp: Utc::now(),
+                                }));
                             }
 
                             if chase_result.success || chase_result.filled_size > Decimal::ZERO {
@@ -3245,101 +3334,6 @@ mod tests {
         let json = serde_json::to_string(&decision).unwrap();
         assert!(json.contains("event1"));
         assert!(json.contains("Execute"));
-    }
-
-    // =========================================================================
-    // Maker Price Calculation Tests
-    // =========================================================================
-
-    #[test]
-    fn test_calculate_maker_price_wide_spread() {
-        // Current implementation: place at best bid (buy) or best ask (sell)
-        let mut book = crate::types::OrderBook::new("test".to_string());
-        book.bids.push(PriceLevel::new(dec!(0.40), dec!(100))); // bid
-        book.asks.push(PriceLevel::new(dec!(0.50), dec!(100))); // ask
-
-        // Buy: place at best bid = 0.40
-        let buy_price = calculate_maker_price(&book, Side::Buy);
-        assert!(buy_price.is_some());
-        assert_eq!(buy_price.unwrap(), dec!(0.40));
-
-        // Sell: place at best ask = 0.50
-        let sell_price = calculate_maker_price(&book, Side::Sell);
-        assert!(sell_price.is_some());
-        assert_eq!(sell_price.unwrap(), dec!(0.50));
-    }
-
-    #[test]
-    fn test_calculate_maker_price_medium_spread() {
-        // Current implementation: place at best bid (buy) or best ask (sell)
-        let mut book = crate::types::OrderBook::new("test".to_string());
-        book.bids.push(PriceLevel::new(dec!(0.495), dec!(100))); // bid
-        book.asks.push(PriceLevel::new(dec!(0.505), dec!(100))); // ask
-
-        // Buy: place at best bid = 0.495, rounded to 0.50 (banker's rounding)
-        let buy_price = calculate_maker_price(&book, Side::Buy);
-        assert!(buy_price.is_some());
-        assert_eq!(buy_price.unwrap(), dec!(0.50));
-
-        // Sell: place at best ask = 0.505, rounded to 0.50 (banker's rounding: .5 rounds to even)
-        let sell_price = calculate_maker_price(&book, Side::Sell);
-        assert!(sell_price.is_some());
-        assert_eq!(sell_price.unwrap(), dec!(0.50));
-    }
-
-    #[test]
-    fn test_calculate_maker_price_tight_spread() {
-        // Current implementation: place at best bid (buy) or best ask (sell)
-        let mut book = crate::types::OrderBook::new("test".to_string());
-        book.bids.push(PriceLevel::new(dec!(0.498), dec!(100))); // bid
-        book.asks.push(PriceLevel::new(dec!(0.502), dec!(100))); // ask
-
-        // Buy: place at best bid = 0.498, rounded to 0.50
-        let buy_price = calculate_maker_price(&book, Side::Buy);
-        assert!(buy_price.is_some());
-        assert_eq!(buy_price.unwrap(), dec!(0.50));
-
-        // Sell: place at best ask = 0.502, rounded to 0.50
-        let sell_price = calculate_maker_price(&book, Side::Sell);
-        assert!(sell_price.is_some());
-        assert_eq!(sell_price.unwrap(), dec!(0.50));
-    }
-
-    #[test]
-    fn test_calculate_maker_price_no_bid() {
-        let mut book = crate::types::OrderBook::new("test".to_string());
-        book.asks.push(PriceLevel::new(dec!(0.50), dec!(100)));
-        // No bids
-
-        let price = calculate_maker_price(&book, Side::Buy);
-        assert!(price.is_none());
-    }
-
-    #[test]
-    fn test_calculate_maker_price_no_ask() {
-        let mut book = crate::types::OrderBook::new("test".to_string());
-        book.bids.push(PriceLevel::new(dec!(0.45), dec!(100)));
-        // No asks
-
-        // Buy only needs best_bid, which exists
-        let buy_price = calculate_maker_price(&book, Side::Buy);
-        assert!(buy_price.is_some());
-        assert_eq!(buy_price.unwrap(), dec!(0.45));
-
-        // Sell needs best_ask, which doesn't exist
-        let sell_price = calculate_maker_price(&book, Side::Sell);
-        assert!(sell_price.is_none());
-    }
-
-    #[test]
-    fn test_calculate_maker_price_empty_book() {
-        let book = crate::types::OrderBook::new("test".to_string());
-
-        let price = calculate_maker_price(&book, Side::Buy);
-        assert!(price.is_none());
-
-        let price = calculate_maker_price(&book, Side::Sell);
-        assert!(price.is_none());
     }
 
     // =========================================================================

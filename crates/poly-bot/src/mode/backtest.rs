@@ -95,11 +95,16 @@ impl BacktestModeConfig {
     pub fn from_bot_config(config: &BotConfig, _clickhouse: &ClickHouseClient) -> Result<Self> {
         let mut executor_config = SimulatedExecutorConfig::backtest();
         executor_config.initial_balance = dec!(10000);
-        executor_config.fee_rate = Decimal::ZERO; // Polymarket has 0% maker fees
+        executor_config.fee_rate = Decimal::ZERO; // Not used when use_realistic_fees=true
         executor_config.latency_ms = config.execution.paper_fill_latency_ms;
         executor_config.enforce_balance = true;
         executor_config.max_position_per_market = config.effective_trading_config().max_position_per_market;
         executor_config.min_fill_ratio = dec!(0.5);
+        // Set taker mode based on execution mode from config
+        executor_config.is_taker_mode = matches!(
+            config.execution.execution_mode,
+            crate::config::ExecutionMode::Market
+        );
 
         // Parse date range from config
         let (start_time, end_time) = parse_date_range(&config.backtest)?;
@@ -121,7 +126,8 @@ impl BacktestModeConfig {
             data_source: replay_config,
             csv_data_dir: config.backtest.data_dir.clone(),
             executor: executor_config,
-            strategy: StrategyConfig::from_trading_config(config.effective_trading_config(), (config.window_duration.minutes() * 60) as i64),
+            strategy: StrategyConfig::from_trading_config(config.effective_trading_config(), (config.window_duration.minutes() * 60) as i64)
+                .with_execution(config.execution.clone()),
             engines: config.engines.clone(),
             observability: config.observability.clone(),
             initial_balance: dec!(10000),
@@ -210,8 +216,10 @@ pub struct BacktestResult {
     pub trades_rejected: u64,
     /// Total volume traded.
     pub volume_traded: Decimal,
-    /// Total fees paid.
+    /// Total fees paid (taker fees).
     pub fees_paid: Decimal,
+    /// Total rebates earned (maker rebates).
+    pub rebates_earned: Decimal,
     /// Opportunities detected.
     pub opportunities_detected: u64,
     /// Opportunities skipped.
@@ -265,7 +273,8 @@ impl BacktestResult {
             trades_executed: metrics.trades_executed,
             trades_rejected: metrics.trades_failed,
             volume_traded: metrics.volume_usdc,
-            fees_paid: stats.fees_paid, // Keep this from stats for now
+            fees_paid: stats.fees_paid,
+            rebates_earned: stats.rebates_earned,
             opportunities_detected: metrics.opportunities_detected,
             opportunities_skipped: metrics.trades_skipped,
             win_rate: stats.win_rate(),
@@ -427,8 +436,16 @@ impl PnLReport {
             self.result.volume_traded
         ));
         report.push_str(&format!(
-            "Fees Paid:            ${:.4}\n\n",
+            "Fees Paid:            ${:.4}\n",
             self.result.fees_paid
+        ));
+        report.push_str(&format!(
+            "Rebates Earned:       ${:.4}\n",
+            self.result.rebates_earned
+        ));
+        report.push_str(&format!(
+            "Net Fees:             ${:.4}\n\n",
+            self.result.fees_paid - self.result.rebates_earned
         ));
 
         if !self.positions.is_empty() {
@@ -1345,6 +1362,7 @@ mod tests {
             trades_rejected: 5,
             volume_traded: dec!(5000),
             fees_paid: dec!(5),
+            rebates_earned: Decimal::ZERO,
             opportunities_detected: 100,
             opportunities_skipped: 5,
             win_rate: None,

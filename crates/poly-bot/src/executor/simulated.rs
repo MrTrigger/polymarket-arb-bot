@@ -69,8 +69,15 @@ pub enum LatencyMode {
 pub struct SimulatedExecutorConfig {
     /// Initial balance.
     pub initial_balance: Decimal,
-    /// Fee rate (e.g., 0.001 for 0.1%).
+    /// Fee rate (e.g., 0.001 for 0.1%) - only used if use_realistic_fees is false.
     pub fee_rate: Decimal,
+    /// Use realistic Polymarket fee/rebate calculations.
+    pub use_realistic_fees: bool,
+    /// Whether executing as taker (market orders) or maker (limit orders).
+    pub is_taker_mode: bool,
+    /// Estimated rebate rate for makers (as fraction of fee_equivalent, e.g., 0.5 for 50%).
+    /// In reality this depends on total market volume; this is an approximation.
+    pub maker_rebate_rate: Decimal,
     /// Time source mode.
     pub time_source: TimeSource,
     /// Fill simulation mode.
@@ -95,6 +102,9 @@ impl SimulatedExecutorConfig {
         Self {
             initial_balance: Decimal::new(10000, 0), // $10,000
             fee_rate: Decimal::new(1, 3),            // 0.1%
+            use_realistic_fees: false,
+            is_taker_mode: false,
+            maker_rebate_rate: Decimal::new(5, 1),   // 50% of fee_equivalent as rebate
             time_source: TimeSource::WallClock,
             fill_mode: FillMode::Simple,
             latency_mode: LatencyMode::RealDelay,
@@ -111,6 +121,9 @@ impl SimulatedExecutorConfig {
         Self {
             initial_balance: Decimal::new(10000, 0), // $10,000
             fee_rate: Decimal::new(1, 3),            // 0.1%
+            use_realistic_fees: true,               // Use realistic fees for backtest
+            is_taker_mode: false,                   // Default to maker (limit orders)
+            maker_rebate_rate: Decimal::new(5, 1),  // 50% of fee_equivalent as rebate
             time_source: TimeSource::Simulated,
             fill_mode: FillMode::OrderBook,
             latency_mode: LatencyMode::Instant,
@@ -120,6 +133,23 @@ impl SimulatedExecutorConfig {
             market_order_slippage: Decimal::ZERO,
             min_fill_ratio: Decimal::new(5, 1), // 50%
         }
+    }
+
+    /// Calculate realistic Polymarket fee for a taker order.
+    /// Formula: fee_equivalent = shares * price * 0.25 * (price * (1 - price))^2
+    pub fn calculate_taker_fee(shares: Decimal, price: Decimal) -> Decimal {
+        let p_complement = Decimal::ONE - price;
+        let variance_term = price * p_complement;
+        let variance_squared = variance_term * variance_term;
+        shares * price * Decimal::new(25, 2) * variance_squared
+    }
+
+    /// Calculate maker rebate for a limit order.
+    /// In reality: rebate = (your_fee_equivalent / total_fee_equivalent) * rebate_pool
+    /// We approximate with: rebate = fee_equivalent * rebate_rate
+    pub fn calculate_maker_rebate(shares: Decimal, price: Decimal, rebate_rate: Decimal) -> Decimal {
+        let fee_equivalent = Self::calculate_taker_fee(shares, price);
+        fee_equivalent * rebate_rate
     }
 }
 
@@ -162,8 +192,10 @@ pub struct SimulatedStats {
     pub orders_rejected: u64,
     /// Total volume traded.
     pub volume_traded: Decimal,
-    /// Total fees paid.
+    /// Total fees paid (taker fees).
     pub fees_paid: Decimal,
+    /// Total rebates earned (maker rebates).
+    pub rebates_earned: Decimal,
     /// Number of settled markets with positive PnL.
     pub markets_won: u64,
     /// Number of settled markets with negative or zero PnL.
@@ -564,20 +596,37 @@ impl SimulatedExecutor {
             }
         };
 
-        // Calculate fill cost and fee
+        // Calculate fill cost and fee/rebate
         let fill_cost = fill_price * order.size;
-        let fee = fill_cost * self.config.fee_rate;
+        let (fee, rebate) = if self.config.use_realistic_fees {
+            let is_taker = self.config.is_taker_mode
+                || matches!(order.order_type, OrderType::Market | OrderType::Ioc);
+            if is_taker {
+                // Taker fee: fee_equivalent = shares * price * 0.25 * (price * (1 - price))^2
+                let fee = SimulatedExecutorConfig::calculate_taker_fee(order.size, fill_price);
+                (fee, Decimal::ZERO)
+            } else {
+                // Maker rebate
+                let rebate = SimulatedExecutorConfig::calculate_maker_rebate(
+                    order.size, fill_price, self.config.maker_rebate_rate
+                );
+                (Decimal::ZERO, rebate)
+            }
+        } else {
+            (fill_cost * self.config.fee_rate, Decimal::ZERO)
+        };
 
         // Generate order ID
         let order_id = self.generate_order_id();
 
-        // Update balance and position
-        self.apply_fill(order, order.size, fill_cost, fee);
+        // Update balance and position (rebate reduces cost, fee increases it)
+        self.apply_fill(order, order.size, fill_cost, fee - rebate);
 
         // Update stats
         self.stats.orders_filled += 1;
         self.stats.volume_traded += fill_cost;
         self.stats.fees_paid += fee;
+        self.stats.rebates_earned += rebate;
 
         let fill = OrderFill {
             request_id: order.request_id.clone(),
@@ -670,15 +719,31 @@ impl SimulatedExecutor {
             }));
         }
 
-        // Calculate fee
-        let fee = total_cost * self.config.fee_rate;
+        // Calculate fee/rebate using avg fill price
+        let fill_price = avg_price.unwrap_or(Decimal::new(5, 1));
+        let (fee, rebate) = if self.config.use_realistic_fees {
+            let is_taker = self.config.is_taker_mode
+                || matches!(order.order_type, OrderType::Market | OrderType::Ioc);
+            if is_taker {
+                let fee = SimulatedExecutorConfig::calculate_taker_fee(filled_size, fill_price);
+                (fee, Decimal::ZERO)
+            } else {
+                let rebate = SimulatedExecutorConfig::calculate_maker_rebate(
+                    filled_size, fill_price, self.config.maker_rebate_rate
+                );
+                (Decimal::ZERO, rebate)
+            }
+        } else {
+            (total_cost * self.config.fee_rate, Decimal::ZERO)
+        };
 
-        // Update balance and position
-        self.apply_fill(order, filled_size, total_cost, fee);
+        // Update balance and position (rebate reduces cost, fee increases it)
+        self.apply_fill(order, filled_size, total_cost, fee - rebate);
 
         // Update stats
         self.stats.volume_traded += total_cost;
         self.stats.fees_paid += fee;
+        self.stats.rebates_earned += rebate;
 
         // Create result
         let result = if filled_size >= order.size {
@@ -954,6 +1019,7 @@ mod tests {
         let mut config = SimulatedExecutorConfig::backtest();
         config.initial_balance = dec!(1000);
         config.latency_ms = 0;
+        config.use_realistic_fees = false; // Use simple fee_rate for stats tracking tests
 
         let executor = SimulatedExecutor::new(config);
 

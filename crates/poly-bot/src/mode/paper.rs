@@ -114,7 +114,8 @@ impl PaperModeConfig {
         Self {
             data_source: LiveDataSourceConfig::default(),
             executor: executor_config,
-            strategy: StrategyConfig::from_trading_config(&config.trading, (config.window_duration.minutes() * 60) as i64),
+            strategy: StrategyConfig::from_trading_config(&config.trading, (config.window_duration.minutes() * 60) as i64)
+                .with_execution(config.execution.clone()),
             observability: config.observability.clone(),
             engines: config.engines.clone(),
             discovery: discovery_config,

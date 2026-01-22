@@ -113,7 +113,8 @@ impl LiveModeConfig {
         Self {
             data_source: LiveDataSourceConfig::default(),
             executor: LiveExecutorConfig::from_execution_config(&config.execution),
-            strategy: StrategyConfig::from_trading_config(&config.trading, (config.window_duration.minutes() * 60) as i64),
+            strategy: StrategyConfig::from_trading_config(&config.trading, (config.window_duration.minutes() * 60) as i64)
+                .with_execution(config.execution.clone()),
             observability: config.observability.clone(),
             engines: config.engines.clone(),
             discovery: discovery_config,
@@ -228,6 +229,8 @@ impl LiveMode {
 
         info!(
             initial_balance = %self.config.initial_balance,
+            execution_mode = %self.config.strategy.execution.execution_mode,
+            chase_enabled = %self.config.strategy.execution.chase_enabled,
             "Live executor configuration"
         );
 

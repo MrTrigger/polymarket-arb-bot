@@ -319,15 +319,15 @@ impl AutoClaimManager {
             }
 
             // Only try to redeem if market should have expired
-            if let Some(expires_at) = position.expires_at {
-                if Utc::now() < expires_at {
-                    debug!(
-                        condition_id = %position.condition_id,
-                        expires_at = %expires_at,
-                        "Market not expired yet, skipping"
-                    );
-                    continue;
-                }
+            if let Some(expires_at) = position.expires_at
+                && Utc::now() < expires_at
+            {
+                debug!(
+                    condition_id = %position.condition_id,
+                    expires_at = %expires_at,
+                    "Market not expired yet, skipping"
+                );
+                continue;
             }
 
             match self.redeem_position(&position.condition_id).await {

@@ -12,7 +12,7 @@ use alloy::signers::Signer as AlloySigner;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use polymarket_client_sdk::clob::{Client as ClobClient, Config as ClobConfig};
-use polymarket_client_sdk::clob::types::{OrderType as SdkOrderType, Side as SdkSide, SignatureType, request::BalanceAllowanceRequest};
+use polymarket_client_sdk::clob::types::{Amount, OrderType as SdkOrderType, Side as SdkSide, SignatureType, request::BalanceAllowanceRequest};
 use polymarket_client_sdk::{derive_proxy_wallet, POLYGON};
 use rust_decimal::Decimal;
 use tokio::sync::RwLock;
@@ -275,20 +275,16 @@ impl Executor for LiveSdkExecutor {
             "Placing order via SDK"
         );
 
-        // Validate order type
-        if request.order_type == OrderType::Market {
-            return Err(ExecutorError::InvalidOrder(
-                "Market orders not supported - use limit orders".to_string()
-            ));
-        }
-
         // Skip local balance check - let the server validate
         // The balance_allowance API may not reflect the actual trading balance
         // for proxy wallets. The server will reject if truly insufficient.
 
         let price = request.price.ok_or_else(|| {
-            ExecutorError::InvalidOrder("Limit price required".to_string())
+            ExecutorError::InvalidOrder("Price required".to_string())
         })?;
+
+        // Determine if this is a market (taker) or limit (maker) order
+        let is_market_order = matches!(request.order_type, OrderType::Market | OrderType::Ioc);
 
         // Round price to 0.01 tick grid (Polymarket requires 2 decimal places max)
         let price = price.round_dp(2);
@@ -308,19 +304,39 @@ impl Executor for LiveSdkExecutor {
         // Create authenticated client
         let client = self.create_authenticated_client().await?;
 
-        // Build limit order using SDK with rounded price/size
-        // POST_ONLY ensures we're a maker - order rejected if it would fill immediately
-        let order = client
-            .limit_order()
-            .token_id(token_id)
-            .order_type(SdkOrderType::GTC)
-            .price(price)
-            .size(size)
-            .side(Self::to_sdk_side(request.side))
-            .post_only(true)
-            .build()
-            .await
-            .map_err(|e| ExecutorError::Internal(format!("Failed to build order: {}", e)))?;
+        // Build order using SDK with rounded price/size
+        // Market orders use native market_order() which auto-calculates price from orderbook
+        // Limit orders use GTC + POST_ONLY to be a maker (rejected if would cross book)
+        let order = if is_market_order {
+            info!(
+                request_id = %request.request_id,
+                size = %size,
+                "Placing MARKET order (FOK, taker) - price auto-calculated from orderbook"
+            );
+            let amount = Amount::shares(size)
+                .map_err(|e| ExecutorError::Internal(format!("Invalid amount: {}", e)))?;
+            client
+                .market_order()
+                .token_id(token_id)
+                .order_type(SdkOrderType::FOK)
+                .amount(amount)
+                .side(Self::to_sdk_side(request.side))
+                .build()
+                .await
+                .map_err(|e| ExecutorError::Internal(format!("Failed to build market order: {}", e)))?
+        } else {
+            client
+                .limit_order()
+                .token_id(token_id)
+                .order_type(SdkOrderType::GTC)
+                .price(price)
+                .size(size)
+                .side(Self::to_sdk_side(request.side))
+                .post_only(true)
+                .build()
+                .await
+                .map_err(|e| ExecutorError::Internal(format!("Failed to build order: {}", e)))?
+        };
 
         // Sign and submit
         let signed_order = client
@@ -615,6 +631,60 @@ impl Executor for LiveSdkExecutor {
         }
     }
 
+    async fn fetch_fresh_bbo(&self, token_id: &str) -> Option<(Decimal, Decimal)> {
+        // Use reqwest to call the Polymarket REST API directly
+        // GET https://clob.polymarket.com/book?token_id={token_id}
+        let url = format!("https://clob.polymarket.com/book?token_id={}", token_id);
+
+        let client = reqwest::Client::new();
+        let response = match client.get(&url).send().await {
+            Ok(resp) => resp,
+            Err(e) => {
+                warn!(error = %e, token_id = %token_id, "Failed to fetch orderbook from API");
+                return None;
+            }
+        };
+
+        if !response.status().is_success() {
+            warn!(status = %response.status(), token_id = %token_id, "Orderbook API returned error");
+            return None;
+        }
+
+        let body: serde_json::Value = match response.json().await {
+            Ok(json) => json,
+            Err(e) => {
+                warn!(error = %e, token_id = %token_id, "Failed to parse orderbook response");
+                return None;
+            }
+        };
+
+        // Parse best bid (highest price in bids array)
+        let best_bid = body.get("bids")
+            .and_then(|b| b.as_array())
+            .and_then(|bids| bids.first())
+            .and_then(|b| b.get("price"))
+            .and_then(|p| p.as_str())
+            .and_then(|s| s.parse::<Decimal>().ok());
+
+        // Parse best ask (lowest price in asks array)
+        let best_ask = body.get("asks")
+            .and_then(|a| a.as_array())
+            .and_then(|asks| asks.first())
+            .and_then(|a| a.get("price"))
+            .and_then(|p| p.as_str())
+            .and_then(|s| s.parse::<Decimal>().ok());
+
+        match (best_bid, best_ask) {
+            (Some(bid), Some(ask)) => {
+                debug!(token_id = %token_id, bid = %bid, ask = %ask, "Fetched fresh BBO from API");
+                Some((bid, ask))
+            }
+            _ => {
+                warn!(token_id = %token_id, "No bid/ask in orderbook response");
+                None
+            }
+        }
+    }
 }
 
 impl LiveSdkExecutor {

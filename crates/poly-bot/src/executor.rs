@@ -384,6 +384,18 @@ pub trait Executor: Send + Sync {
         Ok(0)
     }
 
+    /// Fetch fresh best bid/ask from the REST API.
+    ///
+    /// This bypasses the WebSocket cache and gets current prices directly from
+    /// the Polymarket CLOB API. Use this before placing orders to ensure fresh prices.
+    ///
+    /// Returns (best_bid, best_ask) or None if the orderbook is not available.
+    ///
+    /// Default implementation returns None (for simulated executors that use internal state).
+    async fn fetch_fresh_bbo(&self, _token_id: &str) -> Option<(Decimal, Decimal)> {
+        None
+    }
+
     /// Get the status of a pending order.
     ///
     /// Returns `None` if the order is not found.
