@@ -374,6 +374,16 @@ pub trait Executor: Send + Sync {
     /// Returns an error if the order cannot be cancelled.
     async fn cancel_order(&mut self, order_id: &str) -> Result<OrderCancellation, ExecutorError>;
 
+    /// Cancel all open orders for a specific token.
+    ///
+    /// This is used to clean up orphaned orders before placing new ones.
+    /// Returns the number of orders cancelled.
+    ///
+    /// Default implementation does nothing (for simulated executors).
+    async fn cancel_orders_for_token(&mut self, _token_id: &str) -> Result<u32, ExecutorError> {
+        Ok(0)
+    }
+
     /// Get the status of a pending order.
     ///
     /// Returns `None` if the order is not found.

@@ -2233,6 +2233,11 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             // The other_leg_price is the NO price (for arb ceiling calculation)
             let other_leg_price = down_price;
             let up_result = if use_chase {
+                // Clean up any orphaned orders for this token before placing new ones
+                if let Err(e) = self.executor.cancel_orders_for_token(&yes_token_id).await {
+                    debug!(error = %e, token_id = %yes_token_id, "Failed to cleanup orphan orders (continuing anyway)");
+                }
+
                 const MAX_POST_ONLY_RETRIES: u32 = 3;
                 let mut current_order = up_order;
                 let mut post_only_retries = 0u32;
@@ -2345,6 +2350,11 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             // The other_leg_price is the YES price (for arb ceiling calculation)
             let other_leg_price = up_price;
             let down_result = if use_chase {
+                // Clean up any orphaned orders for this token before placing new ones
+                if let Err(e) = self.executor.cancel_orders_for_token(&no_token_id).await {
+                    debug!(error = %e, token_id = %no_token_id, "Failed to cleanup orphan orders (continuing anyway)");
+                }
+
                 const MAX_POST_ONLY_RETRIES: u32 = 3;
                 let mut current_order = down_order;
                 let mut post_only_retries = 0u32;

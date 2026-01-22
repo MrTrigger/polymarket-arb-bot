@@ -428,6 +428,48 @@ impl Executor for LiveSdkExecutor {
         })
     }
 
+    async fn cancel_orders_for_token(&mut self, token_id: &str) -> Result<u32, ExecutorError> {
+        use alloy::primitives::U256;
+        use polymarket_client_sdk::clob::types::request::CancelMarketOrderRequest;
+        use std::str::FromStr;
+
+        let client = self.create_authenticated_client().await?;
+
+        // Convert token_id to U256 asset_id
+        let asset_id = U256::from_str(token_id)
+            .map_err(|e| ExecutorError::Internal(format!("Invalid token_id: {}", e)))?;
+
+        // Use Default since struct is non-exhaustive
+        let mut request = CancelMarketOrderRequest::default();
+        request.asset_id = Some(asset_id);
+
+        let response = client
+            .cancel_market_orders(&request)
+            .await
+            .map_err(|e| ExecutorError::Internal(format!("Failed to cancel market orders: {}", e)))?;
+
+        let cancelled_count = response.canceled.len() as u32;
+
+        if cancelled_count > 0 {
+            info!(token_id = %token_id, count = cancelled_count, "Cancelled orphan orders for token");
+
+            // Clean up our internal tracking
+            let cancelled_ids: std::collections::HashSet<_> = response.canceled.iter().collect();
+            {
+                let mut pending = self.pending.write().await;
+                pending.retain(|p| !cancelled_ids.contains(&p.order_id));
+            }
+            {
+                let mut orders = self.orders.write().await;
+                for id in &response.canceled {
+                    orders.remove(id);
+                }
+            }
+        }
+
+        Ok(cancelled_count)
+    }
+
     async fn order_status(&self, order_id: &str) -> Option<OrderResult> {
         // Get tracked order info for request_id
         let tracked = {
