@@ -2237,12 +2237,14 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                 let mut current_order = up_order;
                 let mut post_only_retries = 0u32;
 
-                // Clone orderbook for the price provider closure
-                let yes_book_clone = yes_book.clone();
+                // Use live state for fresh orderbook data during chase
+                let state_clone = self.state.clone();
+                let token_id_clone = yes_token_id.clone();
                 loop {
-                    // Price provider: check if best bid has moved up from our order price
+                    // Price provider: get LIVE best bid from global state
                     let get_best_price = || {
-                        calculate_maker_price(&yes_book_clone, Side::Buy)
+                        state_clone.market_data.order_books.get(&token_id_clone)
+                            .map(|book| book.best_bid)
                     };
                     match self.chaser.chase_order_with_market(&mut self.executor, current_order.clone(), other_leg_price, get_best_price).await {
                         Ok(chase_result) => {
@@ -2347,12 +2349,14 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                 let mut current_order = down_order;
                 let mut post_only_retries = 0u32;
 
-                // Clone orderbook for the price provider closure
-                let no_book_clone = no_book.clone();
+                // Use live state for fresh orderbook data during chase
+                let state_clone = self.state.clone();
+                let token_id_clone = no_token_id.clone();
                 loop {
-                    // Price provider: check if best bid has moved up from our order price
+                    // Price provider: get LIVE best bid from global state
                     let get_best_price = || {
-                        calculate_maker_price(&no_book_clone, Side::Buy)
+                        state_clone.market_data.order_books.get(&token_id_clone)
+                            .map(|book| book.best_bid)
                     };
                     match self.chaser.chase_order_with_market(&mut self.executor, current_order.clone(), other_leg_price, get_best_price).await {
                         Ok(chase_result) => {

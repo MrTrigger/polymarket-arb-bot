@@ -110,6 +110,7 @@ const getChartOptions = (height: number) => ({
     timeVisible: true,
     secondsVisible: true,
     fixRightEdge: true, // Keep right edge fixed during zoom - only left side moves
+    rightOffset: 10, // Add margin between last data point and Y-axis
   },
   handleScale: {
     axisPressedMouseMove: {
