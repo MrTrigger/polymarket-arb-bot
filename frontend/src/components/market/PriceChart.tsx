@@ -288,6 +288,7 @@ export function PriceChart({ market, trades }: PriceChartProps) {
   }, []);
 
   // Sync time scales between charts - price chart is the master
+  // Uses logical range sync which works when both charts have data
   useEffect(() => {
     if (!priceChartRef.current || !confChartRef.current) return;
 
@@ -299,10 +300,23 @@ export function PriceChart({ market, trades }: PriceChartProps) {
 
     const syncFromPrice = () => {
       if (isSyncing) return;
+      // Only sync if confidence chart has data
+      if (confDataRef.current.length === 0) return;
+
       isSyncing = true;
       const range = priceTimeScale.getVisibleLogicalRange();
       if (range) {
-        confTimeScale.setVisibleLogicalRange(range);
+        // Calculate the time offset between charts due to different data lengths
+        // Price chart has historical data, confidence chart starts from page load
+        const priceDataLen = priceDataRef.current.length;
+        const confDataLen = confDataRef.current.length;
+        const offset = priceDataLen - confDataLen;
+
+        // Adjust the logical range to account for the offset
+        confTimeScale.setVisibleLogicalRange({
+          from: range.from - offset,
+          to: range.to - offset,
+        });
       }
       isSyncing = false;
     };
@@ -310,12 +324,22 @@ export function PriceChart({ market, trades }: PriceChartProps) {
     // Also sync confidence to price (in case confidence chart auto-fits on data update)
     const syncFromConfidence = () => {
       if (isSyncing) return;
+      // Only sync if confidence chart has data
+      if (confDataRef.current.length === 0) return;
+
       isSyncing = true;
       // Get price chart range and re-apply it to confidence chart
       // This ensures price chart is always the master
       const range = priceTimeScale.getVisibleLogicalRange();
       if (range) {
-        confTimeScale.setVisibleLogicalRange(range);
+        const priceDataLen = priceDataRef.current.length;
+        const confDataLen = confDataRef.current.length;
+        const offset = priceDataLen - confDataLen;
+
+        confTimeScale.setVisibleLogicalRange({
+          from: range.from - offset,
+          to: range.to - offset,
+        });
       }
       isSyncing = false;
     };
@@ -549,10 +573,18 @@ export function PriceChart({ market, trades }: PriceChartProps) {
     });
 
     // Sync confidence chart time scale with price chart to prevent drift
-    if (priceChartRef.current && confChartRef.current) {
+    // Use logical range with offset adjustment for different data lengths
+    if (priceChartRef.current && confChartRef.current && confDataRef.current.length > 0) {
       const priceRange = priceChartRef.current.timeScale().getVisibleLogicalRange();
       if (priceRange) {
-        confChartRef.current.timeScale().setVisibleLogicalRange(priceRange);
+        const priceDataLen = priceDataRef.current.length;
+        const confDataLen = confDataRef.current.length;
+        const offset = priceDataLen - confDataLen;
+
+        confChartRef.current.timeScale().setVisibleLogicalRange({
+          from: priceRange.from - offset,
+          to: priceRange.to - offset,
+        });
       }
     }
   }, [confidenceData]);
