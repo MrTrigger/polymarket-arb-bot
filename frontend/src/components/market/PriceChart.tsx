@@ -109,6 +109,7 @@ const getChartOptions = (height: number) => ({
     borderColor: "#27272a",
     timeVisible: true,
     secondsVisible: true,
+    fixRightEdge: true, // Keep right edge fixed during zoom - only left side moves
   },
   handleScale: {
     axisPressedMouseMove: {
@@ -435,37 +436,32 @@ export function PriceChart({ market, trades }: PriceChartProps) {
       title: "Strike",
     });
 
-    // Dynamically compute the price range from all data points + strike price
-    // This ensures the Y-axis scales to show all price data and the strike line
+    // Dynamically compute the price range from VISIBLE data points + strike price
+    // This ensures the Y-axis scales to show only visible price data and the strike line
     priceSeriesRef.current.applyOptions({
-      autoscaleInfoProvider: () => {
-        const data = priceDataRef.current;
-        if (data.length === 0) return null;
+      autoscaleInfoProvider: (original: () => { priceRange: { minValue: number; maxValue: number } } | null) => {
+        // Get the default autoscale info (based on visible data)
+        const defaultInfo = original();
+        if (!defaultInfo) return null;
 
-        // Find min/max from all price data
-        let minPrice = data[0].value;
-        let maxPrice = data[0].value;
-        for (const point of data) {
-          if (point.value < minPrice) minPrice = point.value;
-          if (point.value > maxPrice) maxPrice = point.value;
-        }
-
-        // Include strike price in the range
+        // Include strike price in the range if it's set
         if (strikePrice > 0) {
-          minPrice = Math.min(minPrice, strikePrice);
-          maxPrice = Math.max(maxPrice, strikePrice);
+          const minPrice = Math.min(defaultInfo.priceRange.minValue, strikePrice);
+          const maxPrice = Math.max(defaultInfo.priceRange.maxValue, strikePrice);
+
+          // Add 5% margin for visual breathing room
+          const range = maxPrice - minPrice || maxPrice * 0.01;
+          const margin = range * 0.05;
+
+          return {
+            priceRange: {
+              minValue: minPrice - margin,
+              maxValue: maxPrice + margin,
+            },
+          };
         }
 
-        // Add 5% margin for visual breathing room
-        const range = maxPrice - minPrice || maxPrice * 0.01;
-        const margin = range * 0.05;
-
-        return {
-          priceRange: {
-            minValue: minPrice - margin,
-            maxValue: maxPrice + margin,
-          },
-        };
+        return defaultInfo;
       },
     });
   }, [strikePrice]);

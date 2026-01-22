@@ -50,7 +50,7 @@ pub struct ChaseConfig {
     /// Enable price chasing.
     pub enabled: bool,
 
-    /// Price increment per chase iteration.
+    /// Price increment per chase iteration (used as fallback if no price provider).
     pub step_size: Decimal,
 
     /// Interval between fill checks (milliseconds).
@@ -70,9 +70,9 @@ impl Default for ChaseConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            step_size: Decimal::new(1, 3),        // 0.001
-            check_interval_ms: 100,               // 100ms
-            max_chase_time_ms: 5000,              // 5 seconds
+            step_size: Decimal::new(1, 2),        // 0.01 (Polymarket tick size)
+            check_interval_ms: 500,               // 500ms
+            max_chase_time_ms: 30000,             // 30 seconds
             min_chase_size: Decimal::new(1, 0),   // 1 share minimum
             min_margin: Decimal::new(5, 3),       // 0.5% minimum margin
         }
@@ -293,14 +293,39 @@ impl PriceChaser {
 
     /// Chase a single order until filled or stopped.
     ///
-    /// This method modifies prices and resubmits orders to the executor
-    /// until the order is filled, ceiling is reached, or timeout occurs.
+    /// This is the legacy method that uses time-based price bumping.
+    /// Prefer `chase_order_with_market` when orderbook data is available.
     pub async fn chase_order<E: Executor>(
         &self,
         executor: &mut E,
         request: OrderRequest,
         other_leg_price: Decimal,
     ) -> Result<ChaseResult, ExecutorError> {
+        // Use market-aware chasing with no price provider (fallback to step-based)
+        self.chase_order_with_market(executor, request, other_leg_price, || None)
+            .await
+    }
+
+    /// Chase a single order with market-aware price adjustment.
+    ///
+    /// The `get_best_price` callback is called to get the current best bid/ask.
+    /// - For buy orders: returns the current best bid price
+    /// - For sell orders: returns the current best ask price
+    ///
+    /// If the callback returns a price different from our current order price,
+    /// we cancel and replace at the new best price (capped at ceiling).
+    /// If it returns None or the same price, we keep waiting.
+    pub async fn chase_order_with_market<E, F>(
+        &self,
+        executor: &mut E,
+        request: OrderRequest,
+        other_leg_price: Decimal,
+        get_best_price: F,
+    ) -> Result<ChaseResult, ExecutorError>
+    where
+        E: Executor,
+        F: Fn() -> Option<Decimal>,
+    {
         // If chasing disabled, just place the order once
         if !self.config.enabled {
             return self.place_without_chase(executor, request).await;
@@ -324,6 +349,7 @@ impl PriceChaser {
         let mut fills: Vec<ChaseFill> = Vec::new();
         let mut iteration = 0u32;
         let mut current_order_id: Option<String> = None;
+        let mut need_new_order = true; // Whether we need to place a new order
 
         let timeout = Duration::from_millis(self.config.max_chase_time_ms);
         let check_interval = Duration::from_millis(self.config.check_interval_ms);
@@ -380,110 +406,130 @@ impl PriceChaser {
                 ));
             }
 
-            // Cancel previous order if exists
-            if let Some(ref order_id) = current_order_id {
-                match executor.cancel_order(order_id).await {
-                    Ok(cancellation) => {
-                        // If there was a partial fill before cancellation, record it
-                        if cancellation.filled_size > Decimal::ZERO {
-                            let fill = ChaseFill {
-                                size: cancellation.filled_size,
-                                price: current_price,
-                                fee: cancellation.filled_size * current_price * Decimal::new(1, 3), // Estimate fee
-                                iteration,
-                            };
-                            remaining_size -= cancellation.filled_size;
-                            fills.push(fill);
+            // Only place/replace order if needed
+            if need_new_order {
+                // Cancel previous order if exists
+                if let Some(ref order_id) = current_order_id {
+                    match executor.cancel_order(order_id).await {
+                        Ok(cancellation) => {
+                            // If there was a partial fill before cancellation, record it
+                            if cancellation.filled_size > Decimal::ZERO {
+                                let fill = ChaseFill {
+                                    size: cancellation.filled_size,
+                                    price: current_price,
+                                    fee: cancellation.filled_size * current_price * Decimal::new(1, 3), // Estimate fee
+                                    iteration,
+                                };
+                                remaining_size -= cancellation.filled_size;
+                                fills.push(fill);
+                            }
+                        }
+                        Err(e) => {
+                            // Order might already be filled or expired, continue
+                            debug!(order_id = %order_id, error = %e, "Failed to cancel order");
                         }
                     }
-                    Err(e) => {
-                        // Order might already be filled or expired, continue
-                        debug!(order_id = %order_id, error = %e, "Failed to cancel order");
+                }
+
+                // Place new order at current price
+                let order = OrderRequest {
+                    request_id: format!("{}-chase-{}", request.request_id, iteration),
+                    event_id: request.event_id.clone(),
+                    token_id: request.token_id.clone(),
+                    outcome: request.outcome,
+                    side: request.side,
+                    size: remaining_size,
+                    price: Some(current_price),
+                    order_type: OrderType::Limit,
+                    timeout_ms: None, // Let order stay until we cancel it
+                    timestamp: Utc::now(),
+                };
+
+                match executor.place_order(order).await {
+                    Ok(OrderResult::Filled(fill)) => {
+                        // Full fill!
+                        fills.push(ChaseFill {
+                            size: fill.size,
+                            price: fill.price,
+                            fee: fill.fee,
+                            iteration,
+                        });
+
+                        info!(
+                            iterations = iteration,
+                            final_price = %fill.price,
+                            "Chase completed with full fill"
+                        );
+
+                        return Ok(build_result(
+                            fills,
+                            Decimal::ZERO,
+                            fill.price,
+                            start.elapsed().as_millis() as u64,
+                            iteration,
+                            None,
+                        ));
                     }
-                }
-            }
 
-            // Place new order at current price
-            let order = OrderRequest {
-                request_id: format!("{}-chase-{}", request.request_id, iteration),
-                event_id: request.event_id.clone(),
-                token_id: request.token_id.clone(),
-                outcome: request.outcome,
-                side: request.side,
-                size: remaining_size,
-                price: Some(current_price),
-                order_type: OrderType::Limit,
-                timeout_ms: Some(self.config.check_interval_ms),
-                timestamp: Utc::now(),
-            };
+                    Ok(OrderResult::PartialFill(partial)) => {
+                        // Partial fill - record and continue
+                        fills.push(ChaseFill {
+                            size: partial.filled_size,
+                            price: partial.avg_price,
+                            fee: partial.fee,
+                            iteration,
+                        });
+                        remaining_size -= partial.filled_size;
+                        current_order_id = Some(partial.order_id);
+                        need_new_order = false; // Keep current order
 
-            match executor.place_order(order).await {
-                Ok(OrderResult::Filled(fill)) => {
-                    // Full fill!
-                    fills.push(ChaseFill {
-                        size: fill.size,
-                        price: fill.price,
-                        fee: fill.fee,
-                        iteration,
-                    });
-
-                    info!(
-                        iterations = iteration,
-                        final_price = %fill.price,
-                        "Chase completed with full fill"
-                    );
-
-                    return Ok(build_result(
-                        fills,
-                        Decimal::ZERO,
-                        fill.price,
-                        start.elapsed().as_millis() as u64,
-                        iteration,
-                        None,
-                    ));
-                }
-
-                Ok(OrderResult::PartialFill(partial)) => {
-                    // Partial fill - record and continue
-                    fills.push(ChaseFill {
-                        size: partial.filled_size,
-                        price: partial.avg_price,
-                        fee: partial.fee,
-                        iteration,
-                    });
-                    remaining_size -= partial.filled_size;
-                    current_order_id = Some(partial.order_id);
-
-                    debug!(
-                        filled = %partial.filled_size,
-                        remaining = %remaining_size,
-                        price = %partial.avg_price,
-                        "Partial fill during chase"
-                    );
-                }
-
-                Ok(OrderResult::Pending(pending)) => {
-                    // Order is pending, wait and check
-                    current_order_id = Some(pending.order_id);
-                }
-
-                Ok(OrderResult::Rejected(rejection)) => {
-                    // Check if this is a POST_ONLY rejection (would cross spread)
-                    let is_post_only_rejection = rejection.reason.to_lowercase().contains("cross")
-                        || rejection.reason.to_lowercase().contains("post only")
-                        || rejection.reason.to_lowercase().contains("post_only")
-                        || rejection.reason.to_lowercase().contains("would fill")
-                        || rejection.reason.to_lowercase().contains("immediate");
-
-                    if is_post_only_rejection {
-                        // POST_ONLY rejection means price moved - return to let strategy
-                        // retry with fresh orderbook prices. Strategy will re-evaluate
-                        // and place a new order if opportunity still exists.
                         debug!(
+                            filled = %partial.filled_size,
+                            remaining = %remaining_size,
+                            price = %partial.avg_price,
+                            "Partial fill during chase"
+                        );
+                    }
+
+                    Ok(OrderResult::Pending(pending)) => {
+                        // Order is pending, wait and check
+                        current_order_id = Some(pending.order_id);
+                        need_new_order = false; // Keep current order
+                    }
+
+                    Ok(OrderResult::Rejected(rejection)) => {
+                        // Check if this is a POST_ONLY rejection (would cross spread)
+                        let is_post_only_rejection = rejection.reason.to_lowercase().contains("cross")
+                            || rejection.reason.to_lowercase().contains("post only")
+                            || rejection.reason.to_lowercase().contains("post_only")
+                            || rejection.reason.to_lowercase().contains("would fill")
+                            || rejection.reason.to_lowercase().contains("immediate");
+
+                        if is_post_only_rejection {
+                            // POST_ONLY rejection means price moved - return to let strategy
+                            // retry with fresh orderbook prices. Strategy will re-evaluate
+                            // and place a new order if opportunity still exists.
+                            debug!(
+                                reason = %rejection.reason,
+                                iteration = iteration,
+                                current_price = %current_price,
+                                "POST_ONLY rejection, returning to strategy for fresh price"
+                            );
+                            return Ok(build_result(
+                                fills,
+                                remaining_size,
+                                current_price,
+                                start.elapsed().as_millis() as u64,
+                                iteration,
+                                Some(ChaseStopReason::PostOnlyRejected),
+                            ));
+                        }
+
+                        // Non-POST_ONLY rejection - give up
+                        warn!(
                             reason = %rejection.reason,
                             iteration = iteration,
-                            current_price = %current_price,
-                            "POST_ONLY rejection, returning to strategy for fresh price"
+                            "Order rejected during chase"
                         );
                         return Ok(build_result(
                             fills,
@@ -491,59 +537,45 @@ impl PriceChaser {
                             current_price,
                             start.elapsed().as_millis() as u64,
                             iteration,
-                            Some(ChaseStopReason::PostOnlyRejected),
+                            Some(ChaseStopReason::OrderRejected),
                         ));
                     }
 
-                    // Non-POST_ONLY rejection - give up
-                    warn!(
-                        reason = %rejection.reason,
-                        iteration = iteration,
-                        "Order rejected during chase"
-                    );
-                    return Ok(build_result(
-                        fills,
-                        remaining_size,
-                        current_price,
-                        start.elapsed().as_millis() as u64,
-                        iteration,
-                        Some(ChaseStopReason::OrderRejected),
-                    ));
-                }
+                    Ok(OrderResult::Cancelled(_)) => {
+                        // Unexpected cancellation
+                        debug!("Order cancelled unexpectedly during chase");
+                        need_new_order = true; // Try again
+                    }
 
-                Ok(OrderResult::Cancelled(_)) => {
-                    // Unexpected cancellation
-                    debug!("Order cancelled unexpectedly during chase");
-                }
+                    Err(ExecutorError::MarketClosed) => {
+                        return Ok(build_result(
+                            fills,
+                            remaining_size,
+                            current_price,
+                            start.elapsed().as_millis() as u64,
+                            iteration,
+                            Some(ChaseStopReason::MarketClosed),
+                        ));
+                    }
 
-                Err(ExecutorError::MarketClosed) => {
-                    return Ok(build_result(
-                        fills,
-                        remaining_size,
-                        current_price,
-                        start.elapsed().as_millis() as u64,
-                        iteration,
-                        Some(ChaseStopReason::MarketClosed),
-                    ));
-                }
-
-                Err(e) => {
-                    warn!(error = %e, "Executor error during chase");
-                    return Ok(build_result(
-                        fills,
-                        remaining_size,
-                        current_price,
-                        start.elapsed().as_millis() as u64,
-                        iteration,
-                        Some(ChaseStopReason::ExecutorError),
-                    ));
+                    Err(e) => {
+                        warn!(error = %e, "Executor error during chase");
+                        return Ok(build_result(
+                            fills,
+                            remaining_size,
+                            current_price,
+                            start.elapsed().as_millis() as u64,
+                            iteration,
+                            Some(ChaseStopReason::ExecutorError),
+                        ));
+                    }
                 }
             }
 
-            // Wait before next iteration
+            // Wait before next check
             tokio::time::sleep(check_interval).await;
 
-            // Check order status before bumping price
+            // Check order status
             if let Some(ref order_id) = current_order_id
                 && let Some(status) = executor.order_status(order_id).await
             {
@@ -566,7 +598,7 @@ impl PriceChaser {
                         ));
                     }
                     OrderResult::PartialFill(partial) => {
-                        // Already recorded above or new partial
+                        // Check for new fills since last check
                         if partial.filled_size > total_filled(&fills) {
                             let new_fill = partial.filled_size - total_filled(&fills);
                             fills.push(ChaseFill {
@@ -582,66 +614,78 @@ impl PriceChaser {
                 }
             }
 
-            // Bump price if not at ceiling
-            let next_price = match request.side {
-                Side::Buy => {
-                    let bumped = current_price + self.config.step_size;
-                    if bumped > ceiling {
-                        // At ceiling, one more try at ceiling
-                        if current_price >= ceiling {
-                            info!(
-                                ceiling = %ceiling,
-                                iterations = iteration,
-                                "Ceiling reached, stopping chase"
-                            );
-                            // Cancel pending order before returning
-                            cancel_pending_order(executor, &current_order_id).await;
-                            return Ok(build_result(
-                                fills,
-                                remaining_size,
-                                current_price,
-                                start.elapsed().as_millis() as u64,
-                                iteration,
-                                Some(ChaseStopReason::CeilingReached),
-                            ));
-                        }
-                        ceiling
-                    } else {
-                        bumped
-                    }
-                }
-                Side::Sell => {
-                    let bumped = current_price - self.config.step_size;
-                    let floor = self.calculate_ceiling(Side::Sell, other_leg_price);
-                    if bumped < floor {
-                        if current_price <= floor {
-                            // Cancel pending order before returning
-                            cancel_pending_order(executor, &current_order_id).await;
-                            return Ok(build_result(
-                                fills,
-                                remaining_size,
-                                current_price,
-                                start.elapsed().as_millis() as u64,
-                                iteration,
-                                Some(ChaseStopReason::CeilingReached),
-                            ));
-                        }
-                        floor
-                    } else {
-                        bumped
-                    }
-                }
-            };
+            // Check if market price has moved away from our order
+            // Only cancel and replace if the best price is different from ours
+            if let Some(best_price) = get_best_price() {
+                let price_moved = match request.side {
+                    // For buy orders: if best bid moved up, we should follow
+                    Side::Buy => best_price > current_price,
+                    // For sell orders: if best ask moved down, we should follow
+                    Side::Sell => best_price < current_price,
+                };
 
-            debug!(
-                iteration = iteration,
-                current_price = %current_price,
-                next_price = %next_price,
-                remaining = %remaining_size,
-                "Bumping price"
-            );
+                if price_moved {
+                    // Cap at ceiling
+                    let next_price = match request.side {
+                        Side::Buy => {
+                            if best_price > ceiling {
+                                if current_price >= ceiling {
+                                    info!(
+                                        ceiling = %ceiling,
+                                        iterations = iteration,
+                                        "Ceiling reached, stopping chase"
+                                    );
+                                    cancel_pending_order(executor, &current_order_id).await;
+                                    return Ok(build_result(
+                                        fills,
+                                        remaining_size,
+                                        current_price,
+                                        start.elapsed().as_millis() as u64,
+                                        iteration,
+                                        Some(ChaseStopReason::CeilingReached),
+                                    ));
+                                }
+                                ceiling
+                            } else {
+                                best_price
+                            }
+                        }
+                        Side::Sell => {
+                            let floor = self.calculate_ceiling(Side::Sell, other_leg_price);
+                            if best_price < floor {
+                                if current_price <= floor {
+                                    cancel_pending_order(executor, &current_order_id).await;
+                                    return Ok(build_result(
+                                        fills,
+                                        remaining_size,
+                                        current_price,
+                                        start.elapsed().as_millis() as u64,
+                                        iteration,
+                                        Some(ChaseStopReason::CeilingReached),
+                                    ));
+                                }
+                                floor
+                            } else {
+                                best_price
+                            }
+                        }
+                    };
 
-            current_price = next_price;
+                    debug!(
+                        iteration = iteration,
+                        current_price = %current_price,
+                        best_price = %best_price,
+                        next_price = %next_price,
+                        remaining = %remaining_size,
+                        "Market moved, adjusting price"
+                    );
+
+                    current_price = next_price;
+                    need_new_order = true;
+                }
+                // If price hasn't moved, keep our order active (no cancel/replace)
+            }
+            // If no price provider, just keep waiting (no automatic bumping)
         }
     }
 
@@ -790,9 +834,9 @@ mod tests {
     fn test_chase_config_default() {
         let config = ChaseConfig::default();
         assert!(config.enabled);
-        assert_eq!(config.step_size, dec!(0.001));
-        assert_eq!(config.check_interval_ms, 100);
-        assert_eq!(config.max_chase_time_ms, 5000);
+        assert_eq!(config.step_size, dec!(0.01)); // Polymarket tick size
+        assert_eq!(config.check_interval_ms, 500);
+        assert_eq!(config.max_chase_time_ms, 30000);
     }
 
     #[test]

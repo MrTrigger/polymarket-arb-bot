@@ -2237,8 +2237,14 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                 let mut current_order = up_order;
                 let mut post_only_retries = 0u32;
 
+                // Clone orderbook for the price provider closure
+                let yes_book_clone = yes_book.clone();
                 loop {
-                    match self.chaser.chase_order(&mut self.executor, current_order.clone(), other_leg_price).await {
+                    // Price provider: check if best bid has moved up from our order price
+                    let get_best_price = || {
+                        calculate_maker_price(&yes_book_clone, Side::Buy)
+                    };
+                    match self.chaser.chase_order_with_market(&mut self.executor, current_order.clone(), other_leg_price, get_best_price).await {
                         Ok(chase_result) => {
                             // Check if POST_ONLY rejection - retry with fresh price
                             if chase_result.stop_reason == Some(ChaseStopReason::PostOnlyRejected) {
@@ -2341,8 +2347,14 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                 let mut current_order = down_order;
                 let mut post_only_retries = 0u32;
 
+                // Clone orderbook for the price provider closure
+                let no_book_clone = no_book.clone();
                 loop {
-                    match self.chaser.chase_order(&mut self.executor, current_order.clone(), other_leg_price).await {
+                    // Price provider: check if best bid has moved up from our order price
+                    let get_best_price = || {
+                        calculate_maker_price(&no_book_clone, Side::Buy)
+                    };
+                    match self.chaser.chase_order_with_market(&mut self.executor, current_order.clone(), other_leg_price, get_best_price).await {
                         Ok(chase_result) => {
                             // Check if POST_ONLY rejection - retry with fresh price
                             if chase_result.stop_reason == Some(ChaseStopReason::PostOnlyRejected) {
