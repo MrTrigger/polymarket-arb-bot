@@ -310,6 +310,8 @@ pub struct MultiEngineDecision {
 struct TrackedMarket {
     /// Event ID.
     event_id: String,
+    /// Condition ID (for CTF contract interactions like redeeming).
+    condition_id: String,
     /// Asset.
     asset: CryptoAsset,
     /// YES token ID.
@@ -374,6 +376,7 @@ impl TrackedMarket {
 
         Self {
             event_id: event.event_id.clone(),
+            condition_id: event.condition_id.clone(),
             asset: event.asset,
             yes_token_id: event.yes_token_id.clone(),
             no_token_id: event.no_token_id.clone(),
@@ -1196,6 +1199,7 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             // Update global state inventory
             let pos = crate::state::InventoryPosition {
                 event_id: event.event_id.clone(),
+                condition_id: market.condition_id.clone(),
                 yes_shares: market.inventory.yes_shares,
                 no_shares: market.inventory.no_shares,
                 yes_cost_basis: market.inventory.yes_cost_basis,
@@ -1295,6 +1299,7 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
         // Sync to global state for dashboard display
         let active_window = ActiveWindow {
             event_id: event.event_id.clone(),
+            condition_id: event.condition_id,
             asset: event.asset,
             yes_token_id: event.yes_token_id,
             no_token_id: event.no_token_id,
@@ -1959,6 +1964,7 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             // Update global state inventory for sizing calculations
             let pos = crate::state::InventoryPosition {
                 event_id: opportunity.event_id.clone(),
+                condition_id: market.condition_id.clone(),
                 yes_shares: market.inventory.yes_shares,
                 no_shares: market.inventory.no_shares,
                 yes_cost_basis: market.inventory.yes_cost_basis,
@@ -2401,6 +2407,7 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             // Update global state inventory for sizing calculations
             let pos = crate::state::InventoryPosition {
                 event_id: event_id.clone(),
+                condition_id: market.condition_id.clone(),
                 yes_shares: market.inventory.yes_shares,
                 no_shares: market.inventory.no_shares,
                 yes_cost_basis: market.inventory.yes_cost_basis,
@@ -2970,6 +2977,7 @@ mod tests {
     fn create_window_open_event(event_id: &str, asset: CryptoAsset) -> MarketEvent {
         MarketEvent::WindowOpen(WindowOpenEvent {
             event_id: event_id.to_string(),
+            condition_id: format!("{}-cond", event_id),
             asset,
             yes_token_id: format!("{}-yes", event_id),
             no_token_id: format!("{}-no", event_id),
@@ -3459,6 +3467,7 @@ mod tests {
     fn test_tracked_market_has_active_maker_orders() {
         let event = WindowOpenEvent {
             event_id: "test-event".to_string(),
+            condition_id: "test-cond".to_string(),
             asset: CryptoAsset::Btc,
             yes_token_id: "yes-token".to_string(),
             no_token_id: "no-token".to_string(),

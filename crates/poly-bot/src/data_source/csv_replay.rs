@@ -94,7 +94,6 @@ struct SpotPriceRow {
 #[derive(Debug, Clone, Deserialize)]
 struct MarketWindowRow {
     event_id: String,
-    #[allow(dead_code)]
     condition_id: String,
     asset: String,
     yes_token_id: String,
@@ -221,6 +220,7 @@ impl CsvReplayDataSource {
             if let Some(asset) = asset {
                 let open_event = MarketEvent::WindowOpen(WindowOpenEvent {
                     event_id: row.event_id.clone(),
+                    condition_id: row.condition_id.clone(),
                     asset,
                     yes_token_id: row.yes_token_id,
                     no_token_id: row.no_token_id,

@@ -49,6 +49,11 @@ base_order_size = 75.0
 # Stop trading if daily loss exceeds this amount in USDC
 max_daily_loss = 50.0
 
+[live]
+# Interval in seconds between auto-claim attempts for resolved positions
+# Set to 0 to disable auto-claiming
+auto_claim_interval_secs = 60
+
 [backtest]
 # Start date for backtesting (YYYY-MM-DD)
 start_date = "2026-01-08"

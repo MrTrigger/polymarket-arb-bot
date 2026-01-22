@@ -825,6 +825,8 @@ impl LiveOrderBook {
 pub struct InventoryPosition {
     /// Event ID.
     pub event_id: String,
+    /// Condition ID (for CTF contract interactions like redeeming).
+    pub condition_id: String,
     /// YES shares held.
     pub yes_shares: Decimal,
     /// NO shares held.
@@ -839,9 +841,10 @@ pub struct InventoryPosition {
 
 impl InventoryPosition {
     /// Create a new empty position.
-    pub fn new(event_id: String) -> Self {
+    pub fn new(event_id: String, condition_id: String) -> Self {
         Self {
             event_id,
+            condition_id,
             yes_shares: Decimal::ZERO,
             no_shares: Decimal::ZERO,
             yes_cost_basis: Decimal::ZERO,
@@ -931,6 +934,8 @@ pub struct ShadowOrderState {
 pub struct ActiveWindow {
     /// Event ID.
     pub event_id: String,
+    /// Condition ID (for CTF contract interactions like redeeming).
+    pub condition_id: String,
     /// Asset being tracked.
     pub asset: CryptoAsset,
     /// YES token ID.
@@ -1138,7 +1143,7 @@ mod tests {
 
     #[test]
     fn test_inventory_imbalance() {
-        let mut inv = InventoryPosition::new("event1".to_string());
+        let mut inv = InventoryPosition::new("event1".to_string(), "cond1".to_string());
         assert_eq!(inv.imbalance_ratio(), Decimal::ZERO);
 
         inv.add_yes(dec!(100), dec!(45));
@@ -1156,7 +1161,7 @@ mod tests {
 
     #[test]
     fn test_inventory_states() {
-        let mut inv = InventoryPosition::new("event1".to_string());
+        let mut inv = InventoryPosition::new("event1".to_string(), "cond1".to_string());
 
         // Skewed: 0.2 < ratio <= 0.5
         inv.yes_shares = dec!(70);
@@ -1226,11 +1231,11 @@ mod tests {
     fn test_total_exposure() {
         let state = GlobalState::new();
 
-        let mut inv1 = InventoryPosition::new("event1".to_string());
+        let mut inv1 = InventoryPosition::new("event1".to_string(), "cond1".to_string());
         inv1.yes_cost_basis = dec!(100);
         inv1.no_cost_basis = dec!(50);
 
-        let mut inv2 = InventoryPosition::new("event2".to_string());
+        let mut inv2 = InventoryPosition::new("event2".to_string(), "cond2".to_string());
         inv2.yes_cost_basis = dec!(75);
         inv2.no_cost_basis = dec!(25);
 

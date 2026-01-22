@@ -26,6 +26,7 @@
 //! order submission (<2ms) when a primary order fills.
 
 pub mod allowance;
+pub mod autoclaim;
 pub mod chase;
 pub mod fill;
 pub mod interval;

@@ -55,6 +55,9 @@ pub struct BotConfig {
     /// Backtest-specific configuration.
     pub backtest: BacktestConfig,
 
+    /// Live mode-specific configuration.
+    pub live: LiveConfig,
+
     /// Engine configuration (arbitrage, directional, maker).
     pub engines: EnginesConfig,
 
@@ -588,6 +591,22 @@ impl Default for BacktestConfig {
     }
 }
 
+/// Live mode configuration.
+#[derive(Debug, Clone)]
+pub struct LiveConfig {
+    /// Interval in seconds between auto-claim attempts for resolved positions.
+    /// Set to 0 to disable auto-claiming.
+    pub auto_claim_interval_secs: u64,
+}
+
+impl Default for LiveConfig {
+    fn default() -> Self {
+        Self {
+            auto_claim_interval_secs: 60, // Check every minute by default
+        }
+    }
+}
+
 /// Phase-based budget allocation configuration.
 ///
 /// Controls budget allocation per market phase.
@@ -961,6 +980,7 @@ impl Default for BotConfig {
             dashboard: DashboardConfig::default(),
             wallet: WalletConfig::default(),
             backtest: BacktestConfig::default(),
+            live: LiveConfig::default(),
             engines: EnginesConfig::default(),
             phases: PhaseConfig::default(),
         }
@@ -1269,6 +1289,8 @@ struct TomlConfig {
     #[serde(default)]
     backtest: BacktestToml,
     #[serde(default)]
+    live: LiveToml,
+    #[serde(default)]
     engines: EnginesToml,
     #[serde(default)]
     phases: PhasesToml,
@@ -1560,6 +1582,21 @@ impl Default for BacktestToml {
 
 #[derive(Debug, Deserialize)]
 #[serde(default)]
+struct LiveToml {
+    /// Interval in seconds between auto-claim attempts.
+    auto_claim_interval_secs: u64,
+}
+
+impl Default for LiveToml {
+    fn default() -> Self {
+        Self {
+            auto_claim_interval_secs: 60,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
 struct PhasesToml {
     early_budget: f64,
     build_budget: f64,
@@ -1839,6 +1876,9 @@ impl From<TomlConfig> for BotConfig {
                         min_hedge_ratio: f64_to_decimal(t.sizing.min_hedge_ratio),
                     },
                 }),
+            },
+            live: LiveConfig {
+                auto_claim_interval_secs: toml.live.auto_claim_interval_secs,
             },
             engines: EnginesConfig {
                 arbitrage: ArbitrageEngineConfig {

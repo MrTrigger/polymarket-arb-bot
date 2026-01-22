@@ -245,8 +245,10 @@ impl ReplayDataSource {
             let discovered_at = ms_to_datetime(row.discovered_at_ms);
 
             // Window open event
+            // Note: condition_id not stored in replay data, use event_id as placeholder
             let open_event = MarketEvent::WindowOpen(WindowOpenEvent {
                 event_id: row.event_id.clone(),
+                condition_id: row.event_id.clone(), // Placeholder for replay
                 asset,
                 yes_token_id: row.yes_token_id.clone(),
                 no_token_id: row.no_token_id.clone(),

@@ -196,6 +196,8 @@ pub struct FillEvent {
 pub struct WindowOpenEvent {
     /// Event ID.
     pub event_id: String,
+    /// Condition ID (for CTF contract interactions like redeeming).
+    pub condition_id: String,
     /// Asset being tracked.
     pub asset: CryptoAsset,
     /// YES token ID.
@@ -334,6 +336,7 @@ mod tests {
     fn test_window_events() {
         let open_event = WindowOpenEvent {
             event_id: "event123".to_string(),
+            condition_id: "cond123".to_string(),
             asset: CryptoAsset::Btc,
             yes_token_id: "yes_token".to_string(),
             no_token_id: "no_token".to_string(),

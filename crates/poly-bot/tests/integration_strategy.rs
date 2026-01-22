@@ -44,6 +44,7 @@ impl MockDataSource {
             // Open a market window
             MarketEvent::WindowOpen(WindowOpenEvent {
                 event_id: event_id.clone(),
+                condition_id: format!("{}-cond", event_id),
                 asset: CryptoAsset::Btc,
                 yes_token_id: format!("{}-yes", event_id),
                 no_token_id: format!("{}-no", event_id),
@@ -86,6 +87,7 @@ impl MockDataSource {
             // Open a market window
             MarketEvent::WindowOpen(WindowOpenEvent {
                 event_id: event_id.clone(),
+                condition_id: format!("{}-cond", event_id),
                 asset: CryptoAsset::Eth,
                 yes_token_id: format!("{}-yes", event_id),
                 no_token_id: format!("{}-no", event_id),
@@ -121,6 +123,7 @@ impl MockDataSource {
             // BTC market with arb
             MarketEvent::WindowOpen(WindowOpenEvent {
                 event_id: "btc-event".to_string(),
+                condition_id: "btc-cond".to_string(),
                 asset: CryptoAsset::Btc,
                 yes_token_id: "btc-yes".to_string(),
                 no_token_id: "btc-no".to_string(),
@@ -132,6 +135,7 @@ impl MockDataSource {
             // ETH market without arb
             MarketEvent::WindowOpen(WindowOpenEvent {
                 event_id: "eth-event".to_string(),
+                condition_id: "eth-cond".to_string(),
                 asset: CryptoAsset::Eth,
                 yes_token_id: "eth-yes".to_string(),
                 no_token_id: "eth-no".to_string(),
@@ -464,6 +468,7 @@ async fn test_strategy_window_close_removes_market() {
     let events = vec![
         MarketEvent::WindowOpen(WindowOpenEvent {
             event_id: "event1".to_string(),
+            condition_id: "cond1".to_string(),
             asset: CryptoAsset::Btc,
             yes_token_id: "event1-yes".to_string(),
             no_token_id: "event1-no".to_string(),

@@ -32,6 +32,7 @@ use crate::dashboard::{
     SharedSessionManager,
 };
 use crate::data_source::live::{ActiveMarketsState, LiveDataSource, LiveDataSourceConfig};
+use crate::executor::autoclaim::AutoClaimManager;
 use crate::executor::live::LiveExecutorConfig;
 use crate::executor::live_sdk::LiveSdkExecutor;
 use crate::executor::{OrderRequest, OrderType};
@@ -62,6 +63,9 @@ pub struct LiveModeConfig {
     pub initial_balance: Decimal,
     /// Graceful shutdown timeout (seconds).
     pub shutdown_timeout_secs: u64,
+    /// Auto-claim interval in seconds (0 = disabled).
+    /// When enabled, periodically attempts to redeem resolved market positions.
+    pub auto_claim_interval_secs: u64,
 }
 
 impl Default for LiveModeConfig {
@@ -76,6 +80,7 @@ impl Default for LiveModeConfig {
             dashboard: DashboardConfig::default(),
             initial_balance: Decimal::new(1000, 0), // $1000 default
             shutdown_timeout_secs: 30,
+            auto_claim_interval_secs: 60, // Check every minute by default
         }
     }
 }
@@ -115,6 +120,7 @@ impl LiveModeConfig {
             dashboard: config.dashboard.clone(),
             initial_balance: allocated_balance,
             shutdown_timeout_secs: 30,
+            auto_claim_interval_secs: config.live.auto_claim_interval_secs,
         }
     }
 }
@@ -318,6 +324,22 @@ impl LiveMode {
             );
             dashboard_tasks.push(pnl_timer);
         }
+
+        // Start auto-claim background task if enabled
+        let _autoclaim_task = match self.bot_config.wallet.private_key.clone() {
+            Some(private_key) => {
+                spawn_autoclaim_task(
+                    private_key,
+                    self.config.auto_claim_interval_secs,
+                    self.shutdown_tx.subscribe(),
+                    self.state.clone(),
+                )
+            }
+            None => {
+                warn!("Auto-claim disabled: no private key configured");
+                None
+            }
+        };
 
         // Create strategy loop with engines config (same as paper mode)
         let mut strategy = StrategyLoop::with_engines(
@@ -543,6 +565,90 @@ impl LiveMode {
             }
         }
     }
+}
+
+/// Spawn a background task that periodically attempts to claim resolved positions.
+///
+/// Returns the task handle if successful.
+fn spawn_autoclaim_task(
+    private_key: String,
+    interval_secs: u64,
+    mut shutdown_rx: broadcast::Receiver<()>,
+    state: Arc<GlobalState>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if interval_secs == 0 {
+        info!("Auto-claim disabled (interval = 0)");
+        return None;
+    }
+
+    // Create autoclaim manager
+    let autoclaim = match AutoClaimManager::new(private_key) {
+        Ok(ac) => ac,
+        Err(e) => {
+            warn!(error = %e, "Failed to create autoclaim manager, feature disabled");
+            return None;
+        }
+    };
+
+    info!(
+        interval_secs = interval_secs,
+        "Auto-claim enabled - will periodically redeem resolved positions"
+    );
+
+    let interval = Duration::from_secs(interval_secs);
+
+    let handle = tokio::spawn(async move {
+        let mut interval_timer = tokio::time::interval(interval);
+        // Skip first tick (fires immediately)
+        interval_timer.tick().await;
+
+        // Reset attempted flags every hour
+        let mut reset_counter = 0u64;
+        let reset_interval = 3600 / interval_secs.max(1); // Reset every ~1 hour
+
+        loop {
+            tokio::select! {
+                _ = interval_timer.tick() => {
+                    // Attempt to claim all resolved positions
+                    let results = autoclaim.claim_all_resolved().await;
+
+                    if !results.is_empty() {
+                        for result in &results {
+                            info!(
+                                condition_id = %result.condition_id,
+                                tx_hash = %result.transaction_hash,
+                                block = result.block_number,
+                                "✅ Auto-claimed resolved position"
+                            );
+                        }
+
+                        // Update balance in state after successful claims
+                        // The actual balance will be refreshed by the executor
+                        info!(
+                            claimed_count = results.len(),
+                            "Claimed positions - balance will update on next refresh"
+                        );
+                    }
+
+                    // Periodically reset attempted flags to retry failed redemptions
+                    reset_counter += 1;
+                    if reset_counter >= reset_interval {
+                        autoclaim.reset_attempted_flags();
+                        reset_counter = 0;
+                    }
+                }
+                _ = shutdown_rx.recv() => {
+                    info!("Auto-claim task shutting down");
+                    break;
+                }
+            }
+        }
+
+        // Suppress unused warning - state is available for future balance updates
+        let _ = state;
+    });
+
+    Some(handle)
 }
 
 #[cfg(test)]

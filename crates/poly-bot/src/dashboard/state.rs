@@ -752,7 +752,7 @@ mod tests {
 
     #[test]
     fn test_position_state() {
-        let mut inv = InventoryPosition::new("event1".to_string());
+        let mut inv = InventoryPosition::new("event1".to_string(), "cond1".to_string());
         inv.add_yes(dec!(100), dec!(45));
         inv.add_no(dec!(100), dec!(50));
 

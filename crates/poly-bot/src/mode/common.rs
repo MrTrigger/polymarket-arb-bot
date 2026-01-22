@@ -91,6 +91,7 @@ pub async fn run_market_discovery(
                         // Send WindowOpenEvent to strategy
                         let window_event = MarketEvent::WindowOpen(WindowOpenEvent {
                             event_id: market.event_id.clone(),
+                            condition_id: market.condition_id.clone(),
                             asset: market.asset,
                             yes_token_id: market.yes_token_id.clone(),
                             no_token_id: market.no_token_id.clone(),

@@ -459,11 +459,20 @@ impl FillHandler {
 
     /// Update inventory for a fill.
     fn update_inventory(&self, fill: &FillData) {
+        // Look up condition_id from active window (needed for CTF redemption)
+        let condition_id = self
+            .state
+            .market_data
+            .active_windows
+            .get(&fill.event_id)
+            .map(|w| w.condition_id.clone())
+            .unwrap_or_default();
+
         let mut position = self
             .state
             .market_data
             .get_inventory(&fill.event_id)
-            .unwrap_or_else(|| InventoryPosition::new(fill.event_id.clone()));
+            .unwrap_or_else(|| InventoryPosition::new(fill.event_id.clone(), condition_id));
 
         let cost = fill.total_cost();
 
@@ -890,7 +899,7 @@ mod tests {
 
     #[test]
     fn test_inventory_snapshot_from_position() {
-        let mut pos = InventoryPosition::new("event-1".to_string());
+        let mut pos = InventoryPosition::new("event-1".to_string(), "cond-1".to_string());
         pos.add_yes(dec!(100), dec!(45));
         pos.add_no(dec!(100), dec!(52));
 

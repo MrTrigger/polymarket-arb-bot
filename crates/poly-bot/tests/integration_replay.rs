@@ -154,6 +154,7 @@ fn test_market_event_display() {
     // Test WindowOpen display
     let open = MarketEvent::WindowOpen(WindowOpenEvent {
         event_id: "event789".to_string(),
+        condition_id: "cond789".to_string(),
         asset: CryptoAsset::Eth,
         yes_token_id: "yes".to_string(),
         no_token_id: "no".to_string(),
@@ -295,6 +296,7 @@ fn test_window_open_event_fields() {
 
     let event = WindowOpenEvent {
         event_id: "event123".to_string(),
+        condition_id: "cond123".to_string(),
         asset: CryptoAsset::Sol,
         yes_token_id: "yes_token".to_string(),
         no_token_id: "no_token".to_string(),
@@ -566,6 +568,7 @@ async fn test_mock_replay_source_mixed_events() {
         }),
         MarketEvent::WindowOpen(WindowOpenEvent {
             event_id: "event".to_string(),
+            condition_id: "cond".to_string(),
             asset: CryptoAsset::Btc,
             yes_token_id: "yes".to_string(),
             no_token_id: "no".to_string(),

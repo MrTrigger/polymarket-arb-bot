@@ -272,6 +272,7 @@ mod tests {
             "event-1".to_string(),
             InventoryPosition {
                 event_id: "event-1".to_string(),
+                condition_id: "cond-1".to_string(),
                 yes_shares: Decimal::new(100, 0),
                 no_shares: Decimal::new(50, 0),
                 yes_cost_basis: Decimal::new(45, 0),
