@@ -594,15 +594,15 @@ impl Default for BacktestConfig {
 /// Live mode configuration.
 #[derive(Debug, Clone)]
 pub struct LiveConfig {
-    /// Interval in seconds between auto-claim attempts for resolved positions.
+    /// Interval in minutes between auto-claim attempts for resolved positions.
     /// Set to 0 to disable auto-claiming.
-    pub auto_claim_interval_secs: u64,
+    pub auto_claim_interval: u64,
 }
 
 impl Default for LiveConfig {
     fn default() -> Self {
         Self {
-            auto_claim_interval_secs: 60, // Check every minute by default
+            auto_claim_interval: 30, // Check every 30 minutes by default
         }
     }
 }
@@ -1583,14 +1583,14 @@ impl Default for BacktestToml {
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 struct LiveToml {
-    /// Interval in seconds between auto-claim attempts.
-    auto_claim_interval_secs: u64,
+    /// Interval in minutes between auto-claim attempts.
+    auto_claim_interval: u64,
 }
 
 impl Default for LiveToml {
     fn default() -> Self {
         Self {
-            auto_claim_interval_secs: 60,
+            auto_claim_interval: 30,
         }
     }
 }
@@ -1878,7 +1878,7 @@ impl From<TomlConfig> for BotConfig {
                 }),
             },
             live: LiveConfig {
-                auto_claim_interval_secs: toml.live.auto_claim_interval_secs,
+                auto_claim_interval: toml.live.auto_claim_interval,
             },
             engines: EnginesConfig {
                 arbitrage: ArbitrageEngineConfig {

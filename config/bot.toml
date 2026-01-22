@@ -50,9 +50,9 @@ base_order_size = 75.0
 max_daily_loss = 50.0
 
 [live]
-# Interval in seconds between auto-claim attempts for resolved positions
+# Interval in minutes between auto-claim attempts for resolved positions
 # Set to 0 to disable auto-claiming
-auto_claim_interval_secs = 60
+auto_claim_interval = 30
 
 [backtest]
 # Start date for backtesting (YYYY-MM-DD)

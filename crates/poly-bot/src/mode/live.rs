@@ -63,9 +63,9 @@ pub struct LiveModeConfig {
     pub initial_balance: Decimal,
     /// Graceful shutdown timeout (seconds).
     pub shutdown_timeout_secs: u64,
-    /// Auto-claim interval in seconds (0 = disabled).
+    /// Auto-claim interval in minutes (0 = disabled).
     /// When enabled, periodically attempts to redeem resolved market positions.
-    pub auto_claim_interval_secs: u64,
+    pub auto_claim_interval_min: u64,
 }
 
 impl Default for LiveModeConfig {
@@ -80,7 +80,7 @@ impl Default for LiveModeConfig {
             dashboard: DashboardConfig::default(),
             initial_balance: Decimal::new(1000, 0), // $1000 default
             shutdown_timeout_secs: 30,
-            auto_claim_interval_secs: 60, // Check every minute by default
+            auto_claim_interval_min: 30, // Check every 30 minutes by default
         }
     }
 }
@@ -121,7 +121,7 @@ impl LiveModeConfig {
             dashboard: config.dashboard.clone(),
             initial_balance: allocated_balance,
             shutdown_timeout_secs: 30,
-            auto_claim_interval_secs: config.live.auto_claim_interval_secs,
+            auto_claim_interval_min: config.live.auto_claim_interval,
         }
     }
 }
@@ -333,7 +333,7 @@ impl LiveMode {
             Some(private_key) => {
                 spawn_autoclaim_task(
                     private_key,
-                    self.config.auto_claim_interval_secs,
+                    self.config.auto_claim_interval_min,
                     self.shutdown_tx.subscribe(),
                     self.state.clone(),
                 )
@@ -575,11 +575,11 @@ impl LiveMode {
 /// Returns the task handle if successful.
 fn spawn_autoclaim_task(
     private_key: String,
-    interval_secs: u64,
+    interval_min: u64,
     mut shutdown_rx: broadcast::Receiver<()>,
     state: Arc<GlobalState>,
 ) -> Option<tokio::task::JoinHandle<()>> {
-    if interval_secs == 0 {
+    if interval_min == 0 {
         info!("Auto-claim disabled (interval = 0)");
         return None;
     }
@@ -594,26 +594,22 @@ fn spawn_autoclaim_task(
     };
 
     info!(
-        interval_secs = interval_secs,
+        interval_min = interval_min,
         "Auto-claim enabled - will periodically redeem resolved positions"
     );
 
-    let interval = Duration::from_secs(interval_secs);
+    let interval = Duration::from_secs(interval_min * 60);
 
     let handle = tokio::spawn(async move {
         let mut interval_timer = tokio::time::interval(interval);
         // Skip first tick (fires immediately)
         interval_timer.tick().await;
 
-        // Reset attempted flags every hour
-        let mut reset_counter = 0u64;
-        let reset_interval = 3600 / interval_secs.max(1); // Reset every ~1 hour
-
         loop {
             tokio::select! {
                 _ = interval_timer.tick() => {
-                    // Attempt to claim all resolved positions
-                    let results = autoclaim.claim_all_resolved().await;
+                    // Query API for redeemable positions and claim them
+                    let results = autoclaim.claim_all_redeemable().await;
 
                     if !results.is_empty() {
                         for result in &results {
@@ -621,6 +617,7 @@ fn spawn_autoclaim_task(
                                 condition_id = %result.condition_id,
                                 tx_hash = %result.transaction_hash,
                                 block = result.block_number,
+                                size = %result.size,
                                 "✅ Auto-claimed resolved position"
                             );
                         }
@@ -631,13 +628,6 @@ fn spawn_autoclaim_task(
                             claimed_count = results.len(),
                             "Claimed positions - balance will update on next refresh"
                         );
-                    }
-
-                    // Periodically reset attempted flags to retry failed redemptions
-                    reset_counter += 1;
-                    if reset_counter >= reset_interval {
-                        autoclaim.reset_attempted_flags();
-                        reset_counter = 0;
                     }
                 }
                 _ = shutdown_rx.recv() => {
