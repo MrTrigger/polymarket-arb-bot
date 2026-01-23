@@ -74,6 +74,20 @@ pub enum ExecutorError {
     Internal(String),
 }
 
+impl ExecutorError {
+    /// Returns true if this is a system error that should trip the circuit breaker.
+    ///
+    /// System errors (connection, timeout, internal) indicate infrastructure problems.
+    /// Market condition errors (rejected/FOK, insufficient funds, market closed) are
+    /// normal trading conditions and should NOT trip the circuit breaker.
+    pub fn is_system_error(&self) -> bool {
+        matches!(
+            self,
+            ExecutorError::Connection(_) | ExecutorError::Timeout(_) | ExecutorError::Internal(_)
+        )
+    }
+}
+
 /// Order type for execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OrderType {

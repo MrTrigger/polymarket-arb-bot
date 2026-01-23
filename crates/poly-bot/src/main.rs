@@ -18,10 +18,11 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use chrono::Utc;
 use clap::Parser;
 use poly_common::{ClickHouseClient, WindowDuration};
 use tracing::{error, info, warn, Level};
-use tracing_subscriber::FmtSubscriber;
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 
 use poly_bot::config::{BotConfig, DashboardConfig, SweepConfig, TradingMode};
 use poly_bot::dashboard::{
@@ -138,8 +139,10 @@ async fn run() -> Result<()> {
         config.window_duration = window_duration;
     }
 
-    // Initialize logging
-    let log_level = match config.log_level.to_lowercase().as_str() {
+    // Initialize logging with dual output:
+    // - Console: INFO level (or configured level)
+    // - File: DEBUG level for full diagnostics
+    let console_level = match config.log_level.to_lowercase().as_str() {
         "trace" => Level::TRACE,
         "debug" => Level::DEBUG,
         "info" => Level::INFO,
@@ -148,14 +151,126 @@ async fn run() -> Result<()> {
         _ => Level::INFO,
     };
 
-    let subscriber = FmtSubscriber::builder().with_max_level(log_level).finish();
-    tracing::subscriber::set_global_default(subscriber)
-        .context("Failed to set global tracing subscriber")?;
+    // Create logs directory if it doesn't exist
+    let log_dir = std::path::Path::new("logs");
+    std::fs::create_dir_all(log_dir).context("Failed to create logs directory")?;
 
-    info!("Starting poly-bot trading bot");
+    // File appender with daily rotation
+    let file_appender = tracing_appender::rolling::daily(log_dir, "poly-bot.log");
+    let (non_blocking_file, _guard) = tracing_appender::non_blocking(file_appender);
+
+    // Console layer: configurable level, compact format
+    let console_layer = fmt::layer()
+        .with_target(true)
+        .with_ansi(true)
+        .with_filter(EnvFilter::new(format!(
+            "poly_bot={},poly_market={},poly_common={}",
+            console_level, console_level, console_level
+        )));
+
+    // File layer: DEBUG level, full format with timestamps
+    let file_layer = fmt::layer()
+        .with_writer(non_blocking_file)
+        .with_target(true)
+        .with_ansi(false)
+        .with_filter(EnvFilter::new(
+            "poly_bot=debug,poly_market=debug,poly_common=debug,poly_bot::strategy=info"
+        ));
+
+    tracing_subscriber::registry()
+        .with(console_layer)
+        .with(file_layer)
+        .init();
+
+    // Keep the guard alive for the duration of the program
+    // (moved to a static or passed along as needed)
+    let _log_guard = _guard;
+
+    // =========================================================================
+    // SESSION START - Log all important configuration
+    // =========================================================================
+    info!("================================================================================");
+    info!("                         POLY-BOT SESSION START");
+    info!("================================================================================");
+    info!("Timestamp: {}", Utc::now());
+    info!("Version: {}", env!("CARGO_PKG_VERSION"));
+    info!("Config file: {:?}", args.config);
+    info!("");
+
+    // Core settings
+    info!("=== CORE SETTINGS ===");
     info!("Mode: {}", config.mode);
     info!("Window duration: {}", config.window_duration);
     info!("Assets: {:?}", config.assets);
+    info!("Log level (console): {}", config.log_level);
+    info!("Log level (file): debug");
+    info!("");
+
+    // Trading parameters
+    info!("=== TRADING PARAMETERS ===");
+    info!("Min margin (early): {}", config.trading.min_margin_early);
+    info!("Min margin (mid): {}", config.trading.min_margin_mid);
+    info!("Min margin (late): {}", config.trading.min_margin_late);
+    info!("Min time remaining: {}s", config.trading.min_time_remaining_secs);
+    info!("Max position per market: {} USDC", config.trading.max_position_per_market);
+    info!("Max total exposure: {} USDC", config.trading.max_total_exposure);
+    info!("Base order size: {} USDC", config.trading.base_order_size);
+    info!("Early threshold: {}s", config.trading.early_threshold_secs);
+    info!("Mid threshold: {}s", config.trading.mid_threshold_secs);
+    info!("");
+
+    // Sizing config
+    info!("=== SIZING CONFIG ===");
+    info!("Mode: {}", config.trading.sizing.mode);
+    info!("Available balance: {} USDC", config.trading.sizing.available_balance);
+    info!("Max market allocation: {}%", config.trading.sizing.max_market_allocation * rust_decimal::Decimal::from(100));
+    info!("Expected trades per market: {}", config.trading.sizing.expected_trades_per_market);
+    info!("");
+
+    // Risk parameters
+    info!("=== RISK PARAMETERS ===");
+    info!("Risk mode: {}", config.risk.risk_mode);
+    info!("Max consecutive failures: {}", config.risk.max_consecutive_failures);
+    info!("Circuit breaker cooldown: {}s", config.risk.circuit_breaker_cooldown_secs);
+    info!("Max daily loss: {} USDC", config.risk.max_daily_loss);
+    info!("Max imbalance ratio: {}", config.risk.max_imbalance_ratio);
+    info!("Toxic flow threshold: {}", config.risk.toxic_flow_threshold);
+    info!("");
+
+    // Execution parameters
+    info!("=== EXECUTION PARAMETERS ===");
+    info!("Execution mode: {:?}", config.execution.execution_mode);
+    info!("Chase enabled: {}", config.execution.chase_enabled);
+    info!("Chase step size: {}", config.execution.chase_step_size);
+    info!("Chase check interval: {}ms", config.execution.chase_check_interval_ms);
+    info!("Max chase time: {}ms", config.execution.max_chase_time_ms);
+    info!("Paper fill latency: {}ms", config.execution.paper_fill_latency_ms);
+    info!("Order timeout: {}ms", config.execution.order_timeout_ms);
+    info!("");
+
+    // Engines
+    info!("=== TRADING ENGINES ===");
+    info!("Arbitrage: enabled={}", config.engines.arbitrage.enabled);
+    info!("Directional: enabled={}", config.engines.directional.enabled);
+    info!("Maker: enabled={}", config.engines.maker.enabled);
+    info!("Priority: {:?}", config.engines.priority);
+    info!("");
+
+    // Live mode specific (if applicable)
+    if matches!(config.mode, TradingMode::Live) {
+        info!("=== LIVE MODE CONFIG ===");
+        info!("Auto-claim interval: {} min (0=disabled)", config.live.auto_claim_interval);
+        info!("Test trade on startup: {}", config.execution.test_trade_on_startup);
+        info!("");
+    }
+
+    // Dashboard
+    info!("=== DASHBOARD ===");
+    info!("WebSocket port: {}", config.dashboard.websocket_port);
+    info!("API port: {}", config.dashboard.api_port);
+    info!("");
+
+    info!("================================================================================");
 
     // Validate configuration before proceeding
     config.validate().context("Configuration validation failed")?;

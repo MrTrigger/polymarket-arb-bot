@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::broadcast;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use poly_common::ClickHouseClient;
 use poly_market::{DiscoveryConfig, MarketDiscovery};
@@ -42,11 +42,28 @@ pub async fn run_market_discovery(
     let poll_interval = config.poll_interval;
 
     loop {
+        // Clean up expired markets from active_markets
+        {
+            let mut active = active_markets.write().await;
+            let before = active.len();
+            active.retain(|_event_id, market| {
+                let now = chrono::Utc::now();
+                now < market.window_end
+            });
+            let removed = before - active.len();
+            if removed > 0 {
+                info!("Removed {} expired markets from active tracking", removed);
+            }
+        }
+
         // Discover new markets
         match discovery.discover().await {
             Ok(markets) => {
+                // Always log total active markets for monitoring
+                let total_active = active_markets.read().await.len();
+
                 if !markets.is_empty() {
-                    info!("Discovered {} new markets", markets.len());
+                    info!("Discovered {} new markets (total active: {})", markets.len(), total_active);
 
                     // Only add markets with valid strike prices.
                     // Markets with strike=0 haven't started yet - discovery will
@@ -56,12 +73,26 @@ pub async fn run_market_discovery(
                         .filter(|m| !m.strike_price.is_zero())
                         .collect();
 
-                    if ready_markets.len() < markets.len() {
-                        let pending = markets.len() - ready_markets.len();
-                        info!(
-                            "{} markets ready (with strike), {} pending (strike not yet available)",
-                            ready_markets.len(),
-                            pending
+                    let pending_markets: Vec<_> = markets
+                        .iter()
+                        .filter(|m| m.strike_price.is_zero())
+                        .collect();
+
+                    // Get total active markets count for context
+                    let total_active = active_markets.read().await.len();
+                    info!(
+                        "{} new markets ready (with strike), {} pending (strike not yet available), {} total active",
+                        ready_markets.len(),
+                        pending_markets.len(),
+                        total_active
+                    );
+
+                    // Log pending markets at debug level
+                    for m in &pending_markets {
+                        let secs_to_start = (m.window_start - chrono::Utc::now()).num_seconds();
+                        debug!(
+                            "  Pending: {} {} starts in {}s (window: {} - {})",
+                            m.event_id, m.asset, secs_to_start, m.window_start, m.window_end
                         );
                     }
 
@@ -105,6 +136,12 @@ pub async fn run_market_discovery(
                             warn!("Failed to send WindowOpen event: {}", e);
                         }
                     }
+                } else if total_active > 0 {
+                    // No new markets, but we have active ones
+                    debug!("No new markets discovered, {} active markets being tracked", total_active);
+                } else {
+                    // No markets at all - this is what we want to fix
+                    debug!("No markets discovered or active, waiting for markets to start");
                 }
             }
             Err(e) => {

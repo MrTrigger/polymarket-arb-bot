@@ -1804,6 +1804,29 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                         }
                     };
 
+                    // CRITICAL: Check global exposure limit before trading
+                    // The PositionManager only checks per-market budget, not global exposure
+                    let remaining_global_capacity = self.config.sizing_config.max_total_exposure - total_exposure;
+                    if remaining_global_capacity <= Decimal::ZERO {
+                        debug!(
+                            "Global exposure limit reached for {}: total={} max={}",
+                            event_id, total_exposure, self.config.sizing_config.max_total_exposure
+                        );
+                        self.state.metrics.inc_skipped();
+                        continue;
+                    }
+
+                    // Cap size to remaining global capacity
+                    let total_size = if total_size > remaining_global_capacity {
+                        info!(
+                            "Capping directional size for {} from ${:.2} to ${:.2} (global exposure limit)",
+                            event_id, total_size, remaining_global_capacity
+                        );
+                        remaining_global_capacity
+                    } else {
+                        total_size
+                    };
+
                     // Verify size is meaningful - account for the split ratio
                     // The dominant leg (larger ratio) must reach minimum order size of $1.00
                     let dominant_ratio = opp.up_ratio.max(opp.down_ratio);
@@ -1850,6 +1873,17 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                     action
                 }
                 Some(EngineDecision::Maker(opps)) => {
+                    // CRITICAL: Check global exposure limit before maker orders
+                    let remaining_global_capacity = self.config.sizing_config.max_total_exposure - total_exposure;
+                    if remaining_global_capacity <= Decimal::ZERO {
+                        debug!(
+                            "Global exposure limit reached for maker {}: total={} max={}",
+                            event_id, total_exposure, self.config.sizing_config.max_total_exposure
+                        );
+                        self.state.metrics.inc_skipped();
+                        continue;
+                    }
+
                     // Execute maker orders
                     let mut action = TradeAction::Execute;
                     for opp in opps {
@@ -1959,7 +1993,9 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                 if let Some(market) = self.markets.get_mut(&opportunity.event_id) {
                     market.pending_arb_order = false;
                 }
-                if self.state.record_failure(self.config.max_consecutive_failures) {
+                // Only count system errors (connection, timeout, internal) for circuit breaker
+                // FOK rejections and market conditions are normal and should NOT trip it
+                if e.is_system_error() && self.state.record_failure(self.config.max_consecutive_failures) {
                     self.state.trip_circuit_breaker();
                     warn!("Circuit breaker tripped after consecutive failures");
                 }
@@ -1979,8 +2015,9 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                 debug!("NO order not filled: {:?}", result);
             }
             Err(e) => {
-                warn!("NO order failed: {}", e);
-                if self.state.record_failure(self.config.max_consecutive_failures) {
+                warn!("{} order failed: {}", if opportunity.yes_ask < opportunity.no_ask { "DOWN" } else { "DOWN" }, e);
+                // Only count system errors for circuit breaker, not FOK rejections
+                if e.is_system_error() && self.state.record_failure(self.config.max_consecutive_failures) {
                     self.state.trip_circuit_breaker();
                     warn!("Circuit breaker tripped after consecutive failures");
                 }
@@ -2094,33 +2131,35 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
         };
 
         // Fetch FRESH prices from REST API - WebSocket cache may be stale due to chase blocking
+        // CRITICAL: Use ASK prices since we're BUYING - we pay the ask, not the bid!
         let (up_price, down_price) = {
             // Try REST API first for truly fresh prices
             let up_bbo = self.executor.fetch_fresh_bbo(&yes_token_id).await;
             let down_bbo = self.executor.fetch_fresh_bbo(&no_token_id).await;
 
             match (up_bbo, down_bbo) {
-                (Some((up_bid, _up_ask)), Some((down_bid, _down_ask))) => {
+                (Some((_up_bid, up_ask)), Some((_down_bid, down_ask))) => {
                     info!(
                         event_id = %event_id,
-                        up_bid = %up_bid,
-                        down_bid = %down_bid,
-                        "Using FRESH prices from REST API"
+                        up_ask = %up_ask,
+                        down_ask = %down_ask,
+                        "Using FRESH ASK prices from REST API (we pay ask when buying)"
                     );
-                    (up_bid, down_bid)
+                    (up_ask, down_ask)
                 }
                 _ => {
                     // Fallback to WebSocket cache if API fails
+                    // Use ASK prices since we're BUYING
                     warn!(event_id = %event_id, "REST API failed, falling back to WebSocket cache");
                     let up_price = match self.state.market_data.order_books.get(&yes_token_id) {
-                        Some(live_book) => live_book.best_bid,
+                        Some(live_book) => live_book.best_ask,
                         None => {
                             warn!(token_id = %yes_token_id, "No orderbook for UP token, skipping");
                             return Ok(TradeAction::SkipSizing);
                         }
                     };
                     let down_price = match self.state.market_data.order_books.get(&no_token_id) {
-                        Some(live_book) => live_book.best_bid,
+                        Some(live_book) => live_book.best_ask,
                         None => {
                             warn!(token_id = %no_token_id, "No orderbook for DOWN token, skipping");
                             return Ok(TradeAction::SkipSizing);
@@ -2391,7 +2430,8 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                 }
                 Err(e) => {
                     warn!("UP order failed: {}", e);
-                    if self.state.record_failure(self.config.max_consecutive_failures) {
+                    // Only count system errors for circuit breaker, not FOK rejections
+                    if e.is_system_error() && self.state.record_failure(self.config.max_consecutive_failures) {
                         self.state.trip_circuit_breaker();
                         warn!("Circuit breaker tripped after consecutive failures");
                     }
@@ -2529,7 +2569,8 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                 }
                 Err(e) => {
                     warn!("DOWN order failed: {}", e);
-                    if self.state.record_failure(self.config.max_consecutive_failures) {
+                    // Only count system errors for circuit breaker, not FOK rejections
+                    if e.is_system_error() && self.state.record_failure(self.config.max_consecutive_failures) {
                         self.state.trip_circuit_breaker();
                         warn!("Circuit breaker tripped after consecutive failures");
                     }
@@ -2814,7 +2855,8 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             }
             Err(e) => {
                 warn!("Maker order failed: {}", e);
-                if self.state.record_failure(self.config.max_consecutive_failures) {
+                // Only count system errors for circuit breaker, not FOK rejections
+                if e.is_system_error() && self.state.record_failure(self.config.max_consecutive_failures) {
                     self.state.trip_circuit_breaker();
                     warn!("Circuit breaker tripped after consecutive failures");
                 }

@@ -302,26 +302,52 @@ impl MarketDiscovery {
             // Check if this is a 15-minute crypto market
             if let Some(mut market) = self.parse_crypto_market(&event)? {
                 // For "Up or Down" markets with no strike in title:
-                // If the market is already in progress, fetch historical price from Binance.
+                // If the market is already in progress OR about to start (within 5 minutes),
+                // fetch historical/current price from Binance.
                 // We use Binance for both strike AND live prices to maintain consistency -
                 // this ensures our above/below strike calculations are accurate even though
                 // Polymarket uses a different data source (Chainlink Data Streams).
-                if market.strike_price.is_zero() && market.is_active() {
-                    if let Ok(Some(historical_price)) = self
-                        .fetch_historical_spot_price(market.asset, market.window_start)
-                        .await
-                    {
-                        info!(
-                            "Setting strike for {} from Binance at {}: ${}",
-                            market.event_id, market.window_start, historical_price
-                        );
-                        market.strike_price = historical_price;
-                    } else {
-                        warn!(
-                            "Could not fetch historical price for {}, strike will be set from first spot price",
-                            market.event_id
-                        );
+                let now = Utc::now();
+                let seconds_until_start = (market.window_start - now).num_seconds();
+                let seconds_until_end = (market.window_end - now).num_seconds();
+                let is_active = market.is_active();
+                let is_about_to_start = seconds_until_start > 0 && seconds_until_start <= 300; // 5 minutes
+                let is_expired = market.is_expired();
+
+                debug!(
+                    "Market {} timing: now={}, start={}, end={}, until_start={}s, until_end={}s, active={}, about_to_start={}, expired={}",
+                    market.event_id, now, market.window_start, market.window_end,
+                    seconds_until_start, seconds_until_end, is_active, is_about_to_start, is_expired
+                );
+
+                if market.strike_price.is_zero() && is_active {
+                    // Fetch historical price at exact window_start time
+                    match self.fetch_historical_spot_price(market.asset, market.window_start).await {
+                        Ok(Some(price)) => {
+                            info!(
+                                "Setting strike for {} from Binance at {}: ${}",
+                                market.event_id, market.window_start, price
+                            );
+                            market.strike_price = price;
+                        }
+                        Ok(None) => {
+                            warn!(
+                                "Binance returned no price data for {} at {}, strike stays at 0",
+                                market.event_id, market.window_start
+                            );
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Failed to fetch price for {}: {}, strike stays at 0",
+                                market.event_id, e
+                            );
+                        }
                     }
+                } else if market.strike_price.is_zero() && !is_expired && !is_active {
+                    debug!(
+                        "Market {} has no strike, waiting for window to start (in {}s)",
+                        market.event_id, seconds_until_start
+                    );
                 }
 
                 info!(
@@ -335,10 +361,28 @@ impl MarketDiscovery {
                 // until they become active and we can fetch historical price.
                 // Also mark as known if expired to avoid retrying forever.
                 if !market.strike_price.is_zero() || market.is_expired() {
-                    self.known_markets.insert(event_id);
+                    self.known_markets.insert(event_id.clone());
+                    debug!(
+                        "Added {} to known_markets (strike={}, expired={})",
+                        event_id, market.strike_price, market.is_expired()
+                    );
+                } else {
+                    debug!(
+                        "NOT adding {} to known_markets yet (strike=0, will retry next poll)",
+                        event_id
+                    );
                 }
             }
         }
+
+        // Summary stats
+        let with_strike = new_markets.iter().filter(|m| !m.strike_price.is_zero()).count();
+        let active = new_markets.iter().filter(|m| m.is_active()).count();
+        let expired = new_markets.iter().filter(|m| m.is_expired()).count();
+        debug!(
+            "Discovery poll summary: {} new markets ({}  with strike, {} active, {} expired), {} total known",
+            new_markets.len(), with_strike, active, expired, self.known_markets.len()
+        );
 
         Ok(new_markets)
     }
@@ -354,18 +398,18 @@ impl MarketDiscovery {
         for event in events {
             if let Some(mut market) = self.parse_crypto_market(&event)? {
                 // For "Up or Down" markets with no strike in title:
-                // If the market is already in progress, fetch historical price from Binance.
-                if market.strike_price.is_zero()
-                    && market.is_active()
-                    && let Ok(Some(historical_price)) = self
+                // Only fetch if the market is already active (window has started)
+                if market.strike_price.is_zero() && market.is_active() {
+                    if let Ok(Some(price)) = self
                         .fetch_historical_spot_price(market.asset, market.window_start)
                         .await
-                {
-                    debug!(
-                        "Setting strike price for {} from Binance: ${}",
-                        market.event_id, historical_price
-                    );
-                    market.strike_price = historical_price;
+                    {
+                        debug!(
+                            "Setting strike price for {} from Binance at {}: ${}",
+                            market.event_id, market.window_start, price
+                        );
+                        market.strike_price = price;
+                    }
                 }
 
                 // Track in known markets
@@ -429,6 +473,7 @@ impl MarketDiscovery {
         });
 
         if !matches_title && !matches_slug {
+            // Don't log - too noisy (many non-crypto markets)
             return Ok(None);
         }
 
@@ -656,7 +701,28 @@ impl MarketDiscovery {
 
     /// Clear known markets (useful for testing or resetting state).
     pub fn clear_known_markets(&mut self) {
+        info!("Clearing {} known markets", self.known_markets.len());
         self.known_markets.clear();
+    }
+
+    /// Remove old market IDs from known_markets to prevent unbounded growth.
+    /// Call this periodically (e.g., every hour) during long-running sessions.
+    pub fn cleanup_old_markets(&mut self) {
+        let before = self.known_markets.len();
+        // Remove market IDs that look like old numeric IDs (heuristic: keep only recent ones)
+        // This is a simple cleanup - in production you might track expiry times
+        if before > 1000 {
+            // If we have too many, clear and let re-discovery happen
+            warn!(
+                "known_markets has {} entries, clearing to prevent memory growth",
+                before
+            );
+            self.known_markets.clear();
+        }
+        let after = self.known_markets.len();
+        if before != after {
+            info!("Cleaned up known_markets: {} -> {} entries", before, after);
+        }
     }
 
     /// Run discovery loop with callback.
@@ -673,9 +739,25 @@ impl MarketDiscovery {
             self.config.poll_interval
         );
 
+        let mut cleanup_counter = 0u32;
+
         loop {
+            // Periodic cleanup every ~100 polls (about every 50 minutes with 30s interval)
+            cleanup_counter += 1;
+            if cleanup_counter >= 100 {
+                self.cleanup_old_markets();
+                cleanup_counter = 0;
+            }
+
             match self.discover().await {
                 Ok(markets) => {
+                    // Log discovery stats periodically
+                    debug!(
+                        "Discovery stats: {} known markets, {} new this poll",
+                        self.known_markets.len(),
+                        markets.len()
+                    );
+
                     if !markets.is_empty() {
                         info!("Discovery found {} new markets", markets.len());
                         on_discovery(markets);

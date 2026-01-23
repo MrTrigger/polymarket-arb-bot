@@ -23,7 +23,7 @@
 mode = "live"
 
 # Assets to trade - available: "BTC", "ETH", "SOL", "XRP"
-assets = ["BTC"]       # ["BTC", "ETH", "SOL", "XRP"]
+assets =  ["BTC"]       # ["BTC", "ETH", "SOL", "XRP"]
 
 # Logging verbosity: "info", "debug", "trace"
 log_level = "info"
@@ -35,7 +35,7 @@ log_level = "info"
 available_balance = 1000.0
 
 # Maximum position size per market in USDC
-max_position_per_market = 500.0
+max_position_per_market = 1000.0
 
 # Maximum total exposure across all markets in USDC
 max_total_exposure = 1000.0
@@ -52,7 +52,7 @@ max_daily_loss = 50.0
 [live]
 # Interval in minutes between auto-claim attempts for resolved positions
 # Set to 0 to disable auto-claiming
-auto_claim_interval = 30
+auto_claim_interval = 15
 
 [backtest]
 # Start date for backtesting (YYYY-MM-DD)
