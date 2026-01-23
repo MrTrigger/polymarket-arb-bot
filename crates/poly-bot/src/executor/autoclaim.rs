@@ -49,13 +49,10 @@ const USDC_ADDRESS: &str = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
 /// Conditional Tokens Framework contract address on Polygon mainnet.
 const CTF_ADDRESS: &str = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045";
 
-/// Polymarket Proxy Wallet Factory address on Polygon mainnet.
-const PROXY_FACTORY_ADDRESS: &str = "0xaB45c5A4B0c941a2F231C04C3f49182e1A254052";
-
 /// Polygon RPC endpoint.
 const POLYGON_RPC: &str = "https://polygon-rpc.com";
 
-// Define the ProxyWalletFactory contract interface
+// Define the ProxyWallet contract interface (called DIRECTLY on the user's proxy wallet)
 sol! {
     /// Call type for proxy calls (0 = Call, 1 = DelegateCall)
     #[derive(Debug)]
@@ -73,9 +70,10 @@ sol! {
         uint256 value;
     }
 
-    /// ProxyWalletFactory contract interface
+    /// ProxyWallet contract interface - call DIRECTLY on the proxy wallet address
+    /// The proxy wallet is owned by the EOA and can execute calls on its behalf
     #[sol(rpc)]
-    contract ProxyWalletFactory {
+    contract ProxyWallet {
         function proxy(ProxyCall[] memory calls) public payable returns (bytes[] memory returnValues);
     }
 
@@ -225,13 +223,10 @@ impl AutoClaimManager {
             "Attempting to redeem position via proxy factory"
         );
 
-        // Parse contract addresses
+        // Parse CTF contract address
         let ctf_address: Address = CTF_ADDRESS
             .parse()
             .map_err(|e| AutoClaimError::ClientInit(format!("Invalid CTF address: {}", e)))?;
-        let proxy_factory_address: Address = PROXY_FACTORY_ADDRESS
-            .parse()
-            .map_err(|e| AutoClaimError::ClientInit(format!("Invalid proxy factory address: {}", e)))?;
 
         // Encode the redeemPositions call for CTF contract
         // For binary markets: indexSets = [1, 2] (YES and NO outcomes)
@@ -251,12 +246,13 @@ impl AutoClaimManager {
             value: U256::ZERO,
         };
 
-        // Create the ProxyWalletFactory contract instance
-        let proxy_factory = ProxyWalletFactory::new(proxy_factory_address, &provider);
+        // Call the proxy wallet DIRECTLY (not through the factory)
+        // The proxy wallet is owned by the EOA and allows owner to execute arbitrary calls
+        let proxy_wallet_contract = ProxyWallet::new(self.proxy_wallet, &provider);
 
         // Call proxy() with our redemption call
-        // This will forward the call to our proxy wallet, which executes redeemPositions
-        let tx_builder = proxy_factory.proxy(vec![proxy_call]);
+        // This executes the redeemPositions call from the proxy wallet (which holds the tokens)
+        let tx_builder = proxy_wallet_contract.proxy(vec![proxy_call]);
 
         let pending_tx = tx_builder
             .send()
