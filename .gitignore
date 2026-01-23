@@ -28,6 +28,7 @@ Desktop.ini
 *.log
 *.csv
 *.json.bak
+logs/
 
 # Temporary files
 tmpclaude*
