@@ -6,8 +6,16 @@
 //! # How It Works
 //!
 //! 1. Queries the Polymarket API for redeemable positions
-//! 2. Calls CTF contract's `redeemPositions` for each resolved position
-//! 3. Balance is updated automatically after redemption
+//! 2. Calls ProxyWalletFactory.proxy() to execute redemption through proxy wallet
+//! 3. The proxy wallet calls CTF contract's `redeemPositions`
+//! 4. Balance is updated automatically after redemption
+//!
+//! # Architecture Note
+//!
+//! Polymarket uses proxy wallets (EIP-1167 minimal proxies) to hold user positions.
+//! The EOA cannot directly call CTF.redeemPositions because the tokens are held
+//! by the proxy wallet. Instead, we call the ProxyWalletFactory.proxy() function
+//! which forwards calls to the user's proxy wallet.
 //!
 //! # Usage
 //!
@@ -19,15 +27,17 @@
 //! ```
 
 use std::str::FromStr;
+use std::time::Duration;
 
-use alloy::primitives::{Address, B256};
+use alloy::primitives::{Address, Bytes, B256, U256};
 use alloy::providers::ProviderBuilder;
 use alloy::signers::local::LocalSigner;
+use alloy::sol;
 use rust_decimal::Decimal;
 use thiserror::Error;
+use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
-use polymarket_client_sdk::ctf::types::RedeemPositionsRequest;
 use polymarket_client_sdk::data::Client as DataClient;
 use polymarket_client_sdk::data::types::request::PositionsRequest;
 use polymarket_client_sdk::data::types::response::Position;
@@ -36,11 +46,50 @@ use polymarket_client_sdk::{derive_proxy_wallet, POLYGON};
 /// USDC contract address on Polygon mainnet.
 const USDC_ADDRESS: &str = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
 
-/// Polygon mainnet chain ID.
-const POLYGON_CHAIN_ID: u64 = 137;
+/// Conditional Tokens Framework contract address on Polygon mainnet.
+const CTF_ADDRESS: &str = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045";
+
+/// Polymarket Proxy Wallet Factory address on Polygon mainnet.
+const PROXY_FACTORY_ADDRESS: &str = "0xaB45c5A4B0c941a2F231C04C3f49182e1A254052";
 
 /// Polygon RPC endpoint.
 const POLYGON_RPC: &str = "https://polygon-rpc.com";
+
+// Define the ProxyWalletFactory contract interface
+sol! {
+    /// Call type for proxy calls (0 = Call, 1 = DelegateCall)
+    #[derive(Debug)]
+    enum CallType {
+        Call,
+        DelegateCall,
+    }
+
+    /// ProxyCall struct for the proxy() function
+    #[derive(Debug)]
+    struct ProxyCall {
+        address to;
+        CallType typeCode;
+        bytes data;
+        uint256 value;
+    }
+
+    /// ProxyWalletFactory contract interface
+    #[sol(rpc)]
+    contract ProxyWalletFactory {
+        function proxy(ProxyCall[] memory calls) public payable returns (bytes[] memory returnValues);
+    }
+
+    /// CTF contract interface (just the redeemPositions function)
+    #[sol(rpc)]
+    contract ConditionalTokens {
+        function redeemPositions(
+            address collateralToken,
+            bytes32 parentCollectionId,
+            bytes32 conditionId,
+            uint256[] calldata indexSets
+        ) external;
+    }
+}
 
 /// Errors that can occur during auto-claim operations.
 #[derive(Debug, Error)]
@@ -149,8 +198,13 @@ impl AutoClaimManager {
     }
 
     /// Redeem a single position by condition ID.
+    ///
+    /// This works by calling ProxyWalletFactory.proxy() which forwards the
+    /// redeemPositions call to our proxy wallet. The proxy wallet then calls
+    /// the CTF contract, so msg.sender for CTF is the proxy wallet (which
+    /// holds the tokens), not the EOA.
     async fn redeem_position(&self, condition_id: B256, size: Decimal) -> Result<RedeemResult, AutoClaimError> {
-        use polymarket_client_sdk::ctf::Client as CtfClient;
+        use alloy::sol_types::SolCall;
 
         // Create provider with wallet for this redemption
         let key_str = self.private_key.strip_prefix("0x").unwrap_or(&self.private_key);
@@ -163,37 +217,88 @@ impl AutoClaimManager {
             .await
             .map_err(|e| AutoClaimError::Connection(e.to_string()))?;
 
-        let ctf_client = CtfClient::new(provider, POLYGON_CHAIN_ID)
-            .map_err(|e| AutoClaimError::ClientInit(e.to_string()))?;
-
-        // Create redeem request for binary market
-        let redeem_req = RedeemPositionsRequest::for_binary_market(
-            self.usdc_address,
-            condition_id,
+        let condition_id_str = format!("0x{}", hex::encode(condition_id));
+        info!(
+            condition_id = %condition_id_str,
+            size = %size,
+            proxy_wallet = %self.proxy_wallet,
+            "Attempting to redeem position via proxy factory"
         );
 
-        let condition_id_str = format!("0x{}", hex::encode(condition_id));
-        info!(condition_id = %condition_id_str, size = %size, "Attempting to redeem position");
+        // Parse contract addresses
+        let ctf_address: Address = CTF_ADDRESS
+            .parse()
+            .map_err(|e| AutoClaimError::ClientInit(format!("Invalid CTF address: {}", e)))?;
+        let proxy_factory_address: Address = PROXY_FACTORY_ADDRESS
+            .parse()
+            .map_err(|e| AutoClaimError::ClientInit(format!("Invalid proxy factory address: {}", e)))?;
 
-        // Execute redemption
-        let result = ctf_client
-            .redeem_positions(&redeem_req)
+        // Encode the redeemPositions call for CTF contract
+        // For binary markets: indexSets = [1, 2] (YES and NO outcomes)
+        let redeem_call = ConditionalTokens::redeemPositionsCall {
+            collateralToken: self.usdc_address,
+            parentCollectionId: B256::ZERO, // No parent collection for top-level positions
+            conditionId: condition_id,
+            indexSets: vec![U256::from(1), U256::from(2)], // Binary market: YES=1, NO=2
+        };
+        let redeem_calldata = redeem_call.abi_encode();
+
+        // Create ProxyCall struct
+        let proxy_call = ProxyCall {
+            to: ctf_address,
+            typeCode: CallType::Call,
+            data: Bytes::from(redeem_calldata),
+            value: U256::ZERO,
+        };
+
+        // Create the ProxyWalletFactory contract instance
+        let proxy_factory = ProxyWalletFactory::new(proxy_factory_address, &provider);
+
+        // Call proxy() with our redemption call
+        // This will forward the call to our proxy wallet, which executes redeemPositions
+        let tx_builder = proxy_factory.proxy(vec![proxy_call]);
+
+        let pending_tx = tx_builder
+            .send()
             .await
-            .map_err(|e| AutoClaimError::RedeemFailed(e.to_string()))?;
+            .map_err(|e| AutoClaimError::RedeemFailed(format!("Failed to send proxy tx: {}", e)))?;
 
-        let tx_hash = format!("0x{}", hex::encode(result.transaction_hash));
+        let tx_hash = *pending_tx.tx_hash();
+        let tx_hash_str = format!("0x{}", hex::encode(tx_hash));
 
         info!(
             condition_id = %condition_id_str,
-            tx_hash = %tx_hash,
-            block = result.block_number,
-            "Successfully redeemed position"
+            tx_hash = %tx_hash_str,
+            "Proxy transaction submitted, waiting for confirmation..."
+        );
+
+        // Wait for transaction to be mined
+        let receipt = pending_tx
+            .get_receipt()
+            .await
+            .map_err(|e| AutoClaimError::RedeemFailed(format!("Failed to get receipt: {}", e)))?;
+
+        let block_number = receipt.block_number.unwrap_or(0);
+
+        // Check if transaction succeeded
+        if !receipt.status() {
+            return Err(AutoClaimError::RedeemFailed(format!(
+                "Transaction reverted in block {}",
+                block_number
+            )));
+        }
+
+        info!(
+            condition_id = %condition_id_str,
+            tx_hash = %tx_hash_str,
+            block = block_number,
+            "Successfully redeemed position via proxy"
         );
 
         Ok(RedeemResult {
             condition_id: condition_id_str,
-            transaction_hash: tx_hash,
-            block_number: result.block_number,
+            transaction_hash: tx_hash_str,
+            block_number,
             size,
         })
     }
@@ -219,22 +324,52 @@ impl AutoClaimManager {
             return Vec::new();
         }
 
-        info!(count = positions.len(), "Found redeemable positions");
+        let estimated_time_secs = if positions.len() > 1 {
+            (positions.len() - 1) as u64 * 12 // 12s delay between each
+        } else {
+            0
+        };
+        info!(
+            count = positions.len(),
+            estimated_time_secs,
+            "Found redeemable positions (processing with rate limit delays)"
+        );
 
         let mut results = Vec::new();
 
-        for position in positions {
+        // Delay between redemptions to avoid RPC rate limiting
+        // Polygon RPC returns "retry in 10s" on rate limit, so we use 12s to be safe
+        const REDEMPTION_DELAY: Duration = Duration::from_secs(12);
+        const RATE_LIMIT_DELAY: Duration = Duration::from_secs(15);
+
+        for (i, position) in positions.iter().enumerate() {
+            // Add delay before each redemption (except the first one)
+            if i > 0 {
+                debug!("Waiting {}s before next redemption to avoid rate limiting", REDEMPTION_DELAY.as_secs());
+                sleep(REDEMPTION_DELAY).await;
+            }
+
             match self.redeem_position(position.condition_id, position.size).await {
                 Ok(result) => {
                     results.push(result);
                 }
                 Err(AutoClaimError::RedeemFailed(msg)) => {
-                    // Log but continue with other positions
-                    warn!(
-                        condition_id = %format!("0x{}", hex::encode(position.condition_id)),
-                        error = %msg,
-                        "Failed to redeem position"
-                    );
+                    // Check if it's a rate limit error
+                    if msg.contains("Too many requests") || msg.contains("rate limit") {
+                        warn!(
+                            condition_id = %format!("0x{}", hex::encode(position.condition_id)),
+                            "Rate limited, waiting {}s before continuing",
+                            RATE_LIMIT_DELAY.as_secs()
+                        );
+                        sleep(RATE_LIMIT_DELAY).await;
+                    } else {
+                        // Log but continue with other positions
+                        warn!(
+                            condition_id = %format!("0x{}", hex::encode(position.condition_id)),
+                            error = %msg,
+                            "Failed to redeem position"
+                        );
+                    }
                 }
                 Err(e) => {
                     error!(
