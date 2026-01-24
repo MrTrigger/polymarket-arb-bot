@@ -40,7 +40,7 @@ log_level = "info"
 [trading]
 # REQUIRED: Maximum exposure per market in USDC
 #   Hard cap on position size for a single market
-max_market_exposure = 1000.0
+max_market_exposure = 300.0
 
 # REQUIRED: Maximum total exposure across ALL markets in USDC
 #   Hard cap on total capital at risk at any time

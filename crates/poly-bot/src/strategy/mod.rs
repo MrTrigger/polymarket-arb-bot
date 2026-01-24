@@ -166,6 +166,7 @@ use crate::data_source::{
 };
 use crate::executor::{Executor, ExecutorError, OrderRequest, OrderResult, OrderType};
 use crate::executor::chase::{ChaseStopReason, PriceChaser};
+use crate::order_manager::{PendingOrderTracker, PendingOrderType};
 use crate::state::{ActiveWindow, GlobalState};
 use crate::types::{EngineType, Inventory, MarketState};
 
@@ -302,10 +303,6 @@ struct TrackedMarket {
     no_toxic_warning: Option<ToxicFlowWarning>,
     /// Active maker orders for this market (keyed by order_id).
     active_maker_orders: HashMap<String, ActiveMakerOrder>,
-    /// Whether we have a pending arb order (not yet filled/cancelled).
-    pending_arb_order: bool,
-    /// Whether we have a pending directional order (not yet filled/cancelled).
-    pending_directional_order: bool,
     /// Last simulated timestamp when we placed an order (for cooldown).
     /// Uses DateTime<Utc> to work correctly in both live and backtest modes.
     last_order_timestamp: Option<DateTime<Utc>>,
@@ -361,8 +358,6 @@ impl TrackedMarket {
             yes_toxic_warning: None,
             no_toxic_warning: None,
             active_maker_orders: HashMap::new(),
-            pending_arb_order: false,
-            pending_directional_order: false,
             last_order_timestamp: None,
             position_manager: position::PositionManager::new(position_config),
             min_order_size,
@@ -648,6 +643,8 @@ pub struct StrategyLoop<D: DataSource, E: Executor> {
     simulated_time: DateTime<Utc>,
     /// Price chaser for maker execution with fill polling.
     chaser: PriceChaser,
+    /// Centralized pending order tracker (replaces per-market boolean flags).
+    pending_tracker: PendingOrderTracker,
 }
 
 impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
@@ -722,6 +719,7 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                 max_chase_time_ms,
                 dec!(0.005), // 0.5% minimum margin
             )),
+            pending_tracker: PendingOrderTracker::new(),
         }
     }
 
@@ -1194,11 +1192,10 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             };
             market.record_trade(cost, up_cost, down_cost, seconds_remaining);
 
-            // Clear pending order flags on fill
+            // Clear pending order tracking on fill
             // Once a fill arrives, has_position() will also return true,
             // but clear these for completeness
-            market.pending_arb_order = false;
-            market.pending_directional_order = false;
+            self.pending_tracker.clear_all(&event.event_id);
 
             // Update global state inventory
             let pos = crate::state::InventoryPosition {
@@ -1603,7 +1600,7 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                         );
                         continue; // Silent skip - already have position
                     }
-                    if market.pending_arb_order {
+                    if self.pending_tracker.is_pending(&event_id, PendingOrderType::Arbitrage) {
                         trace!(
                             "Already have pending arb order for {}, skipping",
                             event_id
@@ -1676,7 +1673,7 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                     let market = self.markets.get(&event_id).unwrap();
 
                     // Check if we already have a pending directional order
-                    if market.pending_directional_order {
+                    if self.pending_tracker.is_pending(&event_id, PendingOrderType::Directional) {
                         trace!(
                             "Already have pending directional order for {}, skipping",
                             event_id
@@ -1934,9 +1931,7 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
         sizing: &SizingResult,
     ) -> Result<TradeAction, StrategyError> {
         // Mark pending BEFORE placing orders to prevent duplicate submissions
-        if let Some(market) = self.markets.get_mut(&opportunity.event_id) {
-            market.pending_arb_order = true;
-        }
+        self.pending_tracker.register(&opportunity.event_id, PendingOrderType::Arbitrage);
 
         // Generate request IDs
         let req_id_base = self.decision_counter;
@@ -1983,10 +1978,8 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             }
             Err(e) => {
                 warn!("YES order failed: {}", e);
-                // Clear pending flag on failure
-                if let Some(market) = self.markets.get_mut(&opportunity.event_id) {
-                    market.pending_arb_order = false;
-                }
+                // Clear pending tracking on failure
+                self.pending_tracker.clear(&opportunity.event_id, PendingOrderType::Arbitrage);
                 // Only count system errors (connection, timeout, internal) for circuit breaker
                 // FOK rejections and market conditions are normal and should NOT trip it
                 if e.is_system_error() && self.state.record_failure(self.config.max_consecutive_failures) {
@@ -2063,10 +2056,8 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
         let yes_pending = yes_result.as_ref().map(|r| r.is_pending()).unwrap_or(false);
         let no_pending = no_result.as_ref().map(|r| r.is_pending()).unwrap_or(false);
 
-        if !yes_pending && !no_pending
-            && let Some(market) = self.markets.get_mut(&opportunity.event_id)
-        {
-            market.pending_arb_order = false;
+        if !yes_pending && !no_pending {
+            self.pending_tracker.clear(&opportunity.event_id, PendingOrderType::Arbitrage);
         }
 
         Ok(TradeAction::Execute)
@@ -2098,8 +2089,8 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             .unwrap_or(0);
 
         // Mark pending, set cooldown timer, and reserve budget BEFORE placing orders
+        self.pending_tracker.register(&event_id, PendingOrderType::Directional);
         if let Some(market) = self.markets.get_mut(&event_id) {
-            market.pending_directional_order = true;
             // Use simulated time for cooldown (works in both live and backtest)
             let current_time = market.window_end - chrono::Duration::seconds(market.state.seconds_remaining);
             market.last_order_timestamp = Some(current_time);
@@ -2115,9 +2106,9 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             ),
             None => {
                 warn!("No tracked market for directional: {}", event_id);
-                // Clear pending flag and release reservation since we won't place orders
+                // Clear pending tracking and release reservation since we won't place orders
+                self.pending_tracker.clear(&event_id, PendingOrderType::Directional);
                 if let Some(market) = self.markets.get_mut(&event_id) {
-                    market.pending_directional_order = false;
                     market.release_reservation(total_size, seconds_remaining);
                 }
                 return Ok(TradeAction::SkipSizing);
@@ -2149,9 +2140,9 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                         Some(live_book) => live_book.best_ask,
                         None => {
                             warn!(token_id = %yes_token_id, "No orderbook for UP token, skipping");
-                            // Clear pending flag and release reservation
+                            // Clear pending tracking and release reservation
+                            self.pending_tracker.clear(&event_id, PendingOrderType::Directional);
                             if let Some(market) = self.markets.get_mut(&event_id) {
-                                market.pending_directional_order = false;
                                 market.release_reservation(total_size, seconds_remaining);
                             }
                             return Ok(TradeAction::SkipSizing);
@@ -2161,9 +2152,9 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                         Some(live_book) => live_book.best_ask,
                         None => {
                             warn!(token_id = %no_token_id, "No orderbook for DOWN token, skipping");
-                            // Clear pending flag and release reservation
+                            // Clear pending tracking and release reservation
+                            self.pending_tracker.clear(&event_id, PendingOrderType::Directional);
                             if let Some(market) = self.markets.get_mut(&event_id) {
-                                market.pending_directional_order = false;
                                 market.release_reservation(total_size, seconds_remaining);
                             }
                             return Ok(TradeAction::SkipSizing);
@@ -2176,18 +2167,18 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
 
         if up_price <= Decimal::ZERO {
             debug!("Invalid UP price {} for {}", up_price, event_id);
-            // Clear pending flag and release reservation
+            // Clear pending tracking and release reservation
+            self.pending_tracker.clear(&event_id, PendingOrderType::Directional);
             if let Some(market) = self.markets.get_mut(&event_id) {
-                market.pending_directional_order = false;
                 market.release_reservation(total_size, seconds_remaining);
             }
             return Ok(TradeAction::SkipSizing);
         }
         if down_price <= Decimal::ZERO {
             debug!("Invalid DOWN price {} for {}", down_price, event_id);
-            // Clear pending flag and release reservation
+            // Clear pending tracking and release reservation
+            self.pending_tracker.clear(&event_id, PendingOrderType::Directional);
             if let Some(market) = self.markets.get_mut(&event_id) {
-                market.pending_directional_order = false;
                 market.release_reservation(total_size, seconds_remaining);
             }
             return Ok(TradeAction::SkipSizing);
@@ -2639,15 +2630,13 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             self.state.record_success();
         }
 
-        // Clear pending flag only if orders are NOT pending (i.e., filled or rejected)
-        // If orders are pending on the exchange, keep the flag true to prevent duplicates
-        if !up_pending && !down_pending
-            && let Some(market) = self.markets.get_mut(&event_id)
-        {
-            market.pending_directional_order = false;
+        // Clear pending tracking only if orders are NOT pending (i.e., filled or rejected)
+        // If orders are pending on the exchange, keep tracking to prevent duplicates
+        if !up_pending && !down_pending {
+            self.pending_tracker.clear(&event_id, PendingOrderType::Directional);
 
             // If no fills occurred, release the reservation (budget stays reserved until here)
-            if total_volume == Decimal::ZERO {
+            if total_volume == Decimal::ZERO && self.markets.contains_key(&event_id) {
                 // Note: commit_reservation already released the reservation above,
                 // but if we didn't enter that block, we need to release here
                 debug!(

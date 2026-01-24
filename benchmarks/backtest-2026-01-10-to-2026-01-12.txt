@@ -1,0 +1,54 @@
+# Backtest Benchmark - Pre-Refactoring Baseline
+# Run: 2026-01-24
+# Command: cargo run -p poly-bot --release -- --mode backtest --assets BTC --start 2026-01-10 --end 2026-01-12
+
+## Config Summary
+- Mode: backtest
+- Assets: BTC
+- Window duration: 15min
+- Max market exposure: 300 USDC
+- Max total exposure: 1000 USDC
+- Base order size: 75 USDC
+- Available balance: 1000 USDC
+- Execution mode: Market
+- Chase enabled: false
+- Engines: Directional only
+
+## Results
+
+Period: 2026-01-10 00:00 to 2026-01-12 23:59
+Duration: 15.83 seconds
+
+### Performance
+- Initial Balance:      $1000.00
+- Final Balance:        $1831.43
+- Total P&L:            $831.43
+- Return:               83.14%
+
+### Risk Metrics
+- Win Rate:             83.3%
+- Profit Factor:        15.77
+- Sharpe Ratio:         133.55
+- Sortino Ratio:        811.51
+- Calmar Ratio:         96446.64
+- Max Drawdown:         1.60%
+
+### Trading Activity
+- Opportunities Found:  1923830
+- Opportunities Skipped: 2541
+- Trades Executed:      43
+- Trades Rejected:      0
+- Volume Traded:        $999.03
+- Fees Paid:            $6.4992
+- Rebates Earned:       $0.0000
+- Net Fees:             $6.4992
+
+## Key Metrics to Match After Refactoring
+These values should remain identical (or very close) after refactoring:
+
+1. Trades Executed: 43
+2. Total P&L: $831.43
+3. Final Balance: $1831.43
+4. Win Rate: 83.3%
+5. Volume Traded: $999.03
+6. Fees Paid: $6.4992

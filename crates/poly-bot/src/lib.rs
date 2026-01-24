@@ -26,6 +26,7 @@ pub mod data_source;
 pub mod executor;
 pub mod mode;
 pub mod observability;
+pub mod order_manager;
 pub mod risk;
 pub mod state;
 pub mod strategy;
@@ -78,6 +79,11 @@ pub use risk::{PreTradeCheck, PreTradeRejection, RiskCheckConfig, RiskCheckResul
 pub use risk::{
     ChaseReason, CloseReason, LegRiskAction, LegRiskAssessment, LegRiskConfig, LegRiskManager,
     LegState, LegStatus,
+};
+pub use order_manager::{
+    ChasingOrderManager, ChasingOrderManagerConfig, ExecutionResult,
+    OrderIntent, OrderHandle, OrderHandleId, OrderManager, OrderMetadata, OrderStatus, OrderUpdate,
+    PendingOrderTracker, PendingOrderType, Rejected, RejectionReason, SimpleOrderManager, Urgency,
 };
 pub use types::{
     EngineType, Inventory, MarketSession, MarketSessionError, MarketState, OrderBook, Position,
