@@ -1,6 +1,7 @@
-import { useEffect } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { useDashboardStore } from "@/lib/store";
+import { getWebSocketManager, ensureConnected } from "@/lib/websocket-manager";
 import type {
   ActiveMarket,
   Anomaly,
@@ -11,7 +12,6 @@ import type {
   Position,
   Trade,
 } from "@/lib/types";
-import { useWebSocket, type WebSocketConfig } from "./useWebSocket";
 
 /**
  * Return type for the useDashboardState hook.
@@ -22,8 +22,6 @@ export interface UseDashboardStateReturn {
   connectionStatus: ConnectionStatus;
   /** Last WebSocket error, null if none. */
   connectionError: string | null;
-  /** Time of last message received. */
-  lastMessageTime: Date | null;
   /** Manually connect to WebSocket. */
   connect: () => void;
   /** Manually disconnect from WebSocket. */
@@ -34,6 +32,8 @@ export interface UseDashboardStateReturn {
   initialized: boolean;
   /** Time of last store update. */
   lastUpdate: Date | null;
+  /** Snapshot timestamp from backend (ISO 8601). */
+  snapshotTimestamp: string | null;
 
   // Metrics
   /** Current metrics snapshot. */
@@ -75,69 +75,49 @@ export interface UseDashboardStateReturn {
 /**
  * Combined hook for WebSocket connection and dashboard state.
  *
- * This hook:
- * 1. Connects to the WebSocket server
- * 2. Updates the Zustand store from incoming snapshots
- * 3. Provides convenient access to all dashboard state
+ * Uses a SINGLETON WebSocket connection shared across ALL components.
+ * This prevents multiple connections when many components use this hook.
  *
- * Uses useShallow for array/object comparisons to minimize re-renders.
- *
- * @param config - WebSocket configuration options
  * @returns Combined WebSocket and dashboard state
- *
- * @example
- * ```tsx
- * function Dashboard() {
- *   const {
- *     connectionStatus,
- *     metrics,
- *     markets,
- *     tradingEnabled,
- *   } = useDashboardState();
- *
- *   if (connectionStatus !== "connected") {
- *     return <ConnectionStatus status={connectionStatus} />;
- *   }
- *
- *   return (
- *     <div>
- *       <MetricsCards metrics={metrics} />
- *       <MarketsGrid markets={markets} />
- *     </div>
- *   );
- * }
- * ```
  */
-export function useDashboardState(
-  config?: WebSocketConfig
-): UseDashboardStateReturn {
-  // WebSocket connection
-  const {
-    status: connectionStatus,
-    snapshot: wsSnapshot,
-    error: connectionError,
-    connect,
-    disconnect,
-    lastMessageTime,
-  } = useWebSocket(config);
+export function useDashboardState(): UseDashboardStateReturn {
+  // Ensure WebSocket is connected (singleton - only connects once)
+  useEffect(() => {
+    ensureConnected();
+  }, []);
 
-  // Store actions
-  const updateFromSnapshot = useDashboardStore(
-    (state) => state.updateFromSnapshot
+  // Subscribe to WebSocket status changes
+  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>(
+    () => getWebSocketManager().getStatus()
+  );
+  const [connectionError, setConnectionError] = useState<string | null>(
+    () => getWebSocketManager().getLastError()
   );
 
-  // Update store when WebSocket receives a new snapshot
   useEffect(() => {
-    if (wsSnapshot) {
-      updateFromSnapshot(wsSnapshot);
-    }
-  }, [wsSnapshot, updateFromSnapshot]);
+    const manager = getWebSocketManager();
+    const unsubscribe = manager.onStatusChange((status) => {
+      setConnectionStatus(status);
+      setConnectionError(manager.getLastError());
+    });
+    return unsubscribe;
+  }, []);
+
+  // Connection controls
+  const connect = useCallback(() => {
+    getWebSocketManager().connect();
+  }, []);
+
+  const disconnect = useCallback(() => {
+    getWebSocketManager().disconnect();
+  }, []);
 
   // Store state - using useShallow for efficiency
-  const { initialized, lastUpdate } = useDashboardStore(
+  const { initialized, lastUpdate, snapshotTimestamp } = useDashboardStore(
     useShallow((state) => ({
       initialized: state.initialized,
       lastUpdate: state.lastUpdate,
+      snapshotTimestamp: state.snapshot?.timestamp ?? null,
     }))
   );
 
@@ -200,13 +180,13 @@ export function useDashboardState(
     // Connection
     connectionStatus,
     connectionError,
-    lastMessageTime,
     connect,
     disconnect,
 
     // State
     initialized,
     lastUpdate,
+    snapshotTimestamp,
 
     // Metrics
     metrics,

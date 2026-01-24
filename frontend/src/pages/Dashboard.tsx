@@ -35,21 +35,21 @@ export function Dashboard() {
   }
 
   return (
-    <div className="flex h-[calc(100vh-73px)] flex-col gap-4 overflow-hidden p-4">
+    <div className="flex flex-col gap-4 p-4">
       {/* Alert banner section */}
-      <section className="shrink-0">
+      <section>
         <AnomalyAlerts />
       </section>
 
       {/* Top section: Metrics Cards */}
-      <section className="shrink-0">
+      <section>
         <MetricsCards />
       </section>
 
-      {/* Middle section: 3-column layout for desktop */}
-      <section className="grid min-h-0 flex-1 grid-cols-1 gap-4 xl:grid-cols-12">
+      {/* Middle section: 2-column layout for desktop */}
+      <section className="grid grid-cols-1 gap-4 xl:grid-cols-12">
         {/* Left column: Markets Grid (main content) */}
-        <div className="flex min-h-0 flex-col xl:col-span-8">
+        <div className="flex flex-col xl:col-span-8">
           <div className="mb-2 flex items-center justify-between">
             <h2 className="text-sm font-medium text-muted-foreground">
               Active Markets
@@ -62,33 +62,21 @@ export function Dashboard() {
               </div>
             )}
           </div>
-          <div className="min-h-0 flex-1 overflow-auto">
-            <MarketsGrid />
-          </div>
+          <MarketsGrid />
         </div>
 
         {/* Right column: Control Panel, Account Info, Equity Curve, Session Metrics, Circuit Breaker stacked */}
-        <div className="flex min-h-0 flex-col gap-4 overflow-auto xl:col-span-4">
-          <div className="shrink-0">
-            <ControlPanel />
-          </div>
-          <div className="shrink-0">
-            <AccountInfo />
-          </div>
-          <div className="shrink-0">
-            <EquityCurve />
-          </div>
-          <div className="shrink-0">
-            <SessionMetrics />
-          </div>
-          <div className="shrink-0">
-            <CircuitBreakerStatus />
-          </div>
+        <div className="flex flex-col gap-4 xl:col-span-4">
+          <ControlPanel />
+          <AccountInfo />
+          <EquityCurve />
+          <SessionMetrics />
+          <CircuitBreakerStatus />
         </div>
       </section>
 
       {/* Bottom section: Logs (collapsible) */}
-      <section className="shrink-0">
+      <section>
         <LogWindow />
       </section>
     </div>

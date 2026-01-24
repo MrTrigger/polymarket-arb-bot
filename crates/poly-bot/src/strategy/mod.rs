@@ -52,6 +52,9 @@ use tracing::{debug, info, trace, warn};
 
 use poly_common::types::{CryptoAsset, Outcome, Side};
 use crate::executor::chase::ChaseConfig;
+use crate::order_manager::{
+    AsyncOrderManager, AsyncOrderManagerConfig, OrderIntent, OrderManagerTask, OrderUpdateEvent,
+};
 
 // ============================================================================
 // Active Maker Order Tracking
@@ -641,10 +644,17 @@ pub struct StrategyLoop<D: DataSource, E: Executor> {
     atr_tracker: atr::AtrTracker,
     /// Simulated time for backtest mode (uses event timestamps instead of wall-clock time).
     simulated_time: DateTime<Utc>,
-    /// Price chaser for maker execution with fill polling.
+    /// Price chaser for maker execution with fill polling (legacy - used when async order manager is not enabled).
     chaser: PriceChaser,
     /// Centralized pending order tracker (replaces per-market boolean flags).
     pending_tracker: PendingOrderTracker,
+    /// Async order manager for non-blocking order execution (optional).
+    /// When Some, directional orders are submitted via channels and chasing runs in background.
+    async_order_manager: Option<AsyncOrderManager>,
+    /// Receiver for order updates from async order manager.
+    order_update_rx: Option<mpsc::Receiver<OrderUpdateEvent>>,
+    /// Handle to the order manager background task.
+    order_manager_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
@@ -720,6 +730,9 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                 dec!(0.005), // 0.5% minimum margin
             )),
             pending_tracker: PendingOrderTracker::new(),
+            async_order_manager: None,
+            order_update_rx: None,
+            order_manager_task: None,
         }
     }
 
@@ -737,6 +750,43 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
     pub fn with_multi_observability(mut self, sender: mpsc::Sender<MultiEngineDecision>) -> Self {
         self.multi_obs_sender = Some(sender);
         self
+    }
+
+    /// Enable async order management with a separate executor for the order manager task.
+    ///
+    /// When enabled, directional orders are submitted to a background task that handles
+    /// price chasing without blocking the main event loop. Fill notifications are received
+    /// via channel and processed in the main loop.
+    ///
+    /// **Important**: The `order_executor` should be a separate instance from the strategy's
+    /// executor. For live trading, create two LiveExecutor instances. For paper/backtest mode,
+    /// async order management is typically not needed.
+    ///
+    /// # Arguments
+    /// * `order_executor` - Executor instance for the order manager task to use
+    /// * `config` - Configuration for the async order manager
+    pub fn with_async_order_manager<OE: Executor + Send + Sync + 'static>(
+        mut self,
+        order_executor: OE,
+        config: AsyncOrderManagerConfig,
+    ) -> Self {
+        let (order_manager, order_update_rx, task_handle) = OrderManagerTask::spawn(
+            order_executor,
+            config,
+            self.state.clone(),
+        );
+
+        self.async_order_manager = Some(order_manager);
+        self.order_update_rx = Some(order_update_rx);
+        self.order_manager_task = Some(task_handle);
+
+        info!("Async order management enabled - chasing will run in background task");
+        self
+    }
+
+    /// Check if async order management is enabled.
+    pub fn has_async_order_manager(&self) -> bool {
+        self.async_order_manager.is_some()
     }
 
     /// Get the current engines configuration.
@@ -781,48 +831,172 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
     }
 
     /// Run the strategy loop until shutdown or error.
+    ///
+    /// When async order management is enabled, this loop uses `tokio::select!` to
+    /// concurrently process market data events and order fill notifications.
     pub async fn run(&mut self) -> Result<(), StrategyError> {
-        info!("Strategy loop starting");
+        info!("Strategy loop starting (async_order_manager={})", self.async_order_manager.is_some());
 
         loop {
             // Check for shutdown
             if self.state.control.is_shutdown_requested() {
                 info!("Shutdown requested, stopping strategy loop");
+                // Shutdown async order manager if present
+                if let Some(ref manager) = self.async_order_manager {
+                    manager.shutdown().await;
+                }
                 return Err(StrategyError::Shutdown);
             }
 
-            // Get next event
-            let event = match self.data_source.next_event().await {
-                Ok(Some(event)) => event,
-                Ok(None) => {
-                    debug!("Data source exhausted");
-                    break;
-                }
-                Err(DataSourceError::Shutdown) => {
-                    info!("Data source shutdown");
-                    return Err(StrategyError::Shutdown);
-                }
-                Err(e) => {
-                    warn!("Data source error: {}", e);
-                    continue;
-                }
-            };
+            // Use select! to handle both data events and order updates concurrently
+            tokio::select! {
+                biased;
 
-            // Process the event
-            let start = std::time::Instant::now();
-            self.process_event(event).await?;
-            let elapsed_us = start.elapsed().as_micros() as u64;
+                // High priority: Process order updates from async order manager
+                order_update = async {
+                    match &mut self.order_update_rx {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending::<Option<OrderUpdateEvent>>().await,
+                    }
+                } => {
+                    if let Some(update) = order_update {
+                        self.handle_order_update(update);
+                    } else {
+                        // Order manager channel closed - this shouldn't happen normally
+                        warn!("Order update channel closed unexpectedly");
+                        self.order_update_rx = None;
+                    }
+                }
 
-            // Track metrics
-            self.state.metrics.inc_events();
+                // Process market data events
+                event_result = self.data_source.next_event() => {
+                    match event_result {
+                        Ok(Some(event)) => {
+                            let start = std::time::Instant::now();
+                            self.process_event(event).await?;
+                            let elapsed_us = start.elapsed().as_micros() as u64;
 
-            // Log slow processing
-            if elapsed_us > 1000 {
-                debug!("Slow event processing: {}us", elapsed_us);
+                            // Track metrics
+                            self.state.metrics.inc_events();
+
+                            // Log slow processing
+                            if elapsed_us > 1000 {
+                                debug!("Slow event processing: {}us", elapsed_us);
+                            }
+                        }
+                        Ok(None) => {
+                            debug!("Data source exhausted");
+                            break;
+                        }
+                        Err(DataSourceError::Shutdown) => {
+                            info!("Data source shutdown");
+                            if let Some(ref manager) = self.async_order_manager {
+                                manager.shutdown().await;
+                            }
+                            return Err(StrategyError::Shutdown);
+                        }
+                        Err(e) => {
+                            warn!("Data source error: {}", e);
+                            continue;
+                        }
+                    }
+                }
             }
         }
 
+        // Shutdown async order manager cleanly
+        if let Some(ref manager) = self.async_order_manager {
+            manager.shutdown().await;
+        }
+
         Ok(())
+    }
+
+    /// Handle an order update from the async order manager.
+    fn handle_order_update(&mut self, update: OrderUpdateEvent) {
+        match update {
+            OrderUpdateEvent::Fill {
+                handle_id,
+                market_id,
+                token_id,
+                outcome,
+                side,
+                filled_size,
+                avg_price,
+                fee,
+                is_complete,
+            } => {
+                info!(
+                    handle_id = %handle_id,
+                    market_id = %market_id,
+                    token_id = %token_id,
+                    outcome = ?outcome,
+                    side = ?side,
+                    filled_size = %filled_size,
+                    avg_price = %avg_price,
+                    fee = %fee,
+                    complete = is_complete,
+                    "Order filled (async)"
+                );
+
+                // Update inventory in global state
+                if let Some(mut inv) = self.state.market_data.inventory.get_mut(&market_id) {
+                    let position_delta = match (outcome, side) {
+                        (Outcome::Yes, Side::Buy) => filled_size,
+                        (Outcome::Yes, Side::Sell) => -filled_size,
+                        (Outcome::No, Side::Buy) => filled_size,
+                        (Outcome::No, Side::Sell) => -filled_size,
+                    };
+                    let cost_delta = avg_price * filled_size + fee;
+                    match outcome {
+                        Outcome::Yes => {
+                            inv.yes_shares += position_delta;
+                            inv.yes_cost_basis += cost_delta;
+                        }
+                        Outcome::No => {
+                            inv.no_shares += position_delta;
+                            inv.no_cost_basis += cost_delta;
+                        }
+                    }
+                }
+
+                // Clear pending tracker if complete
+                if is_complete {
+                    self.pending_tracker.clear(&market_id, PendingOrderType::Directional);
+                }
+            }
+
+            OrderUpdateEvent::Rejected { handle_id, market_id, reason } => {
+                warn!(
+                    handle_id = %handle_id,
+                    market_id = %market_id,
+                    reason = %reason,
+                    "Order rejected (async)"
+                );
+                self.pending_tracker.clear(&market_id, PendingOrderType::Directional);
+            }
+
+            OrderUpdateEvent::Cancelled { handle_id, market_id } => {
+                debug!(
+                    handle_id = %handle_id,
+                    market_id = %market_id,
+                    "Order cancelled (async)"
+                );
+                self.pending_tracker.clear(&market_id, PendingOrderType::Directional);
+            }
+
+            OrderUpdateEvent::ChaseEnded { handle_id, market_id, reason, filled_size, avg_price } => {
+                info!(
+                    handle_id = %handle_id,
+                    market_id = %market_id,
+                    reason = ?reason,
+                    filled_size = %filled_size,
+                    avg_price = %avg_price,
+                    "Chase ended (async)"
+                );
+                self.pending_tracker.clear(&market_id, PendingOrderType::Directional);
+            }
+        }
     }
 
     /// Process a single market event.
@@ -2115,54 +2289,34 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             }
         };
 
-        // Fetch FRESH prices from REST API - WebSocket cache may be stale due to chase blocking
+        // Use WebSocket orderbook cache for prices - it's updated in real-time
         // CRITICAL: Use ASK prices since we're BUYING - we pay the ask, not the bid!
+        // NOTE: Previously used REST API fetch which blocked the event loop for 200-500ms per call,
+        // causing spot price updates to be missed. The WebSocket cache is sufficiently fresh.
         let (up_price, down_price) = {
-            // Try REST API first for truly fresh prices
-            let up_bbo = self.executor.fetch_fresh_bbo(&yes_token_id).await;
-            let down_bbo = self.executor.fetch_fresh_bbo(&no_token_id).await;
-
-            match (up_bbo, down_bbo) {
-                (Some((_up_bid, up_ask)), Some((_down_bid, down_ask))) => {
-                    info!(
-                        event_id = %event_id,
-                        up_ask = %up_ask,
-                        down_ask = %down_ask,
-                        "Using FRESH ASK prices from REST API (we pay ask when buying)"
-                    );
-                    (up_ask, down_ask)
+            let up_price = match self.state.market_data.order_books.get(&yes_token_id) {
+                Some(live_book) => live_book.best_ask,
+                None => {
+                    warn!(token_id = %yes_token_id, "No orderbook for UP token, skipping");
+                    self.pending_tracker.clear(&event_id, PendingOrderType::Directional);
+                    if let Some(market) = self.markets.get_mut(&event_id) {
+                        market.release_reservation(total_size, seconds_remaining);
+                    }
+                    return Ok(TradeAction::SkipSizing);
                 }
-                _ => {
-                    // Fallback to WebSocket cache if API fails
-                    // Use ASK prices since we're BUYING
-                    warn!(event_id = %event_id, "REST API failed, falling back to WebSocket cache");
-                    let up_price = match self.state.market_data.order_books.get(&yes_token_id) {
-                        Some(live_book) => live_book.best_ask,
-                        None => {
-                            warn!(token_id = %yes_token_id, "No orderbook for UP token, skipping");
-                            // Clear pending tracking and release reservation
-                            self.pending_tracker.clear(&event_id, PendingOrderType::Directional);
-                            if let Some(market) = self.markets.get_mut(&event_id) {
-                                market.release_reservation(total_size, seconds_remaining);
-                            }
-                            return Ok(TradeAction::SkipSizing);
-                        }
-                    };
-                    let down_price = match self.state.market_data.order_books.get(&no_token_id) {
-                        Some(live_book) => live_book.best_ask,
-                        None => {
-                            warn!(token_id = %no_token_id, "No orderbook for DOWN token, skipping");
-                            // Clear pending tracking and release reservation
-                            self.pending_tracker.clear(&event_id, PendingOrderType::Directional);
-                            if let Some(market) = self.markets.get_mut(&event_id) {
-                                market.release_reservation(total_size, seconds_remaining);
-                            }
-                            return Ok(TradeAction::SkipSizing);
-                        }
-                    };
-                    (up_price, down_price)
+            };
+            let down_price = match self.state.market_data.order_books.get(&no_token_id) {
+                Some(live_book) => live_book.best_ask,
+                None => {
+                    warn!(token_id = %no_token_id, "No orderbook for DOWN token, skipping");
+                    self.pending_tracker.clear(&event_id, PendingOrderType::Directional);
+                    if let Some(market) = self.markets.get_mut(&event_id) {
+                        market.release_reservation(total_size, seconds_remaining);
+                    }
+                    return Ok(TradeAction::SkipSizing);
                 }
-            }
+            };
+            (up_price, down_price)
         };
 
         if up_price <= Decimal::ZERO {
@@ -2332,10 +2486,45 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                 _ => {}
             }
 
-            // Use chaser for limit orders if chase is enabled
-            // The other_leg_price is the NO price (for arb ceiling calculation)
+            // Submit order - use async order manager if available, otherwise use direct execution
             let other_leg_price = down_price;
-            let up_result = if use_chase {
+            let up_result = if let Some(ref order_manager) = self.async_order_manager {
+                // ASYNC PATH: Submit to background task (non-blocking)
+                // Fills will be received via order_update_rx channel
+                let intent = OrderIntent::new(
+                    event_id.clone(),
+                    yes_token_id.clone(),
+                    Outcome::Yes,
+                    Side::Buy,
+                    up_shares_final,
+                    up_price,
+                );
+                match order_manager.submit(intent, other_leg_price).await {
+                    Ok(handle) => {
+                        debug!(
+                            handle_id = %handle.id,
+                            "UP order submitted to async order manager"
+                        );
+                        // Order is now managed by background task - mark as pending
+                        // Actual fill will come via order_update_rx
+                        up_pending = true;
+                        Ok(OrderResult::Pending(crate::executor::PendingOrder {
+                            request_id: format!("dir-{}-up", req_id_base),
+                            order_id: handle.id.0.clone(),
+                            timestamp: Utc::now(),
+                        }))
+                    }
+                    Err(rejected) => {
+                        warn!(reason = %rejected.reason, "UP order rejected by order manager");
+                        Ok(OrderResult::Rejected(crate::executor::OrderRejection {
+                            request_id: format!("dir-{}-up", req_id_base),
+                            reason: rejected.reason.to_string(),
+                            timestamp: Utc::now(),
+                        }))
+                    }
+                }
+            } else if use_chase {
+                // SYNC CHASE PATH: Direct chasing (blocks event loop - legacy)
                 const MAX_POST_ONLY_RETRIES: u32 = 3;
                 let mut current_order = up_order;
                 let mut post_only_retries = 0u32;
@@ -2420,6 +2609,7 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                     }
                 }
             } else {
+                // DIRECT PATH: Simple order placement (no chasing)
                 self.executor.place_order(up_order).await
             };
             match up_result {
@@ -2471,10 +2661,42 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                 _ => {}
             }
 
-            // Use chaser for limit orders if chase is enabled
-            // The other_leg_price is the YES price (for arb ceiling calculation)
+            // Submit order - use async order manager if available, otherwise use direct execution
             let other_leg_price = up_price;
-            let down_result = if use_chase {
+            let down_result = if let Some(ref order_manager) = self.async_order_manager {
+                // ASYNC PATH: Submit to background task (non-blocking)
+                let intent = OrderIntent::new(
+                    event_id.clone(),
+                    no_token_id.clone(),
+                    Outcome::No,
+                    Side::Buy,
+                    down_shares_final,
+                    down_price,
+                );
+                match order_manager.submit(intent, other_leg_price).await {
+                    Ok(handle) => {
+                        debug!(
+                            handle_id = %handle.id,
+                            "DOWN order submitted to async order manager"
+                        );
+                        down_pending = true;
+                        Ok(OrderResult::Pending(crate::executor::PendingOrder {
+                            request_id: format!("dir-{}-down", req_id_base),
+                            order_id: handle.id.0.clone(),
+                            timestamp: Utc::now(),
+                        }))
+                    }
+                    Err(rejected) => {
+                        warn!(reason = %rejected.reason, "DOWN order rejected by order manager");
+                        Ok(OrderResult::Rejected(crate::executor::OrderRejection {
+                            request_id: format!("dir-{}-down", req_id_base),
+                            reason: rejected.reason.to_string(),
+                            timestamp: Utc::now(),
+                        }))
+                    }
+                }
+            } else if use_chase {
+                // SYNC CHASE PATH: Direct chasing (blocks event loop - legacy)
                 const MAX_POST_ONLY_RETRIES: u32 = 3;
                 let mut current_order = down_order;
                 let mut post_only_retries = 0u32;
@@ -2559,6 +2781,7 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                     }
                 }
             } else {
+                // DIRECT PATH: Simple order placement (no chasing)
                 self.executor.place_order(down_order).await
             };
             match down_result {

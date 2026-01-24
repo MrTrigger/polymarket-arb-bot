@@ -81,8 +81,9 @@ pub use risk::{
     LegState, LegStatus,
 };
 pub use order_manager::{
-    ChasingOrderManager, ChasingOrderManagerConfig, ExecutionResult,
-    OrderIntent, OrderHandle, OrderHandleId, OrderManager, OrderMetadata, OrderStatus, OrderUpdate,
+    AsyncOrderManager, AsyncOrderManagerConfig, ChasingOrderManager, ChasingOrderManagerConfig,
+    ExecutionResult, OrderCommand, OrderIntent, OrderHandle, OrderHandleId, OrderManager,
+    OrderManagerTask, OrderMetadata, OrderStatus, OrderUpdate, OrderUpdateEvent,
     PendingOrderTracker, PendingOrderType, Rejected, RejectionReason, SimpleOrderManager, Urgency,
 };
 pub use types::{

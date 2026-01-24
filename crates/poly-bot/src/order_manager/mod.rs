@@ -25,6 +25,7 @@ mod types;
 mod simple;
 mod tracker;
 mod chasing;
+mod async_manager;
 
 pub use types::{
     OrderIntent, OrderHandle, OrderHandleId, Rejected, RejectionReason,
@@ -33,6 +34,9 @@ pub use types::{
 pub use simple::SimpleOrderManager;
 pub use tracker::{PendingOrderTracker, PendingOrderType};
 pub use chasing::{ChasingOrderManager, ChasingOrderManagerConfig, ExecutionResult};
+pub use async_manager::{
+    AsyncOrderManager, AsyncOrderManagerConfig, OrderCommand, OrderManagerTask, OrderUpdateEvent,
+};
 
 use async_trait::async_trait;
 

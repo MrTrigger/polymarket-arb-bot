@@ -34,8 +34,11 @@ assets = ["BTC"]
 #   "1h"    - 1-hour binary options
 window_duration = "15min"
 
-# optional: Logging verbosity: "error", "warn", "info", "debug", "trace"
-log_level = "info"
+# optional: Console logging verbosity: "error", "warn", "info", "debug", "trace"
+console_log_level = "info"
+
+# optional: File logging verbosity: "error", "warn", "info", "debug", "trace"
+file_log_level = "debug"
 
 [trading]
 # REQUIRED: Maximum exposure per market in USDC

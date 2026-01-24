@@ -25,8 +25,11 @@ pub struct BotConfig {
     /// Market window duration (15min or 1h).
     pub window_duration: WindowDuration,
 
-    /// Logging level.
-    pub log_level: String,
+    /// Console logging level.
+    pub console_log_level: String,
+
+    /// File logging level.
+    pub file_log_level: String,
 
     /// ClickHouse configuration.
     pub clickhouse: ClickHouseConfig,
@@ -871,7 +874,8 @@ impl Default for BotConfig {
             mode: TradingMode::Shadow,
             assets: vec!["BTC".to_string(), "ETH".to_string(), "SOL".to_string()],
             window_duration: WindowDuration::OneHour, // Default to 1h since 15min not available
-            log_level: "info".to_string(),
+            console_log_level: "info".to_string(),
+            file_log_level: "debug".to_string(),
             clickhouse: ClickHouseConfig::default(),
             trading: TradingConfig::default(),
             risk: RiskConfig::default(),
@@ -1209,8 +1213,13 @@ struct GeneralToml {
     window_duration: Option<String>,
 
     // ===== OPTIONAL FIELDS =====
-    /// Logging level (default: "info")
-    log_level: String,
+    /// Console logging level (default: "info")
+    console_log_level: String,
+    /// File logging level (default: "debug")
+    file_log_level: String,
+    /// Legacy: kept for backwards compatibility, maps to console_log_level
+    #[serde(default)]
+    log_level: Option<String>,
 }
 
 impl Default for GeneralToml {
@@ -1221,7 +1230,9 @@ impl Default for GeneralToml {
             assets: None,
             window_duration: None,
             // Optional with defaults
-            log_level: "info".to_string(),
+            console_log_level: "info".to_string(),
+            file_log_level: "debug".to_string(),
+            log_level: None,
         }
     }
 }
@@ -1684,11 +1695,16 @@ impl BotConfig {
         let execution_mode = toml.execution.execution_mode
             .ok_or_else(|| anyhow::anyhow!("Missing required config: [execution] execution_mode"))?;
 
+        // Handle backwards compatibility: if old log_level is set, use it for console
+        let console_log_level = toml.general.log_level
+            .unwrap_or(toml.general.console_log_level);
+
         Ok(Self {
             mode: TradingMode::from_str(&mode).unwrap_or(TradingMode::Shadow),
             assets,
             window_duration,
-            log_level: toml.general.log_level,
+            console_log_level,
+            file_log_level: toml.general.file_log_level,
             clickhouse: ClickHouseConfig {
                 url: toml.clickhouse.url,
                 database: toml.clickhouse.database,
@@ -1912,7 +1928,8 @@ mod tests {
         let config = BotConfig::from_toml_str(toml).unwrap();
         assert_eq!(config.mode, TradingMode::Paper);
         assert_eq!(config.assets.len(), 2);
-        assert_eq!(config.log_level, "debug");
+        // Old log_level field maps to console_log_level for backwards compatibility
+        assert_eq!(config.console_log_level, "debug");
         assert_eq!(config.clickhouse.url, "http://db:8123");
         assert_eq!(config.trading.min_margin_early, dec!(0.03));
         assert_eq!(config.trading.max_market_exposure, dec!(2000));

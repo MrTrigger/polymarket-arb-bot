@@ -140,15 +140,24 @@ async fn run() -> Result<()> {
     }
 
     // Initialize logging with dual output:
-    // - Console: INFO level (or configured level)
-    // - File: DEBUG level for full diagnostics
-    let console_level = match config.log_level.to_lowercase().as_str() {
+    // - Console: configurable level (default: info)
+    // - File: configurable level (default: debug)
+    let console_level = match config.console_log_level.to_lowercase().as_str() {
         "trace" => Level::TRACE,
         "debug" => Level::DEBUG,
         "info" => Level::INFO,
         "warn" => Level::WARN,
         "error" => Level::ERROR,
         _ => Level::INFO,
+    };
+
+    let file_level = match config.file_log_level.to_lowercase().as_str() {
+        "trace" => Level::TRACE,
+        "debug" => Level::DEBUG,
+        "info" => Level::INFO,
+        "warn" => Level::WARN,
+        "error" => Level::ERROR,
+        _ => Level::DEBUG,
     };
 
     // Create logs directory if it doesn't exist
@@ -168,14 +177,16 @@ async fn run() -> Result<()> {
             console_level, console_level, console_level
         )));
 
-    // File layer: DEBUG level, full format with timestamps
+    // File layer: configurable level, full format with timestamps
+    // Strategy module stays at info to avoid flooding logs with per-tick debug output
     let file_layer = fmt::layer()
         .with_writer(non_blocking_file)
         .with_target(true)
         .with_ansi(false)
-        .with_filter(EnvFilter::new(
-            "poly_bot=debug,poly_market=debug,poly_common=debug,poly_bot::strategy=info"
-        ));
+        .with_filter(EnvFilter::new(format!(
+            "poly_bot={},poly_market={},poly_common={},poly_bot::strategy=info",
+            file_level, file_level, file_level
+        )));
 
     tracing_subscriber::registry()
         .with(console_layer)
@@ -202,8 +213,8 @@ async fn run() -> Result<()> {
     info!("Mode: {}", config.mode);
     info!("Window duration: {}", config.window_duration);
     info!("Assets: {:?}", config.assets);
-    info!("Log level (console): {}", config.log_level);
-    info!("Log level (file): debug");
+    info!("Log level (console): {}", config.console_log_level);
+    info!("Log level (file): {}", config.file_log_level);
     info!("");
 
     // Trading parameters

@@ -12,7 +12,7 @@ import { PriceChart, OrderBookDisplay, PositionPanel, TradesTable } from "@/comp
 export function MarketDetail() {
   const { eventId } = useParams<{ eventId: string }>();
   const navigate = useNavigate();
-  const { initialized, markets, positions, recentTrades } = useDashboardState();
+  const { initialized, markets, positions, recentTrades, snapshotTimestamp } = useDashboardState();
 
   // Track the asset of the current market for finding the next one
   const lastAssetRef = useRef<string | null>(null);
@@ -193,7 +193,7 @@ export function MarketDetail() {
 
       {/* Price chart - full width */}
       <div className="mb-6">
-        <PriceChart market={market} trades={marketTrades} />
+        <PriceChart market={market} trades={marketTrades} timestamp={snapshotTimestamp} />
       </div>
 
       {/* Main content grid */}

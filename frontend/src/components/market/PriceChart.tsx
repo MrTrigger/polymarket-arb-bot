@@ -23,6 +23,8 @@ interface PriceChartProps {
   market: ActiveMarket;
   /** Trades to display as markers on the chart. */
   trades: Trade[];
+  /** Snapshot timestamp from backend (ISO 8601). */
+  timestamp: string | null;
 }
 
 /**
@@ -104,6 +106,7 @@ const getChartOptions = (height: number) => ({
       top: 0.1,
       bottom: 0.1,
     },
+    minimumWidth: 80, // Fixed width to align with confidence chart
   },
   timeScale: {
     borderColor: "#27272a",
@@ -134,14 +137,13 @@ const getChartOptions = (height: number) => ({
  * - Trade markers: green up triangles for BUY, red down triangles for SELL
  * - Real-time updates from WebSocket snapshots
  */
-export function PriceChart({ market, trades }: PriceChartProps) {
+export function PriceChart({ market, trades, timestamp }: PriceChartProps) {
   // Price chart refs
   const priceChartContainerRef = useRef<HTMLDivElement>(null);
   const priceChartRef = useRef<IChartApi | null>(null);
   const priceSeriesRef = useRef<ISeriesApi<"Line"> | null>(null);
   const markersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
   const priceDataRef = useRef<PriceDataPoint[]>([]);
-  const lastSpotPriceRef = useRef<string | null>(null);
   const historicalLoadedRef = useRef<boolean>(false);
   const loadedMinutesRef = useRef<number>(0);
   const isLoadingMoreRef = useRef<boolean>(false);
@@ -227,11 +229,14 @@ export function PriceChart({ market, trades }: PriceChartProps) {
       rightPriceScale: {
         borderColor: "#27272a",
         scaleMargins: { top: 0.05, bottom: 0.05 },
+        minimumWidth: 80, // Must match price chart for alignment
       },
       // Hide time scale on indicator chart (shared with price chart above)
       timeScale: {
         visible: false,
         borderColor: "#27272a",
+        rightOffset: 10, // Must match price chart for alignment
+        fixRightEdge: true, // Must match price chart for alignment
       },
       // Disable independent scrolling/scaling - this chart follows the price chart
       handleScroll: false,
@@ -289,72 +294,46 @@ export function PriceChart({ market, trades }: PriceChartProps) {
     };
   }, []);
 
-  // Sync time scales between charts - price chart is the master
-  // Uses logical range sync which works when both charts have data
+  // Sync scrolling between charts - price chart is the master
+  // Both charts have matching fixRightEdge and rightOffset, so they stay aligned
+  // We only need to sync when user scrolls/zooms the price chart
   useEffect(() => {
     if (!priceChartRef.current || !confChartRef.current) return;
 
     const priceTimeScale = priceChartRef.current.timeScale();
     const confTimeScale = confChartRef.current.timeScale();
 
-    // Flag to prevent sync loops
     let isSyncing = false;
 
     const syncFromPrice = () => {
       if (isSyncing) return;
-      // Only sync if confidence chart has data
       if (confDataRef.current.length === 0) return;
 
       isSyncing = true;
-      const range = priceTimeScale.getVisibleLogicalRange();
-      if (range) {
-        // Calculate the time offset between charts due to different data lengths
-        // Price chart has historical data, confidence chart starts from page load
+      // Use logical range for scroll sync - works regardless of data overlap
+      const logicalRange = priceTimeScale.getVisibleLogicalRange();
+      if (logicalRange) {
+        // Align by the RIGHT edge - both charts show their latest data aligned
         const priceDataLen = priceDataRef.current.length;
         const confDataLen = confDataRef.current.length;
-        const offset = priceDataLen - confDataLen;
 
-        // Adjust the logical range to account for the offset
-        confTimeScale.setVisibleLogicalRange({
-          from: range.from - offset,
-          to: range.to - offset,
-        });
-      }
-      isSyncing = false;
-    };
-
-    // Also sync confidence to price (in case confidence chart auto-fits on data update)
-    const syncFromConfidence = () => {
-      if (isSyncing) return;
-      // Only sync if confidence chart has data
-      if (confDataRef.current.length === 0) return;
-
-      isSyncing = true;
-      // Get price chart range and re-apply it to confidence chart
-      // This ensures price chart is always the master
-      const range = priceTimeScale.getVisibleLogicalRange();
-      if (range) {
-        const priceDataLen = priceDataRef.current.length;
-        const confDataLen = confDataRef.current.length;
-        const offset = priceDataLen - confDataLen;
+        // Calculate how many bars from the right edge
+        const barsFromRight = priceDataLen - logicalRange.to;
+        const confTo = confDataLen - barsFromRight;
+        const confFrom = confTo - (logicalRange.to - logicalRange.from);
 
         confTimeScale.setVisibleLogicalRange({
-          from: range.from - offset,
-          to: range.to - offset,
+          from: confFrom,
+          to: confTo,
         });
       }
       isSyncing = false;
     };
 
     priceTimeScale.subscribeVisibleLogicalRangeChange(syncFromPrice);
-    confTimeScale.subscribeVisibleLogicalRangeChange(syncFromConfidence);
-
-    // Initial sync
-    syncFromPrice();
 
     return () => {
       priceTimeScale.unsubscribeVisibleLogicalRangeChange(syncFromPrice);
-      confTimeScale.unsubscribeVisibleLogicalRangeChange(syncFromConfidence);
     };
   }, []);
 
@@ -402,10 +381,18 @@ export function PriceChart({ market, trades }: PriceChartProps) {
           const newMinutes = Math.min(currentMinutes + 60, 480);
 
           const moreData = await fetchHistoricalPrices(market.asset, newMinutes);
-          if (moreData.length > priceDataRef.current.length) {
-            // Merge new data (older points) with existing
-            priceDataRef.current = moreData;
-            priceSeriesRef.current?.setData(moreData as LineData<Time>[]);
+          if (moreData.length > 0) {
+            // Find the max timestamp in new historical data
+            const maxHistoricalTime = Math.max(...moreData.map(p => p.time as number));
+
+            // Keep any live points that are strictly after the historical data
+            const livePoints = priceDataRef.current.filter(
+              p => (p.time as number) > maxHistoricalTime
+            );
+
+            // Merge: historical data + live points
+            priceDataRef.current = [...moreData, ...livePoints];
+            priceSeriesRef.current?.setData(priceDataRef.current as LineData<Time>[]);
             loadedMinutesRef.current = newMinutes;
           }
 
@@ -467,124 +454,128 @@ export function PriceChart({ market, trades }: PriceChartProps) {
     });
   }, [strikePrice]);
 
-  // Update spot price data
+  // Update BOTH price and confidence charts together with the same timestamp
+  // This ensures they stay perfectly synchronized
   useEffect(() => {
-    if (!priceSeriesRef.current || market.spot_price === lastSpotPriceRef.current) return;
+    // Use the backend timestamp for consistency
+    if (!timestamp) return;
+    const timeValue = Math.floor(new Date(timestamp).getTime() / 1000) as Time;
 
-    lastSpotPriceRef.current = market.spot_price;
-    const timeValue = Math.floor(Date.now() / 1000) as Time;
+    // Update price chart
+    if (priceSeriesRef.current) {
+      const lastPoint = priceDataRef.current[priceDataRef.current.length - 1];
 
-    const lastPoint = priceDataRef.current[priceDataRef.current.length - 1];
-    if (lastPoint && lastPoint.time === timeValue) {
-      lastPoint.value = spotPrice;
-    } else {
-      priceDataRef.current.push({ time: timeValue, value: spotPrice });
+      if (lastPoint && lastPoint.time === timeValue) {
+        // Same second - update to latest price
+        lastPoint.value = spotPrice;
+      } else {
+        // New second - add new point
+        priceDataRef.current.push({ time: timeValue, value: spotPrice });
+      }
+
+      if (priceDataRef.current.length > 500) {
+        priceDataRef.current = priceDataRef.current.slice(-500);
+      }
+
+      priceSeriesRef.current.setData(priceDataRef.current as LineData<Time>[]);
     }
 
-    if (priceDataRef.current.length > 500) {
-      priceDataRef.current = priceDataRef.current.slice(-500);
+    // Update confidence chart
+    if (confSeriesRef.current && thresholdSeriesRef.current && confidenceData) {
+      // Update confidence series
+      const lastConfPoint = confDataRef.current[confDataRef.current.length - 1];
+      if (lastConfPoint && lastConfPoint.time === timeValue) {
+        lastConfPoint.value = confidenceData.confidence;
+      } else {
+        confDataRef.current.push({ time: timeValue, value: confidenceData.confidence });
+      }
+
+      // Update threshold series
+      const lastThresholdPoint = thresholdDataRef.current[thresholdDataRef.current.length - 1];
+      const thresholdLevel = confidenceData.favorablePrice + confidenceData.threshold;
+      if (lastThresholdPoint && lastThresholdPoint.time === timeValue) {
+        lastThresholdPoint.value = thresholdLevel;
+      } else {
+        thresholdDataRef.current.push({ time: timeValue, value: thresholdLevel });
+      }
+
+      // Keep only last 500 points
+      if (confDataRef.current.length > 500) {
+        confDataRef.current = confDataRef.current.slice(-500);
+      }
+      if (thresholdDataRef.current.length > 500) {
+        thresholdDataRef.current = thresholdDataRef.current.slice(-500);
+      }
+
+      confSeriesRef.current.setData(confDataRef.current as LineData<Time>[]);
+      thresholdSeriesRef.current.setData(thresholdDataRef.current as LineData<Time>[]);
+
+      // Auto-scale the confidence chart
+      confSeriesRef.current.applyOptions({
+        autoscaleInfoProvider: () => {
+          const confData = confDataRef.current;
+          const threshData = thresholdDataRef.current;
+
+          if (confData.length === 0 && threshData.length === 0) return null;
+
+          let minValue = Infinity;
+          let maxValue = -Infinity;
+
+          for (const point of confData) {
+            if (point.value < minValue) minValue = point.value;
+            if (point.value > maxValue) maxValue = point.value;
+          }
+
+          for (const point of threshData) {
+            if (point.value < minValue) minValue = point.value;
+            if (point.value > maxValue) maxValue = point.value;
+          }
+
+          if (!isFinite(minValue) || !isFinite(maxValue)) {
+            return null;
+          }
+
+          const dataRange = maxValue - minValue;
+          const padding = Math.max(dataRange * 0.2, 0.05);
+
+          return {
+            priceRange: {
+              minValue: Math.max(0, minValue - padding),
+              maxValue: Math.min(1.0, maxValue + padding),
+            },
+          };
+        },
+      });
+
+      // Color confidence line based on whether it's above threshold
+      confSeriesRef.current.applyOptions({
+        lineColor: confidenceData.wouldTrade ? "#22c55e" : "#ef4444",
+        topColor: confidenceData.wouldTrade ? "rgba(34, 197, 94, 0.4)" : "rgba(239, 68, 68, 0.4)",
+      });
     }
 
-    priceSeriesRef.current.setData(priceDataRef.current as LineData<Time>[]);
-    // Don't auto-scroll - let user see full historical range
-  }, [market.spot_price, spotPrice]);
-
-  // Update confidence data
-  useEffect(() => {
-    if (!confSeriesRef.current || !thresholdSeriesRef.current || !confidenceData) return;
-
-    const timeValue = Math.floor(Date.now() / 1000) as Time;
-
-    // Update confidence series
-    const lastConfPoint = confDataRef.current[confDataRef.current.length - 1];
-    if (lastConfPoint && lastConfPoint.time === timeValue) {
-      lastConfPoint.value = confidenceData.confidence;
-    } else {
-      confDataRef.current.push({ time: timeValue, value: confidenceData.confidence });
-    }
-
-    // Update threshold series
-    const lastThresholdPoint = thresholdDataRef.current[thresholdDataRef.current.length - 1];
-    const thresholdLevel = confidenceData.favorablePrice + confidenceData.threshold;
-    if (lastThresholdPoint && lastThresholdPoint.time === timeValue) {
-      lastThresholdPoint.value = thresholdLevel;
-    } else {
-      thresholdDataRef.current.push({ time: timeValue, value: thresholdLevel });
-    }
-
-    // Keep only last 500 points
-    if (confDataRef.current.length > 500) {
-      confDataRef.current = confDataRef.current.slice(-500);
-    }
-    if (thresholdDataRef.current.length > 500) {
-      thresholdDataRef.current = thresholdDataRef.current.slice(-500);
-    }
-
-    confSeriesRef.current.setData(confDataRef.current as LineData<Time>[]);
-    thresholdSeriesRef.current.setData(thresholdDataRef.current as LineData<Time>[]);
-
-    // Auto-scale the confidence chart to show ALL historical data points
-    confSeriesRef.current.applyOptions({
-      autoscaleInfoProvider: () => {
-        const confData = confDataRef.current;
-        const threshData = thresholdDataRef.current;
-
-        if (confData.length === 0 && threshData.length === 0) return null;
-
-        // Find min/max from all confidence and threshold data
-        let minValue = Infinity;
-        let maxValue = -Infinity;
-
-        for (const point of confData) {
-          if (point.value < minValue) minValue = point.value;
-          if (point.value > maxValue) maxValue = point.value;
-        }
-
-        for (const point of threshData) {
-          if (point.value < minValue) minValue = point.value;
-          if (point.value > maxValue) maxValue = point.value;
-        }
-
-        // Handle edge case where no valid data exists
-        if (!isFinite(minValue) || !isFinite(maxValue)) {
-          return null;
-        }
-
-        // Add 20% padding on each side for visual breathing room
-        const dataRange = maxValue - minValue;
-        const padding = Math.max(dataRange * 0.2, 0.05);
-
-        return {
-          priceRange: {
-            minValue: Math.max(0, minValue - padding),
-            maxValue: Math.min(1.0, maxValue + padding),
-          },
-        };
-      },
-    });
-
-    // Color confidence line based on whether it's above threshold
-    confSeriesRef.current.applyOptions({
-      lineColor: confidenceData.wouldTrade ? "#22c55e" : "#ef4444", // green or red
-      topColor: confidenceData.wouldTrade ? "rgba(34, 197, 94, 0.4)" : "rgba(239, 68, 68, 0.4)",
-    });
-
-    // Sync confidence chart time scale with price chart to prevent drift
-    // Use logical range with offset adjustment for different data lengths
+    // Sync confidence chart to show same RIGHT edge as price chart
     if (priceChartRef.current && confChartRef.current && confDataRef.current.length > 0) {
-      const priceRange = priceChartRef.current.timeScale().getVisibleLogicalRange();
-      if (priceRange) {
+      const priceTimeScale = priceChartRef.current.timeScale();
+      const confTimeScale = confChartRef.current.timeScale();
+      const logicalRange = priceTimeScale.getVisibleLogicalRange();
+
+      if (logicalRange) {
         const priceDataLen = priceDataRef.current.length;
         const confDataLen = confDataRef.current.length;
-        const offset = priceDataLen - confDataLen;
 
-        confChartRef.current.timeScale().setVisibleLogicalRange({
-          from: priceRange.from - offset,
-          to: priceRange.to - offset,
+        // Align by RIGHT edge
+        const barsFromRight = priceDataLen - logicalRange.to;
+        const confTo = confDataLen - barsFromRight;
+        const confFrom = confTo - (logicalRange.to - logicalRange.from);
+
+        confTimeScale.setVisibleLogicalRange({
+          from: confFrom,
+          to: confTo,
         });
       }
     }
-  }, [confidenceData]);
+  }, [timestamp, spotPrice, confidenceData]);
 
   // Update trade markers
   useEffect(() => {
