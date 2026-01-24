@@ -998,7 +998,7 @@ impl BotConfig {
     /// Parse configuration from TOML string.
     pub fn from_toml_str(content: &str) -> Result<Self> {
         let file: TomlConfig = toml::from_str(content).context("Failed to parse TOML config")?;
-        Ok(Self::from(file))
+        Self::try_from_toml(file)
     }
 
     /// Returns the effective trading config for the current mode.
@@ -1298,36 +1298,29 @@ struct TomlConfig {
 
 #[derive(Debug, Deserialize)]
 #[serde(default)]
-struct GeneralAdvancedToml {
-    /// Market window duration: "15min" or "1h"
-    window_duration: String,
-}
-
-impl Default for GeneralAdvancedToml {
-    fn default() -> Self {
-        Self {
-            window_duration: "1h".to_string(), // Default to 1h
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(default)]
 struct GeneralToml {
-    mode: String,
-    assets: Vec<String>,
+    // ===== REQUIRED FIELDS =====
+    /// REQUIRED: Trading mode (live, paper, shadow, backtest)
+    mode: Option<String>,
+    /// REQUIRED: Assets to trade (e.g., ["BTC", "ETH", "SOL"])
+    assets: Option<Vec<String>>,
+    /// REQUIRED: Market window duration: "15min" or "1h"
+    window_duration: Option<String>,
+
+    // ===== OPTIONAL FIELDS =====
+    /// Logging level (default: "info")
     log_level: String,
-    #[serde(default)]
-    advanced: GeneralAdvancedToml,
 }
 
 impl Default for GeneralToml {
     fn default() -> Self {
         Self {
-            mode: "shadow".to_string(),
-            assets: vec!["BTC".to_string(), "ETH".to_string(), "SOL".to_string()],
+            // Required (None = must be provided)
+            mode: None,
+            assets: None,
+            window_duration: None,
+            // Optional with defaults
             log_level: "info".to_string(),
-            advanced: GeneralAdvancedToml::default(),
         }
     }
 }
@@ -1357,17 +1350,23 @@ impl Default for ClickHouseToml {
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 struct TradingToml {
+    // ===== REQUIRED FIELDS =====
+    /// REQUIRED: Maximum position size per market in USDC
+    max_position_per_market: Option<f64>,
+    /// REQUIRED: Maximum total exposure across all markets in USDC
+    max_total_exposure: Option<f64>,
+    /// REQUIRED: Base order size in USDC
+    base_order_size: Option<f64>,
+    /// REQUIRED: Available balance for trading in USDC
+    available_balance: Option<f64>,
+
+    // ===== OPTIONAL FIELDS =====
     min_margin_early_pct: f64,
     min_margin_mid_pct: f64,
     min_margin_late_pct: f64,
     min_time_remaining_secs: u64,
-    max_position_per_market: f64,
-    max_total_exposure: f64,
-    base_order_size: f64,
     early_threshold_secs: u64,
     mid_threshold_secs: u64,
-    /// Available balance - can be set directly under [trading] for simplicity
-    available_balance: Option<f64>,
     #[serde(default)]
     sizing: SizingToml,
 }
@@ -1375,16 +1374,18 @@ struct TradingToml {
 impl Default for TradingToml {
     fn default() -> Self {
         Self {
+            // Required (None = must be provided)
+            max_position_per_market: None,
+            max_total_exposure: None,
+            base_order_size: None,
+            available_balance: None,
+            // Optional with defaults
             min_margin_early_pct: 2.5,
             min_margin_mid_pct: 1.5,
             min_margin_late_pct: 0.5,
             min_time_remaining_secs: 30,
-            max_position_per_market: 1000.0,
-            max_total_exposure: 5000.0,
-            base_order_size: 50.0,
             early_threshold_secs: 300,
             mid_threshold_secs: 120,
-            available_balance: None,
             sizing: SizingToml::default(),
         }
     }
@@ -1420,25 +1421,32 @@ impl Default for SizingToml {
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 struct RiskToml {
+    // ===== REQUIRED FIELDS =====
+    /// REQUIRED: Maximum daily loss before trading stops (USDC)
+    max_daily_loss: Option<f64>,
+    /// REQUIRED: Emergency close threshold (ratio, e.g., 0.15 = 15%)
+    emergency_close_threshold: Option<f64>,
+
+    // ===== OPTIONAL FIELDS =====
     risk_mode: String,
     max_consecutive_failures: u32,
     circuit_breaker_cooldown_secs: u64,
-    max_daily_loss: f64,
     max_imbalance_ratio: f64,
     toxic_flow_threshold: u8,
-    emergency_close_threshold: f64,
 }
 
 impl Default for RiskToml {
     fn default() -> Self {
         Self {
+            // Required (None = must be provided)
+            max_daily_loss: None,
+            emergency_close_threshold: None,
+            // Optional with defaults
             risk_mode: "both".to_string(),
             max_consecutive_failures: 3,
             circuit_breaker_cooldown_secs: 300,
-            max_daily_loss: 500.0,
             max_imbalance_ratio: 0.7,
             toxic_flow_threshold: 80,
-            emergency_close_threshold: 200.0,
         }
     }
 }
@@ -1464,8 +1472,11 @@ impl Default for ShadowToml {
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 struct ExecutionToml {
-    /// Order execution mode: "limit" or "market"
-    execution_mode: String,
+    // ===== REQUIRED FIELDS =====
+    /// REQUIRED: Order execution mode: "limit" or "market"
+    execution_mode: Option<String>,
+
+    // ===== OPTIONAL FIELDS =====
     chase_enabled: bool,
     chase_step_size: f64,
     chase_check_interval_ms: u64,
@@ -1478,7 +1489,9 @@ struct ExecutionToml {
 impl Default for ExecutionToml {
     fn default() -> Self {
         Self {
-            execution_mode: "limit".to_string(),
+            // Required (None = must be provided)
+            execution_mode: None,
+            // Optional with defaults
             chase_enabled: true,
             chase_step_size: 0.001,
             chase_check_interval_ms: 100,
@@ -1756,12 +1769,44 @@ fn f64_to_decimal(val: f64) -> Decimal {
     Decimal::try_from(val).unwrap_or(Decimal::ZERO)
 }
 
-impl From<TomlConfig> for BotConfig {
-    fn from(toml: TomlConfig) -> Self {
-        Self {
-            mode: TradingMode::from_str(&toml.general.mode).unwrap_or(TradingMode::Shadow),
-            assets: toml.general.assets,
-            window_duration: toml.general.advanced.window_duration.parse().unwrap_or(WindowDuration::OneHour),
+impl BotConfig {
+    /// Convert from parsed TOML config with validation.
+    fn try_from_toml(toml: TomlConfig) -> Result<Self> {
+        // Validate required general fields
+        let mode = toml.general.mode
+            .ok_or_else(|| anyhow::anyhow!("Missing required config: [general] mode"))?;
+        let assets = toml.general.assets
+            .ok_or_else(|| anyhow::anyhow!("Missing required config: [general] assets"))?;
+        let window_duration_str = toml.general.window_duration
+            .ok_or_else(|| anyhow::anyhow!("Missing required config: [general] window_duration"))?;
+        let window_duration: WindowDuration = window_duration_str.parse()
+            .map_err(|_| anyhow::anyhow!("Invalid window_duration '{}': must be '15min' or '1h'", window_duration_str))?;
+
+        // Validate required trading fields
+        let max_position_per_market = toml.trading.max_position_per_market
+            .ok_or_else(|| anyhow::anyhow!("Missing required config: [trading] max_position_per_market"))?;
+        let max_total_exposure = toml.trading.max_total_exposure
+            .ok_or_else(|| anyhow::anyhow!("Missing required config: [trading] max_total_exposure"))?;
+        let base_order_size = toml.trading.base_order_size
+            .ok_or_else(|| anyhow::anyhow!("Missing required config: [trading] base_order_size"))?;
+        let available_balance = toml.trading.available_balance
+            .or(Some(toml.trading.sizing.available_balance))
+            .ok_or_else(|| anyhow::anyhow!("Missing required config: [trading] available_balance"))?;
+
+        // Validate required risk fields
+        let max_daily_loss = toml.risk.max_daily_loss
+            .ok_or_else(|| anyhow::anyhow!("Missing required config: [risk] max_daily_loss"))?;
+        let emergency_close_threshold = toml.risk.emergency_close_threshold
+            .ok_or_else(|| anyhow::anyhow!("Missing required config: [risk] emergency_close_threshold"))?;
+
+        // Validate required execution fields
+        let execution_mode = toml.execution.execution_mode
+            .ok_or_else(|| anyhow::anyhow!("Missing required config: [execution] execution_mode"))?;
+
+        Ok(Self {
+            mode: TradingMode::from_str(&mode).unwrap_or(TradingMode::Shadow),
+            assets,
+            window_duration,
             log_level: toml.general.log_level,
             clickhouse: ClickHouseConfig {
                 url: toml.clickhouse.url,
@@ -1777,15 +1822,14 @@ impl From<TomlConfig> for BotConfig {
                 min_margin_mid: pct_to_decimal(toml.trading.min_margin_mid_pct),
                 min_margin_late: pct_to_decimal(toml.trading.min_margin_late_pct),
                 min_time_remaining_secs: toml.trading.min_time_remaining_secs,
-                max_position_per_market: f64_to_decimal(toml.trading.max_position_per_market),
-                max_total_exposure: f64_to_decimal(toml.trading.max_total_exposure),
-                base_order_size: f64_to_decimal(toml.trading.base_order_size),
+                max_position_per_market: f64_to_decimal(max_position_per_market),
+                max_total_exposure: f64_to_decimal(max_total_exposure),
+                base_order_size: f64_to_decimal(base_order_size),
                 early_threshold_secs: toml.trading.early_threshold_secs,
                 mid_threshold_secs: toml.trading.mid_threshold_secs,
                 sizing: SizingConfig {
-                    mode: toml.trading.sizing.mode,
-                    // Prefer top-level available_balance, fall back to sizing.available_balance
-                    available_balance: f64_to_decimal(toml.trading.available_balance.unwrap_or(toml.trading.sizing.available_balance)),
+                    mode: toml.trading.sizing.mode.clone(),
+                    available_balance: f64_to_decimal(available_balance),
                     max_market_allocation: f64_to_decimal(toml.trading.sizing.max_market_allocation),
                     expected_trades_per_market: toml.trading.sizing.expected_trades_per_market,
                     min_order_size: f64_to_decimal(toml.trading.sizing.min_order_size),
@@ -1799,10 +1843,10 @@ impl From<TomlConfig> for BotConfig {
                 risk_mode: toml.risk.risk_mode,
                 max_consecutive_failures: toml.risk.max_consecutive_failures,
                 circuit_breaker_cooldown_secs: toml.risk.circuit_breaker_cooldown_secs,
-                max_daily_loss: f64_to_decimal(toml.risk.max_daily_loss),
+                max_daily_loss: f64_to_decimal(max_daily_loss),
                 max_imbalance_ratio: f64_to_decimal(toml.risk.max_imbalance_ratio),
                 toxic_flow_threshold: toml.risk.toxic_flow_threshold,
-                emergency_close_threshold: f64_to_decimal(toml.risk.emergency_close_threshold),
+                emergency_close_threshold: f64_to_decimal(emergency_close_threshold),
             },
             shadow: ShadowConfig {
                 enabled: toml.shadow.enabled,
@@ -1810,7 +1854,7 @@ impl From<TomlConfig> for BotConfig {
                 max_wait_ms: toml.shadow.max_wait_ms,
             },
             execution: ExecutionConfig {
-                execution_mode: ExecutionMode::from_str(&toml.execution.execution_mode)
+                execution_mode: ExecutionMode::from_str(&execution_mode)
                     .unwrap_or(ExecutionMode::Limit),
                 chase_enabled: toml.execution.chase_enabled,
                 chase_step_size: f64_to_decimal(toml.execution.chase_step_size),
@@ -1855,27 +1899,33 @@ impl From<TomlConfig> for BotConfig {
                 sweep_enabled: toml.backtest.sweep_enabled,
                 data_dir: toml.backtest.data_dir,
                 sweep_parallel_workers: toml.backtest.sweep_parallel_workers,
-                trading: toml.backtest.trading.map(|t| TradingConfig {
-                    min_margin_early: pct_to_decimal(t.min_margin_early_pct),
-                    min_margin_mid: pct_to_decimal(t.min_margin_mid_pct),
-                    min_margin_late: pct_to_decimal(t.min_margin_late_pct),
-                    min_time_remaining_secs: t.min_time_remaining_secs,
-                    max_position_per_market: f64_to_decimal(t.max_position_per_market),
-                    max_total_exposure: f64_to_decimal(t.max_total_exposure),
-                    base_order_size: f64_to_decimal(t.base_order_size),
-                    early_threshold_secs: t.early_threshold_secs,
-                    mid_threshold_secs: t.mid_threshold_secs,
-                    sizing: SizingConfig {
-                        mode: t.sizing.mode,
-                        // Prefer top-level available_balance, fall back to sizing.available_balance
-                        available_balance: f64_to_decimal(t.available_balance.unwrap_or(t.sizing.available_balance)),
-                        max_market_allocation: f64_to_decimal(t.sizing.max_market_allocation),
-                        expected_trades_per_market: t.sizing.expected_trades_per_market,
-                        min_order_size: f64_to_decimal(t.sizing.min_order_size),
-                        max_confidence_multiplier: f64_to_decimal(t.sizing.max_confidence_multiplier),
-                        min_hedge_ratio: f64_to_decimal(t.sizing.min_hedge_ratio),
-                    },
-                }),
+                trading: match toml.backtest.trading {
+                    Some(t) => Some(TradingConfig {
+                        min_margin_early: pct_to_decimal(t.min_margin_early_pct),
+                        min_margin_mid: pct_to_decimal(t.min_margin_mid_pct),
+                        min_margin_late: pct_to_decimal(t.min_margin_late_pct),
+                        min_time_remaining_secs: t.min_time_remaining_secs,
+                        max_position_per_market: f64_to_decimal(t.max_position_per_market
+                            .ok_or_else(|| anyhow::anyhow!("Missing required config: [backtest.trading] max_position_per_market"))?),
+                        max_total_exposure: f64_to_decimal(t.max_total_exposure
+                            .ok_or_else(|| anyhow::anyhow!("Missing required config: [backtest.trading] max_total_exposure"))?),
+                        base_order_size: f64_to_decimal(t.base_order_size
+                            .ok_or_else(|| anyhow::anyhow!("Missing required config: [backtest.trading] base_order_size"))?),
+                        early_threshold_secs: t.early_threshold_secs,
+                        mid_threshold_secs: t.mid_threshold_secs,
+                        sizing: SizingConfig {
+                            mode: t.sizing.mode,
+                            available_balance: f64_to_decimal(t.available_balance
+                                .ok_or_else(|| anyhow::anyhow!("Missing required config: [backtest.trading] available_balance"))?),
+                            max_market_allocation: f64_to_decimal(t.sizing.max_market_allocation),
+                            expected_trades_per_market: t.sizing.expected_trades_per_market,
+                            min_order_size: f64_to_decimal(t.sizing.min_order_size),
+                            max_confidence_multiplier: f64_to_decimal(t.sizing.max_confidence_multiplier),
+                            min_hedge_ratio: f64_to_decimal(t.sizing.min_hedge_ratio),
+                        },
+                    }),
+                    None => None,
+                },
             },
             live: LiveConfig {
                 auto_claim_interval: toml.live.auto_claim_interval,
@@ -1924,7 +1974,7 @@ impl From<TomlConfig> for BotConfig {
                 core_budget: f64_to_decimal(toml.phases.core_budget),
                 final_budget: f64_to_decimal(toml.phases.final_budget),
             },
-        }
+        })
     }
 }
 
@@ -1968,6 +2018,7 @@ mod tests {
             [general]
             mode = "paper"
             assets = ["BTC", "ETH"]
+            window_duration = "1h"
             log_level = "debug"
 
             [clickhouse]
@@ -1976,9 +2027,17 @@ mod tests {
             [trading]
             min_margin_early_pct = 3.0
             max_position_per_market = 2000.0
+            max_total_exposure = 5000.0
+            base_order_size = 10.0
+            available_balance = 10000.0
 
             [risk]
             max_consecutive_failures = 5
+            max_daily_loss = 500.0
+            emergency_close_threshold = 0.15
+
+            [execution]
+            execution_mode = "limit"
 
             [observability]
             capture_decisions = false
@@ -2195,8 +2254,14 @@ mod tests {
         let toml = r#"
             [general]
             mode = "paper"
+            assets = ["BTC", "ETH"]
+            window_duration = "1h"
 
             [trading]
+            max_position_per_market = 1000.0
+            max_total_exposure = 5000.0
+            base_order_size = 10.0
+
             [trading.sizing]
             available_balance = 15000.0
             max_market_allocation = 0.25
@@ -2204,6 +2269,13 @@ mod tests {
             min_order_size = 2.0
             max_confidence_multiplier = 2.5
             min_hedge_ratio = 0.25
+
+            [risk]
+            max_daily_loss = 500.0
+            emergency_close_threshold = 0.15
+
+            [execution]
+            execution_mode = "limit"
         "#;
 
         let config = BotConfig::from_toml_str(toml).unwrap();
@@ -2414,6 +2486,21 @@ mod tests {
         let toml = r#"
             [general]
             mode = "paper"
+            assets = ["BTC", "ETH"]
+            window_duration = "1h"
+
+            [trading]
+            max_position_per_market = 1000.0
+            max_total_exposure = 5000.0
+            base_order_size = 10.0
+            available_balance = 10000.0
+
+            [risk]
+            max_daily_loss = 500.0
+            emergency_close_threshold = 0.15
+
+            [execution]
+            execution_mode = "limit"
 
             [engines]
             priority = ["directional", "arbitrage", "maker"]
@@ -2465,10 +2552,25 @@ mod tests {
 
     #[test]
     fn test_engines_default_toml_parsing() {
-        // Empty TOML should use defaults
+        // Minimal TOML with required fields should use defaults for optional fields
         let toml = r#"
             [general]
             mode = "shadow"
+            assets = ["BTC"]
+            window_duration = "1h"
+
+            [trading]
+            max_position_per_market = 1000.0
+            max_total_exposure = 5000.0
+            base_order_size = 10.0
+            available_balance = 10000.0
+
+            [risk]
+            max_daily_loss = 500.0
+            emergency_close_threshold = 0.15
+
+            [execution]
+            execution_mode = "limit"
         "#;
 
         let config = BotConfig::from_toml_str(toml).unwrap();

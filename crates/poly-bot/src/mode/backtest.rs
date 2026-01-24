@@ -94,7 +94,7 @@ impl BacktestModeConfig {
     /// Create config from BotConfig.
     pub fn from_bot_config(config: &BotConfig, _clickhouse: &ClickHouseClient) -> Result<Self> {
         let mut executor_config = SimulatedExecutorConfig::backtest();
-        executor_config.initial_balance = dec!(10000);
+        executor_config.initial_balance = config.effective_trading_config().sizing.available_balance;
         executor_config.fee_rate = Decimal::ZERO; // Not used when use_realistic_fees=true
         executor_config.latency_ms = config.execution.paper_fill_latency_ms;
         executor_config.enforce_balance = true;
@@ -130,7 +130,7 @@ impl BacktestModeConfig {
                 .with_execution(config.execution.clone()),
             engines: config.engines.clone(),
             observability: config.observability.clone(),
-            initial_balance: dec!(10000),
+            initial_balance: config.effective_trading_config().sizing.available_balance,
             shutdown_timeout_secs: 30,
             sweep_enabled: config.backtest.sweep_enabled,
             sweep_params: Vec::new(),

@@ -15,42 +15,91 @@
 #   cargo run -p poly-bot --release -- --mode live
 
 # ============================================================================
-# USER SETTINGS (configure these)
+# REQUIRED SETTINGS - You MUST configure all of these (10 fields)
 # ============================================================================
 
 [general]
-# Operating mode: "paper" (simulated), "live" (real money), "backtest" (historical)
+# REQUIRED: Operating mode
+#   "paper"    - Simulated trading with real market data
+#   "live"     - Real trading with real money
+#   "backtest" - Historical data replay
 mode = "live"
 
-# Assets to trade - available: "BTC", "ETH", "SOL", "XRP"
-assets =  ["BTC"]       # ["BTC", "ETH", "SOL", "XRP"]
+# REQUIRED: Crypto assets to trade
+#   Available: "BTC", "ETH", "SOL", "XRP"
+assets = ["BTC"]
 
-# Logging verbosity: "info", "debug", "trace"
+# REQUIRED: Market window duration
+#   "15min" - 15-minute binary options (higher frequency)
+#   "1h"    - 1-hour binary options
+window_duration = "15min"
+
+# optional: Logging verbosity: "error", "warn", "info", "debug", "trace"
 log_level = "info"
 
-# ============================================================================
-
 [trading]
-# Total capital allocated for trading in USDC
-available_balance = 1000.0
-
-# Maximum position size per market in USDC
+# REQUIRED: Maximum position size allowed per market in USDC
+#   Prevents over-concentration in a single market
 max_position_per_market = 1000.0
 
-# Maximum total exposure across all markets in USDC
+# REQUIRED: Maximum total exposure across ALL markets in USDC
+#   Hard cap on total capital at risk at any time
 max_total_exposure = 1000.0
 
-# Base order size in USDC (minimum 5 shares on Polymarket)
+# REQUIRED: Base order size in USDC
+#   Starting size for orders (may be scaled by confidence)
+#   Polymarket minimum is ~$5 worth of shares
 base_order_size = 75.0
 
-# ============================================================================
+# REQUIRED: Total trading capital available in USDC
+#   Used for position sizing calculations
+available_balance = 1000.0
 
 [risk]
-# Stop trading if daily loss exceeds this amount in USDC
+# REQUIRED: Maximum daily loss before trading stops (USDC)
+#   Circuit breaker triggers when daily P&L drops below this
 max_daily_loss = 50.0
 
+# REQUIRED: Emergency close threshold (ratio)
+#   Close all positions if loss exceeds this % of balance
+#   0.15 = 15% loss triggers emergency close
+emergency_close_threshold = 0.15
+
+[execution]
+# REQUIRED: Order execution mode
+#   "limit"  - Maker orders (lower fees, may not fill)
+#   "market" - Taker orders (instant fill, higher fees)
+execution_mode = "market"
+
+# optional: Enable price chasing for unfilled limit orders
+# WARNING: Can block event loop - usually keep disabled
+chase_enabled = false
+
+# optional: Price step for chasing (must match Polymarket tick size)
+chase_step_size = 0.01
+
+# optional: Milliseconds between order status checks during chase
+chase_check_interval_ms = 500
+
+# optional: Maximum milliseconds to chase before giving up
+max_chase_time_ms = 5000
+
+# optional: Simulated fill latency for paper trading (ms)
+paper_fill_latency_ms = 50
+
+# optional: Order timeout before considering failed (ms)
+order_timeout_ms = 10000
+
+# optional: Fire a test trade on startup to verify connectivity
+# Enable only after wallet is funded
+test_trade_on_startup = false
+
+# ============================================================================
+# OPTIONAL SETTINGS - Have sensible defaults
+# ============================================================================
+
 [live]
-# Interval in minutes between auto-claim attempts for resolved positions
+# Minutes between auto-claim attempts for resolved positions
 # Set to 0 to disable auto-claiming
 auto_claim_interval = 15
 
@@ -61,43 +110,29 @@ start_date = "2026-01-08"
 # End date for backtesting (YYYY-MM-DD)
 end_date = "2026-01-15"
 
-# Directory containing CSV data files for backtesting
+# Directory containing CSV data files
 data_dir = "data/2026-01-08_2026-01-15_15min"
-#data_dir = "data/2026-01-15_2026-01-22_15min"
 
-# ============================================================================
-
-# Backtest-specific trading parameters (kept stable for comparing commits)
+# Backtest-specific trading overrides
+# Use different params for backtesting vs live
 [backtest.trading]
-# Total capital allocated for trading in USDC
 available_balance = 1000.0
-
-# Maximum position size per market in USDC
 max_position_per_market = 1000.0
-
-# Maximum total exposure across all markets in USDC
 max_total_exposure = 1000.0
-
-# Base order size in USDC (minimum 5 shares on Polymarket)
 base_order_size = 75.0
 
-
 # ============================================================================
-# ADVANCED SETTINGS (rarely need to change)
+# ADVANCED SETTINGS - Rarely need to change
 # ============================================================================
-
-[general.advanced]
-# Market window duration: "15min" or "1h"
-window_duration = "15min"
 
 [trading.margins]
-# Minimum profit margin required in early phase (>5min remaining), percentage
+# Minimum profit margin in early phase (>5min remaining), %
 min_margin_early_pct = 2.5
 
-# Minimum profit margin required in mid phase (2-5min remaining), percentage
+# Minimum profit margin in mid phase (2-5min remaining), %
 min_margin_mid_pct = 1.5
 
-# Minimum profit margin required in late phase (<2min remaining), percentage
+# Minimum profit margin in late phase (<2min remaining), %
 min_margin_late_pct = 0.5
 
 # Seconds remaining to consider "early" phase
@@ -116,83 +151,51 @@ risk_mode = "directional"
 # Trip circuit breaker after this many consecutive failed orders
 max_consecutive_failures = 3
 
-# Seconds to wait after circuit breaker trips before resuming
+# Seconds to wait after circuit breaker trips
 circuit_breaker_cooldown_secs = 300
 
-# Maximum allowed imbalance between YES/NO positions (0.0-1.0)
+# Maximum YES/NO position imbalance ratio (0.0-1.0)
 max_imbalance_ratio = 0.7
 
 # Toxic flow detection threshold (0-100)
 toxic_flow_threshold = 80
 
-# Emergency close all positions if exposure exceeds this USDC amount
-emergency_close_threshold = 200.0
-
 [backtest.advanced]
-# Enable parameter sweep mode for optimization
+# Enable parameter sweep optimization
 sweep_enabled = false
 
 # Replay speed multiplier (0.0 = as fast as possible)
 speed = 0.0
 
-# Number of parallel workers for parameter sweeps (0 = auto-detect)
+# Parallel workers for sweeps (0 = auto-detect CPU count)
 sweep_parallel_workers = 8
 
-[execution]
-# Order execution mode: "limit" (maker, lower fees) or "market" (taker, instant fill)
-execution_mode = "market"
-
-# Enable price chasing for limit orders (cancel and resubmit at better prices)
-# DISABLED: Chase blocks the event loop, causing stale prices and missed WebSocket messages
-chase_enabled = false
-
-# Price increment for chasing - must match Polymarket tick size
-chase_step_size = 0.01
-
-# Milliseconds between order status checks during chase
-chase_check_interval_ms = 500
-
-# Maximum milliseconds to chase before giving up
-max_chase_time_ms = 5000
-
-# Simulated fill latency for paper trading in milliseconds
-paper_fill_latency_ms = 50
-
-# Order timeout in milliseconds before considering it failed
-order_timeout_ms = 10000
-
-# Fire a test trade on startup to verify order flow (enable after funding)
-test_trade_on_startup = false
-
 [shadow]
-# Enable shadow bidding (place backup orders on opposite leg)
+# Enable shadow bids (backup orders on opposite leg)
 enabled = true
 
-# Price offset for shadow bids in basis points
+# Price offset for shadow bids (basis points)
 price_offset_bps = 50
 
-# Maximum milliseconds to wait for shadow bid confirmation
+# Max wait time for shadow bid confirmation (ms)
 max_wait_ms = 2000
 
 [engines]
-# Engine priority order - first match wins
+# Engine priority order - first enabled engine wins
 priority = ["directional", "arbitrage", "maker"]
 
 [engines.arbitrage]
-# Enable arbitrage engine (exploits YES + NO < $1.00)
+# Exploits YES + NO < $1.00 mispricings
+# Usually disabled: taker fees exceed typical arb margins
 enabled = false
 
-# Minimum margin in early phase, basis points (250 = 2.5%)
-min_margin_early_bps = 250
-
-# Minimum margin in mid phase, basis points
-min_margin_mid_bps = 150
-
-# Minimum margin in late phase, basis points
-min_margin_late_bps = 50
+# Minimum margin thresholds by phase (basis points)
+min_margin_early_bps = 250  # 2.5%
+min_margin_mid_bps = 150    # 1.5%
+min_margin_late_bps = 50    # 0.5%
 
 [engines.directional]
-# Enable directional engine (bets on price direction)
+# Bets on price direction based on signals
 enabled = true
 
 # Don't trade if less than this many seconds remain
@@ -201,41 +204,38 @@ min_seconds_remaining = 60
 # Maximum combined cost of YES + NO (1.02 = 2% max overpay)
 max_combined_cost = 1.02
 
-# Maximum bid-ask spread in basis points
+# Maximum bid-ask spread (basis points)
 max_spread_bps = 1500
 
-# Minimum favorable depth in USDC on our side of the book
+# Minimum depth on favorable side (USDC)
 min_favorable_depth = 50.0
 
-# ATR multiplier threshold for "strong" signal in late phase, basis points
+# ATR threshold for "strong" signal in late phase (bps)
 strong_threshold_late_bps = 9
 
-# ATR multiplier threshold for "lean" signal in late phase, basis points
+# ATR threshold for "lean" signal in late phase (bps)
 lean_threshold_late_bps = 6
 
-# Confidence ratio for strong UP signal
-strong_up_ratio = 0.82
-
-# Confidence ratio for lean UP signal
-lean_up_ratio = 0.65
-
-# Confidence ratio for neutral (no signal)
-neutral_ratio = 0.50
+# Allocation ratios for signal strength
+strong_up_ratio = 0.82  # Strong UP: 82% YES, 18% NO
+lean_up_ratio = 0.65    # Lean UP: 65% YES, 35% NO
+neutral_ratio = 0.50    # Neutral: 50/50
 
 [engines.maker]
-# Enable market maker engine (provide liquidity, collect spread)
+# Market making - provide liquidity, collect spread
+# Usually disabled: requires careful inventory management
 enabled = false
 
-# Don't provide liquidity if less than this many seconds remain
+# Don't provide liquidity with less than this remaining (secs)
 min_seconds_remaining = 120
 
-# Minimum spread to capture in basis points
+# Minimum spread to capture (basis points)
 min_spread_bps = 100
 
-# Maximum spread - don't quote if spread is wider than this
+# Maximum spread - don't quote if wider than this (bps)
 max_spread_bps = 1000
 
-# Default order size for market making in USDC
+# Default order size for market making (USDC)
 default_order_size = 50.0
 
 [observability]
@@ -248,7 +248,7 @@ capture_counterfactuals = true
 # Enable anomaly detection alerts
 detect_anomalies = true
 
-# Channel buffer size for async event processing
+# Async channel buffer size for events
 channel_buffer_size = 10000
 
 # Batch size for database writes
@@ -282,7 +282,7 @@ channel_capacity = 10000
 # Log when events are dropped due to full channel
 log_drops = true
 
-# Only log drops after this many consecutive drops
+# Only log after this many consecutive drops
 drop_log_threshold = 100
 
 # Batch size for dashboard database writes
