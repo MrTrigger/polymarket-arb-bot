@@ -212,19 +212,13 @@ async fn run() -> Result<()> {
     info!("Min margin (mid): {}", config.trading.min_margin_mid);
     info!("Min margin (late): {}", config.trading.min_margin_late);
     info!("Min time remaining: {}s", config.trading.min_time_remaining_secs);
-    info!("Max position per market: {} USDC", config.trading.max_position_per_market);
+    info!("Max market exposure: {} USDC", config.trading.max_market_exposure);
     info!("Max total exposure: {} USDC", config.trading.max_total_exposure);
     info!("Base order size: {} USDC", config.trading.base_order_size);
+    info!("Min order size: {} USDC", config.trading.min_order_size);
+    info!("Available balance: {} USDC", config.trading.available_balance);
     info!("Early threshold: {}s", config.trading.early_threshold_secs);
     info!("Mid threshold: {}s", config.trading.mid_threshold_secs);
-    info!("");
-
-    // Sizing config
-    info!("=== SIZING CONFIG ===");
-    info!("Mode: {}", config.trading.sizing.mode);
-    info!("Available balance: {} USDC", config.trading.sizing.available_balance);
-    info!("Max market allocation: {}%", config.trading.sizing.max_market_allocation * rust_decimal::Decimal::from(100));
-    info!("Expected trades per market: {}", config.trading.sizing.expected_trades_per_market);
     info!("");
 
     // Risk parameters

@@ -204,7 +204,7 @@ fn compute_config_hash(config: &BotConfig) -> String {
     hasher.update(config.trading.min_margin_early.to_string().as_bytes());
     hasher.update(config.trading.min_margin_mid.to_string().as_bytes());
     hasher.update(config.trading.min_margin_late.to_string().as_bytes());
-    hasher.update(config.trading.max_position_per_market.to_string().as_bytes());
+    hasher.update(config.trading.max_market_exposure.to_string().as_bytes());
     hasher.update(config.trading.max_total_exposure.to_string().as_bytes());
     hasher.update(config.trading.base_order_size.to_string().as_bytes());
 
@@ -372,7 +372,7 @@ mod tests {
         let config1 = make_test_config();
         let mut config2 = make_test_config();
 
-        config2.trading.max_position_per_market = dec!(999999);
+        config2.trading.max_market_exposure = dec!(999999);
 
         let hash1 = compute_config_hash(&config1);
         let hash2 = compute_config_hash(&config2);

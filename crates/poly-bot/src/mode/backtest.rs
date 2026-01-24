@@ -94,11 +94,11 @@ impl BacktestModeConfig {
     /// Create config from BotConfig.
     pub fn from_bot_config(config: &BotConfig, _clickhouse: &ClickHouseClient) -> Result<Self> {
         let mut executor_config = SimulatedExecutorConfig::backtest();
-        executor_config.initial_balance = config.effective_trading_config().sizing.available_balance;
+        executor_config.initial_balance = config.effective_trading_config().available_balance;
         executor_config.fee_rate = Decimal::ZERO; // Not used when use_realistic_fees=true
         executor_config.latency_ms = config.execution.paper_fill_latency_ms;
         executor_config.enforce_balance = true;
-        executor_config.max_position_per_market = config.effective_trading_config().max_position_per_market;
+        executor_config.max_market_exposure = config.effective_trading_config().max_market_exposure;
         executor_config.min_fill_ratio = dec!(0.5);
         // Set taker mode based on execution mode from config
         executor_config.is_taker_mode = matches!(
@@ -130,7 +130,7 @@ impl BacktestModeConfig {
                 .with_execution(config.execution.clone()),
             engines: config.engines.clone(),
             observability: config.observability.clone(),
-            initial_balance: config.effective_trading_config().sizing.available_balance,
+            initial_balance: config.effective_trading_config().available_balance,
             shutdown_timeout_secs: 30,
             sweep_enabled: config.backtest.sweep_enabled,
             sweep_params: Vec::new(),
@@ -1223,8 +1223,8 @@ fn apply_parameter(config: &mut BacktestModeConfig, name: &str, value: f64) {
                 Decimal::from_f64_retain(value).unwrap_or_default();
         }
         // Sizing
-        "max_position_per_market" => {
-            config.strategy.sizing_config.max_position_per_market =
+        "max_market_exposure" => {
+            config.strategy.sizing_config.max_market_exposure =
                 Decimal::from_f64_retain(value).unwrap_or_default();
         }
         "base_order_size" => {

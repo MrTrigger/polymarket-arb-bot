@@ -31,7 +31,6 @@ pub mod aggregator;
 pub mod arb;
 pub mod atr;
 pub mod confidence;
-pub mod confidence_sizing;
 pub mod directional;
 pub mod maker;
 pub mod position;
@@ -174,12 +173,11 @@ pub use arb::{ArbDetector, ArbOpportunity, ArbRejection, ArbThresholds};
 pub use confidence::{
     Confidence, ConfidenceCalculator, ConfidenceFactors, MAX_MULTIPLIER, MIN_MULTIPLIER,
 };
-pub use confidence_sizing::{ConfidenceSizer, OrderSizeResult, SizeRejection};
 pub use signal::{
     calculate_distance, distance_bps, get_signal, get_thresholds, Signal, SignalThresholds,
 };
 pub use sizing::{
-    create_sizer, HybridSizer, PositionSizer, SizingAdjustments, SizingConfig, SizingInput,
+    create_sizer, PositionSizer, SizingAdjustments, SizingConfig, SizingInput,
     SizingLimit, SizingMode, SizingResult, SizingStrategy, UnifiedSizingResult,
 };
 pub use toxic::{
@@ -341,6 +339,7 @@ impl TrackedMarket {
         // Build PositionConfig with confidence params from StrategyConfig
         let position_config = position::PositionConfig {
             total_budget: market_budget,
+            base_order_size: strategy_config.sizing_config.base_order_size,
             atr,
             // Confidence calculation params
             time_conf_floor: strategy_config.time_conf_floor,
@@ -627,8 +626,6 @@ pub struct StrategyLoop<D: DataSource, E: Executor> {
     toxic_detector: ToxicFlowDetector,
     /// Position sizer (limit-based).
     sizer: PositionSizer,
-    /// Confidence-based sizer for directional trades.
-    confidence_sizer: ConfidenceSizer,
     /// Tracked markets by event_id.
     markets: HashMap<String, TrackedMarket>,
     /// Token ID to event ID mapping.
@@ -689,8 +686,6 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
         let aggregator = DecisionAggregator::new(&engines_config);
         let toxic_detector = ToxicFlowDetector::new(config.toxic_config.clone());
         let sizer = PositionSizer::new(config.sizing_config.clone());
-        // Create confidence sizer with the available balance from sizing config
-        let confidence_sizer = ConfidenceSizer::with_balance(config.sizing_config.base_order_size * Decimal::from(200u32));
 
         // Extract chase config values before moving config into struct
         let chase_enabled = config.execution.chase_enabled && !config.is_backtest;
@@ -710,7 +705,6 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             aggregator,
             toxic_detector,
             sizer,
-            confidence_sizer,
             markets: HashMap::new(),
             token_to_event: HashMap::new(),
             spot_prices: HashMap::new(),
@@ -1286,7 +1280,7 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
         }
 
         // Calculate budget per market from sizing config
-        let market_budget = self.config.sizing_config.max_position_per_market;
+        let market_budget = self.config.sizing_config.max_market_exposure;
 
         // Create tracked market with phase-based position management
         // Pass strategy config so confidence params flow through to PositionManager
@@ -2155,6 +2149,11 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                         Some(live_book) => live_book.best_ask,
                         None => {
                             warn!(token_id = %yes_token_id, "No orderbook for UP token, skipping");
+                            // Clear pending flag and release reservation
+                            if let Some(market) = self.markets.get_mut(&event_id) {
+                                market.pending_directional_order = false;
+                                market.release_reservation(total_size, seconds_remaining);
+                            }
                             return Ok(TradeAction::SkipSizing);
                         }
                     };
@@ -2162,6 +2161,11 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                         Some(live_book) => live_book.best_ask,
                         None => {
                             warn!(token_id = %no_token_id, "No orderbook for DOWN token, skipping");
+                            // Clear pending flag and release reservation
+                            if let Some(market) = self.markets.get_mut(&event_id) {
+                                market.pending_directional_order = false;
+                                market.release_reservation(total_size, seconds_remaining);
+                            }
                             return Ok(TradeAction::SkipSizing);
                         }
                     };
@@ -2172,10 +2176,20 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
 
         if up_price <= Decimal::ZERO {
             debug!("Invalid UP price {} for {}", up_price, event_id);
+            // Clear pending flag and release reservation
+            if let Some(market) = self.markets.get_mut(&event_id) {
+                market.pending_directional_order = false;
+                market.release_reservation(total_size, seconds_remaining);
+            }
             return Ok(TradeAction::SkipSizing);
         }
         if down_price <= Decimal::ZERO {
             debug!("Invalid DOWN price {} for {}", down_price, event_id);
+            // Clear pending flag and release reservation
+            if let Some(market) = self.markets.get_mut(&event_id) {
+                market.pending_directional_order = false;
+                market.release_reservation(total_size, seconds_remaining);
+            }
             return Ok(TradeAction::SkipSizing);
         }
 
@@ -2616,17 +2630,12 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             );
         }
 
-        // Record the trade in confidence sizer
+        // Update metrics after trade
         if total_volume > Decimal::ZERO {
-            self.confidence_sizer.record_trade(total_volume);
-
-            // Update volume metrics
             let volume_cents = (total_volume * Decimal::new(100, 0))
                 .try_into()
                 .unwrap_or(0u64);
             self.state.metrics.add_volume_cents(volume_cents);
-
-            // Record successful trade for metrics tracking
             self.state.record_success();
         }
 

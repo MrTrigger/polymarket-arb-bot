@@ -89,7 +89,7 @@ impl LiveModeConfig {
     /// Create config from BotConfig.
     pub fn from_bot_config(config: &BotConfig) -> Self {
         // Use allocated balance from config (trading.sizing.available_balance)
-        let allocated_balance = config.trading.sizing.available_balance;
+        let allocated_balance = config.trading.available_balance;
 
         // Convert string assets to CryptoAsset enum for discovery
         let discovery_assets: Vec<CryptoAsset> = config
@@ -265,7 +265,7 @@ impl LiveMode {
         // Create executor using official SDK (handles signing, fees, proxy wallets)
         // Pass available_balance for automatic allowance management
         // Pass global_state so allowance manager respects risk limits (won't replenish if circuit breaker tripped)
-        let available_balance = self.bot_config.trading.sizing.available_balance;
+        let available_balance = self.bot_config.trading.available_balance;
         let mut executor = LiveSdkExecutor::new(
             self.config.executor.clone(),
             &self.bot_config.wallet,

@@ -102,14 +102,16 @@ impl std::fmt::Display for Phase {
 pub struct PositionConfig {
     /// Total budget for this market (in USDC).
     pub total_budget: Decimal,
+    /// Base order size before confidence scaling (in USDC).
+    /// With confidence multiplier (0.5x-2.0x), actual size ranges from
+    /// base_order_size * 0.5 to base_order_size * 2.0.
+    pub base_order_size: Decimal,
     /// Minimum order size (default $1.00).
     pub min_order_size: Decimal,
     /// Maximum single-side exposure (default 0.80 = 80%).
     pub max_single_side_exposure: Decimal,
     /// Minimum hedge ratio (default 0.20 = 20%).
     pub min_hedge_ratio: Decimal,
-    /// Target number of trades per phase for base size calculation.
-    pub trades_per_phase: u32,
     /// Average True Range for distance normalization.
     /// Distance confidence is measured in ATR multiples.
     pub atr: Decimal,
@@ -140,10 +142,10 @@ impl Default for PositionConfig {
     fn default() -> Self {
         Self {
             total_budget: dec!(100),
+            base_order_size: dec!(50),  // $50 default, scales 0.5x-2.0x with confidence
             min_order_size: dec!(1),
             max_single_side_exposure: dec!(0.80),
             min_hedge_ratio: dec!(0.20),
-            trades_per_phase: 15,
             atr: dec!(100), // Default ATR suitable for BTC
             // Confidence calculation params (sweep optimal)
             time_conf_floor: dec!(0.30),     // 30% confidence at window start
@@ -503,24 +505,26 @@ impl PositionManager {
         }
     }
 
-    /// Calculate trade size based on phase budget, confidence, and limits.
+    /// Calculate trade size based on base_order_size, confidence, and limits.
+    ///
+    /// Size formula: base_order_size × confidence_multiplier
+    /// Where confidence_multiplier = 0.5 + (confidence × 1.5)
+    ///   - confidence=0.0 → 0.5x base size
+    ///   - confidence=0.5 → 1.25x base size
+    ///   - confidence=1.0 → 2.0x base size
     fn calculate_size(
         &self,
         phase_remaining: Decimal,
         total_remaining: Decimal,
         confidence: Decimal,
     ) -> Decimal {
-        // Base size: phase remaining / trades per phase
-        let trades_per_phase = Decimal::new(self.config.trades_per_phase as i64, 0);
-        let base_size = phase_remaining / trades_per_phase;
-
-        // Confidence multiplier: 0.5x (low) to 2.0x (high)
+        // Confidence multiplier: 0.5x (low confidence) to 2.0x (high confidence)
         let multiplier = dec!(0.5) + (confidence * dec!(1.5));
-        let mut size = base_size * multiplier;
+        let mut size = self.config.base_order_size * multiplier;
 
         // Apply limits
         size = size.min(phase_remaining); // Don't exceed phase budget
-        size = size.min(total_remaining * dec!(0.15)); // Max 15% of remaining
+        size = size.min(total_remaining); // Don't exceed total remaining budget
         size = size.max(self.config.min_order_size); // Minimum order size
 
         size

@@ -38,21 +38,21 @@ window_duration = "15min"
 log_level = "info"
 
 [trading]
-# REQUIRED: Maximum position size allowed per market in USDC
-#   Prevents over-concentration in a single market
-max_position_per_market = 1000.0
+# REQUIRED: Maximum exposure per market in USDC
+#   Hard cap on position size for a single market
+max_market_exposure = 1000.0
 
 # REQUIRED: Maximum total exposure across ALL markets in USDC
 #   Hard cap on total capital at risk at any time
 max_total_exposure = 1000.0
 
 # REQUIRED: Base order size in USDC
-#   Starting size for orders (may be scaled by confidence)
+#   Target size for each order (both arb and directional)
 #   Polymarket minimum is ~$5 worth of shares
 base_order_size = 75.0
 
 # REQUIRED: Total trading capital available in USDC
-#   Used for position sizing calculations
+#   Used for allowance management in live mode
 available_balance = 1000.0
 
 [risk]
@@ -117,7 +117,7 @@ data_dir = "data/2026-01-08_2026-01-15_15min"
 # Use different params for backtesting vs live
 [backtest.trading]
 available_balance = 1000.0
-max_position_per_market = 1000.0
+max_market_exposure = 300.0
 max_total_exposure = 1000.0
 base_order_size = 75.0
 

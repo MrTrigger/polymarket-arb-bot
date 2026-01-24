@@ -82,15 +82,15 @@ impl Default for PaperModeConfig {
 impl PaperModeConfig {
     /// Create config from BotConfig.
     pub fn from_bot_config(config: &BotConfig) -> Self {
-        // Use allocated balance from config (trading.sizing.available_balance)
-        let allocated_balance = config.trading.sizing.available_balance;
+        // Use allocated balance from config (trading.available_balance)
+        let allocated_balance = config.trading.available_balance;
 
         let mut executor_config = SimulatedExecutorConfig::paper();
         executor_config.initial_balance = allocated_balance;
         executor_config.latency_ms = config.execution.paper_fill_latency_ms;
         executor_config.fee_rate = Decimal::ZERO; // Polymarket has 0% maker fees
         executor_config.enforce_balance = true;
-        executor_config.max_position_per_market = config.trading.max_position_per_market;
+        executor_config.max_market_exposure = config.trading.max_market_exposure;
 
         // Convert string assets to CryptoAsset enum for discovery
         let discovery_assets: Vec<CryptoAsset> = config
@@ -488,12 +488,12 @@ mod tests {
     fn test_paper_mode_executor_config() {
         let mut bot_config = BotConfig::default();
         bot_config.execution.paper_fill_latency_ms = 25;
-        bot_config.trading.max_position_per_market = dec!(500);
+        bot_config.trading.max_market_exposure = dec!(500);
 
         let config = PaperModeConfig::from_bot_config(&bot_config);
 
         assert_eq!(config.executor.latency_ms, 25);
-        assert_eq!(config.executor.max_position_per_market, dec!(500));
+        assert_eq!(config.executor.max_market_exposure, dec!(500));
         assert_eq!(config.executor.fee_rate, Decimal::ZERO);
         assert!(config.executor.enforce_balance);
     }

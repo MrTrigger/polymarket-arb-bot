@@ -89,7 +89,7 @@ pub struct SimulatedExecutorConfig {
     /// Whether to enforce balance checks.
     pub enforce_balance: bool,
     /// Maximum position per market (0 = unlimited).
-    pub max_position_per_market: Decimal,
+    pub max_market_exposure: Decimal,
     /// Market order slippage factor (e.g., 0.001 for 0.1%, Simple mode only).
     pub market_order_slippage: Decimal,
     /// Minimum fill ratio to accept partial fills (0.0-1.0, OrderBook mode only).
@@ -110,7 +110,7 @@ impl SimulatedExecutorConfig {
             latency_mode: LatencyMode::RealDelay,
             latency_ms: 50,
             enforce_balance: true,
-            max_position_per_market: Decimal::ZERO,
+            max_market_exposure: Decimal::ZERO,
             market_order_slippage: Decimal::new(1, 3), // 0.1%
             min_fill_ratio: Decimal::new(5, 1),        // 50%
         }
@@ -129,7 +129,7 @@ impl SimulatedExecutorConfig {
             latency_mode: LatencyMode::Instant,
             latency_ms: 0,
             enforce_balance: true,
-            max_position_per_market: Decimal::ZERO,
+            max_market_exposure: Decimal::ZERO,
             market_order_slippage: Decimal::ZERO,
             min_fill_ratio: Decimal::new(5, 1), // 50%
         }
@@ -536,18 +536,18 @@ impl SimulatedExecutor {
         }
 
         // Check position limit
-        if self.config.max_position_per_market > Decimal::ZERO {
+        if self.config.max_market_exposure > Decimal::ZERO {
             let position = self.positions.get(&order.event_id);
             let current_size = position
                 .map(|p| p.yes_shares + p.no_shares)
                 .unwrap_or(Decimal::ZERO);
-            if current_size + order.size > self.config.max_position_per_market {
+            if current_size + order.size > self.config.max_market_exposure {
                 self.stats.orders_rejected += 1;
                 return Ok(OrderResult::Rejected(OrderRejection {
                     request_id: order.request_id.clone(),
                     reason: format!(
                         "Position limit exceeded: current={}, max={}",
-                        current_size, self.config.max_position_per_market
+                        current_size, self.config.max_market_exposure
                     ),
                     timestamp: current_time,
                 }));
