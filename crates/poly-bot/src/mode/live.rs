@@ -595,15 +595,15 @@ fn spawn_autoclaim_task(
 
     info!(
         interval_min = interval_min,
-        "Auto-claim enabled - will periodically redeem resolved positions"
+        "Auto-claim enabled - checking immediately, then every {} minutes",
+        interval_min
     );
 
     let interval = Duration::from_secs(interval_min * 60);
 
     let handle = tokio::spawn(async move {
+        // Run immediately on startup, then every interval
         let mut interval_timer = tokio::time::interval(interval);
-        // Skip first tick (fires immediately)
-        interval_timer.tick().await;
 
         loop {
             tokio::select! {

@@ -227,7 +227,8 @@ impl AsyncOrderManager {
 /// Active order being managed by the task.
 struct ActiveOrder {
     handle: OrderHandle,
-    other_leg_price: Decimal,
+    /// Other leg price (for future price chasing)
+    _other_leg_price: Decimal,
     /// Cancel signal sender (drop to signal cancellation)
     cancel_tx: Option<oneshot::Sender<()>>,
 }
@@ -238,8 +239,8 @@ pub struct OrderManagerTask<E: Executor> {
     executor: Arc<RwLock<E>>,
     /// Configuration.
     config: AsyncOrderManagerConfig,
-    /// Price chaser for limit orders.
-    chaser: PriceChaser,
+    /// Price chaser for limit orders (for future use).
+    _chaser: PriceChaser,
     /// Global state for live orderbook access.
     state: Arc<GlobalState>,
     /// Pending order tracker.
@@ -277,7 +278,7 @@ impl<E: Executor + Send + Sync + 'static> OrderManagerTask<E> {
         let task = Self {
             executor: Arc::new(RwLock::new(executor)),
             config,
-            chaser,
+            _chaser: chaser,
             state,
             pending_tracker: pending_tracker.clone(),
             active_orders: HashMap::new(),
@@ -387,7 +388,7 @@ impl<E: Executor + Send + Sync + 'static> OrderManagerTask<E> {
         let handle_clone = handle.clone();
         self.active_orders.insert(handle.id.clone(), ActiveOrder {
             handle: handle.clone(),
-            other_leg_price,
+            _other_leg_price: other_leg_price,
             cancel_tx: Some(cancel_tx),
         });
 

@@ -27,7 +27,7 @@ mode = "live"
 
 # REQUIRED: Crypto assets to trade
 #   Available: "BTC", "ETH", "SOL", "XRP"
-assets = ["BTC"]
+assets = ["BTC", "ETH", "SOL", "XRP"]         # ["BTC"]
 
 # REQUIRED: Market window duration
 #   "15min" - 15-minute binary options (higher frequency)
@@ -43,7 +43,7 @@ file_log_level = "debug"
 [trading]
 # REQUIRED: Maximum exposure per market in USDC
 #   Hard cap on position size for a single market
-max_market_exposure = 300.0
+max_market_exposure = 250.0
 
 # REQUIRED: Maximum total exposure across ALL markets in USDC
 #   Hard cap on total capital at risk at any time
@@ -61,7 +61,7 @@ available_balance = 1000.0
 [risk]
 # REQUIRED: Maximum daily loss before trading stops (USDC)
 #   Circuit breaker triggers when daily P&L drops below this
-max_daily_loss = 50.0
+max_daily_loss = 100.0
 
 # REQUIRED: Emergency close threshold (ratio)
 #   Close all positions if loss exceeds this % of balance
