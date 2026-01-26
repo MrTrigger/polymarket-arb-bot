@@ -666,6 +666,22 @@ mod tests {
             dec!(10000)
         }
 
+        fn market_exposure(&self, _event_id: &str) -> Decimal {
+            Decimal::ZERO
+        }
+
+        fn total_exposure(&self) -> Decimal {
+            Decimal::ZERO
+        }
+
+        fn remaining_capacity(&self) -> Decimal {
+            Decimal::MAX
+        }
+
+        fn get_position(&self, _event_id: &str) -> Option<crate::executor::PositionSnapshot> {
+            None
+        }
+
         async fn shutdown(&mut self) {}
     }
 

@@ -238,6 +238,7 @@ async fn run_live_mode(
     let discovery_handle = if let Some(db) = clickhouse.clone() {
         Some(spawn_discovery_task(
             db,
+            Arc::clone(&writer),
             config.assets.clone(),
             Arc::clone(&active_markets),
             Arc::clone(&stats),
@@ -362,6 +363,7 @@ async fn run_live_mode(
 /// Spawn the discovery task.
 fn spawn_discovery_task(
     db: Arc<ClickHouseClient>,
+    writer: Arc<DataWriter>,
     assets: Vec<CryptoAsset>,
     active_markets: ActiveMarkets,
     stats: Arc<HealthStats>,
@@ -389,6 +391,17 @@ fn spawn_discovery_task(
 
                         if let Ok(windows) = discovery.get_discovered_windows().await {
                             update_active_markets(&active_markets, &windows).await;
+                            // Only write currently active markets (we have data for them)
+                            let now = Utc::now();
+                            let active_windows: Vec<_> = windows
+                                .into_iter()
+                                .filter(|w| w.window_start <= now && w.window_end > now)
+                                .collect();
+                            if !active_windows.is_empty() {
+                                if let Err(e) = writer.write_market_windows(&active_windows).await {
+                                    error!("Failed to write market windows to CSV: {}", e);
+                                }
+                            }
                         }
                     }
                 }

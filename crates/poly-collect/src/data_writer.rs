@@ -289,6 +289,33 @@ impl DataWriter {
         }
     }
 
+    /// Writes aligned YES/NO price pairs to all enabled outputs.
+    pub async fn write_aligned_prices(&self, prices: &[poly_common::AlignedPricePair]) -> Result<()> {
+        if prices.is_empty() {
+            return Ok(());
+        }
+
+        let mut last_error: Option<anyhow::Error> = None;
+
+        // For now, only write to CSV (no ClickHouse support for aligned prices yet)
+        if let Some(ref csv) = self.csv {
+            if let Err(e) = csv.write_aligned_prices(prices) {
+                if self.best_effort {
+                    warn!("CSV write failed for aligned prices: {}", e);
+                }
+                last_error = Some(e);
+            }
+        }
+
+        if self.best_effort {
+            Ok(())
+        } else if let Some(e) = last_error {
+            Err(e)
+        } else {
+            Ok(())
+        }
+    }
+
     /// Flushes all outputs.
     pub fn flush(&self) -> Result<()> {
         if let Some(ref csv) = self.csv {

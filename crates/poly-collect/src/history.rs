@@ -206,51 +206,51 @@ impl HistoricalCollector {
             warn!("Failed to write market windows: {}", e);
         }
 
-        // Fetch price history for each market's YES and NO tokens
+        // Fetch price history for each market's YES and NO tokens together
+        // IMPORTANT: Align YES and NO prices to the same timestamps so they're always paired.
+        // This prevents orderbook staleness issues during backtest where one side updates before the other.
         let futures: Vec<_> = markets
             .iter()
-            .flat_map(|market| {
+            .map(|market| {
                 let client = self.client.clone();
                 let writer = Arc::clone(&self.writer);
                 let semaphore = Arc::clone(&self.semaphore);
                 let stats = Arc::clone(&stats);
+                let yes_token_id = market.yes_token_id.clone();
+                let no_token_id = market.no_token_id.clone();
+                let event_id = market.event_id.clone();
+                let window_start = market.window_start;
+                let window_end = market.window_end;
 
-                // Fetch both YES and NO token prices
-                vec![
-                    (market.yes_token_id.clone(), market.event_id.clone()),
-                    (market.no_token_id.clone(), market.event_id.clone()),
-                ]
-                .into_iter()
-                .map(move |(token_id, event_id)| {
-                    let client = client.clone();
-                    let writer = Arc::clone(&writer);
-                    let semaphore = Arc::clone(&semaphore);
-                    let stats = Arc::clone(&stats);
+                async move {
+                    let _permit = semaphore.acquire().await.unwrap();
 
-                    async move {
-                        let _permit = semaphore.acquire().await.unwrap();
+                    // Fetch both YES and NO prices within the market's trading window
+                    let (yes_result, no_result) = tokio::join!(
+                        fetch_polymarket_prices(&client, &yes_token_id, window_start, window_end),
+                        fetch_polymarket_prices(&client, &no_token_id, window_start, window_end)
+                    );
 
-                        match fetch_polymarket_prices(&client, &token_id, start_dt, end_dt).await {
-                            Ok(prices) => {
-                                let count = prices.len();
-                                if count > 0 {
-                                    if let Err(e) = writer.write_price_history(&prices).await {
-                                        warn!("Failed to write price history for {}: {}", token_id, e);
-                                    } else {
-                                        stats.polymarket_records.fetch_add(count, Ordering::Relaxed);
-                                        debug!("Fetched {} prices for token {} (event {})", count, token_id, event_id);
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                warn!("Failed to fetch prices for token {}: {}", token_id, e);
-                            }
+                    let yes_prices = yes_result.unwrap_or_default();
+                    let no_prices = no_result.unwrap_or_default();
+
+                    // Align prices by timestamp (truncate to second)
+                    // Only save pairs where both YES and NO have data at the same timestamp
+                    let aligned = align_yes_no_prices(&event_id, &yes_token_id, &no_token_id, yes_prices, no_prices);
+
+                    if !aligned.is_empty() {
+                        let count = aligned.len();
+                        if let Err(e) = writer.write_aligned_prices(&aligned).await {
+                            warn!("Failed to write aligned price history for event {}: {}", event_id, e);
+                        } else {
+                            stats.polymarket_records.fetch_add(count, Ordering::Relaxed);
+                            debug!("Wrote {} aligned price pairs for event {}", count, event_id);
                         }
-
-                        // Rate limiting
-                        tokio::time::sleep(RATE_LIMIT_DELAY).await;
                     }
-                })
+
+                    // Rate limiting
+                    tokio::time::sleep(RATE_LIMIT_DELAY).await;
+                }
             })
             .collect();
 
@@ -349,7 +349,80 @@ impl HistoricalCollector {
             }
         }
 
+        // Deduplicate markets by (asset, window_start, window_end)
+        // The Gamma API can return multiple markets for the same time window
+        // (e.g., from different queries or pagination). Keep only the first occurrence.
+        let original_count = all_markets.len();
+        let mut seen = std::collections::HashSet::new();
+        all_markets.retain(|m| {
+            let key = (m.asset.clone(), m.window_start, m.window_end);
+            seen.insert(key)
+        });
+        if all_markets.len() < original_count {
+            info!(
+                "Deduplicated markets: {} -> {} (removed {} duplicates)",
+                original_count,
+                all_markets.len(),
+                original_count - all_markets.len()
+            );
+        }
+
         info!("Found {} crypto Up/Down markets in date range", all_markets.len());
+
+        // Fetch strike prices from Binance for markets that don't have them
+        let markets_needing_strike: Vec<_> = all_markets
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.strike_price.is_zero())
+            .map(|(i, m)| (i, m.asset.clone(), m.window_start))
+            .collect();
+
+        if !markets_needing_strike.is_empty() {
+            info!(
+                "Fetching strike prices from Binance for {} markets",
+                markets_needing_strike.len()
+            );
+
+            let futures: Vec<_> = markets_needing_strike
+                .into_iter()
+                .map(|(idx, asset_str, window_start)| {
+                    let client = self.client.clone();
+                    let semaphore = Arc::clone(&self.semaphore);
+
+                    async move {
+                        let _permit = semaphore.acquire().await.unwrap();
+
+                        let asset = match asset_str.as_str() {
+                            "BTC" => CryptoAsset::Btc,
+                            "ETH" => CryptoAsset::Eth,
+                            "SOL" => CryptoAsset::Sol,
+                            "XRP" => CryptoAsset::Xrp,
+                            _ => return (idx, None),
+                        };
+
+                        let price = fetch_binance_spot_at_time(&client, asset, window_start).await;
+                        tokio::time::sleep(RATE_LIMIT_DELAY).await;
+                        (idx, price)
+                    }
+                })
+                .collect();
+
+            let results = join_all(futures).await;
+
+            for (idx, price) in results {
+                if let Some(p) = price {
+                    debug!(
+                        "Set strike for market {} ({}) to {}",
+                        all_markets[idx].event_id, all_markets[idx].asset, p
+                    );
+                    all_markets[idx].strike_price = p;
+                }
+            }
+
+            let filled = all_markets.iter().filter(|m| !m.strike_price.is_zero()).count();
+            info!("Strike prices populated: {}/{} markets", filled, all_markets.len());
+        }
+
         Ok(all_markets)
     }
 
@@ -382,15 +455,26 @@ impl HistoricalCollector {
             return None;
         }
 
-        // Detect timeframe from slug pattern (the API dates don't represent the actual window)
+        // Detect timeframe from slug pattern
+        // The Gamma API doesn't provide explicit window duration, so we infer from patterns
         let slug = market.slug.as_deref().unwrap_or("");
+        let question_lower = question.to_lowercase();
+
+        // Skip markets with explicit longer durations (2h, 4h, etc.)
+        if slug.contains("4h") || slug.contains("4-hour") || slug.contains("2h") || slug.contains("2-hour")
+            || question_lower.contains("4:00pm-8:00pm") || question_lower.contains("4:00am-8:00am") {
+            debug!("Skipping multi-hour market: {} (slug: {})", question, slug);
+            return None;
+        }
+
         let detected_duration = if slug.contains("5m") || slug.contains("-5-") || slug.contains("5-min") {
             WindowDuration::FiveMin
         } else if slug.contains("1h") || slug.contains("1-hour") || slug.contains("60-min") {
             WindowDuration::OneHour
         } else {
-            // Default to 15 min for Up/Down markets
-            WindowDuration::FifteenMin
+            // Default to configured timeframe for Up/Down markets
+            // Most "X Up or Down - Date, Time ET" markets are 15-minute windows
+            *self.timeframes.first().unwrap_or(&WindowDuration::FifteenMin)
         };
 
         // Check if this timeframe is in our configured list
@@ -427,6 +511,56 @@ impl HistoricalCollector {
 // ============================================================================
 // Binance Functions
 // ============================================================================
+
+/// Fetch the spot price from Binance at a specific timestamp.
+/// Returns the open price of the 1-minute candle containing the timestamp.
+/// This is used to determine strike prices for "Up or Down" markets.
+async fn fetch_binance_spot_at_time(
+    client: &Client,
+    asset: CryptoAsset,
+    at_time: DateTime<Utc>,
+) -> Option<Decimal> {
+    let symbol = asset.binance_symbol().to_uppercase();
+    let start_time = at_time.timestamp_millis();
+    let end_time = start_time + 60_000; // +1 minute
+
+    let url = format!(
+        "{}?symbol={}&interval=1m&startTime={}&endTime={}&limit=1",
+        BINANCE_KLINES_URL, symbol, start_time, end_time
+    );
+
+    let response = match client.get(&url).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("Failed to fetch Binance price for {} at {}: {}", asset, at_time, e);
+            return None;
+        }
+    };
+
+    if !response.status().is_success() {
+        warn!(
+            "Binance API error for {} at {}: HTTP {}",
+            asset,
+            at_time,
+            response.status()
+        );
+        return None;
+    }
+
+    let data: Vec<Vec<serde_json::Value>> = match response.json().await {
+        Ok(d) => d,
+        Err(e) => {
+            warn!("Failed to parse Binance response for {} at {}: {}", asset, at_time, e);
+            return None;
+        }
+    };
+
+    // Extract open price from first kline (index 1 is open price)
+    data.first()
+        .and_then(|arr| arr.get(1))
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<Decimal>().ok())
+}
 
 /// Fetch historical data for a single asset using parallel chunk fetching.
 async fn fetch_asset_parallel(
@@ -558,8 +692,83 @@ async fn fetch_klines_batch(
 // Polymarket Functions
 // ============================================================================
 
-/// Fetch price history for a Polymarket token.
+/// Align YES and NO prices by timestamp.
+/// Only returns price pairs where both tokens have data at the same second.
+/// This ensures the backtest always has synchronized YES+NO prices that sum to ~1.0.
+fn align_yes_no_prices(
+    event_id: &str,
+    yes_token_id: &str,
+    no_token_id: &str,
+    yes_prices: Vec<PriceHistory>,
+    no_prices: Vec<PriceHistory>,
+) -> Vec<poly_common::AlignedPricePair> {
+    use std::collections::HashMap;
+
+    // Index NO prices by timestamp (truncated to second)
+    let no_by_timestamp: HashMap<i64, Decimal> = no_prices
+        .iter()
+        .map(|p| (p.timestamp.timestamp(), p.price))
+        .collect();
+
+    // For each YES price, find matching NO price at the same second
+    let mut aligned = Vec::new();
+    for yes in yes_prices {
+        let ts_sec = yes.timestamp.timestamp();
+        if let Some(&no_price) = no_by_timestamp.get(&ts_sec) {
+            let arb = yes.price + no_price;
+            aligned.push(poly_common::AlignedPricePair {
+                event_id: event_id.to_string(),
+                yes_token_id: yes_token_id.to_string(),
+                no_token_id: no_token_id.to_string(),
+                timestamp: yes.timestamp,
+                yes_price: yes.price,
+                no_price,
+                arb,
+            });
+        }
+    }
+
+    aligned
+}
+
+/// Maximum hours per batch for Polymarket price history API.
+const POLYMARKET_HOURS_PER_BATCH: i64 = 24;
+
+/// Fetch price history for a Polymarket token in batches.
+/// The API rejects requests with intervals that are too long, so we batch by day.
 async fn fetch_polymarket_prices(
+    client: &Client,
+    token_id: &str,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> Result<Vec<PriceHistory>> {
+    let mut all_prices = Vec::new();
+    let mut batch_start = start;
+
+    while batch_start < end {
+        let batch_end = (batch_start + chrono::Duration::hours(POLYMARKET_HOURS_PER_BATCH)).min(end);
+
+        match fetch_polymarket_prices_batch(client, token_id, batch_start, batch_end).await {
+            Ok(prices) => {
+                all_prices.extend(prices);
+            }
+            Err(e) => {
+                // Log but continue - some batches may fail for old/inactive tokens
+                debug!("Batch {}-{} failed for {}: {}", batch_start, batch_end, token_id, e);
+            }
+        }
+
+        batch_start = batch_end;
+
+        // Small delay between batches to avoid rate limiting
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    Ok(all_prices)
+}
+
+/// Fetch a single batch of price history from Polymarket.
+async fn fetch_polymarket_prices_batch(
     client: &Client,
     token_id: &str,
     start: DateTime<Utc>,

@@ -64,9 +64,13 @@ crates/
         ├── state.rs        # GlobalState (DashMaps, atomics)
         ├── types.rs        # OrderBook, MarketState, Inventory
         ├── data_source/    # DataSource trait (live, replay)
-        ├── executor/       # Executor trait (live, paper, backtest)
-        │   ├── shadow.rs   # Shadow bid manager
-        │   └── chase.rs    # Price chasing logic
+        ├── executor/       # Executor trait + implementations
+        │   ├── mod.rs            # Executor trait, PositionSnapshot
+        │   ├── position_manager.rs # Common position/risk management
+        │   ├── simulated.rs      # Paper trading & backtesting
+        │   ├── live.rs           # Real Polymarket API execution
+        │   ├── shadow.rs         # Shadow bid manager
+        │   └── chase.rs          # Price chasing logic
         ├── strategy/       # Trading strategy
         │   ├── arb.rs      # Arbitrage detection
         │   ├── toxic.rs    # Toxic flow detection
@@ -76,6 +80,39 @@ crates/
         ├── observability/  # Fire-and-forget capture
         └── mode/           # Live, paper, shadow, backtest modes
 ```
+
+## Executor Architecture
+
+The executor module uses a **common code** pattern for position and risk management:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    EXECUTOR TRAIT (Common Interface)                 │
+│  • place_order(), cancel_order(), settle_market()                   │
+│  • market_exposure(), total_exposure(), remaining_capacity()        │
+│  • get_position() -> PositionSnapshot                               │
+└─────────────────────────────────────────────────────────────────────┘
+                                │
+┌───────────────────────────────┴───────────────────────────────────────┐
+│                    POSITION MANAGER (Common Code)                     │
+│  Single source of truth for position tracking and risk limits:       │
+│  • check_limits() - enforce max_market_exposure, max_total_exposure  │
+│  • record_fill() - track position (yes_shares, no_shares, cost_basis)│
+│  • settle_market() - calculate PnL at market expiry                  │
+└───────────────────────────────────────────────────────────────────────┘
+                                │
+            ┌───────────────────┴───────────────────┐
+            ▼                                       ▼
+┌─────────────────────────┐           ┌─────────────────────────┐
+│   SimulatedExecutor     │           │     LiveExecutor        │
+│   (THIN wrapper)        │           │     (THIN wrapper)      │
+│   • Simulated fills     │           │   • EIP-712 signing     │
+│   • Balance tracking    │           │   • REST API calls      │
+│   • Stats (win/loss)    │           │   • Shadow bid firing   │
+└─────────────────────────┘           └─────────────────────────┘
+```
+
+**Key principle**: Position/risk management is COMMON code. Only order placement differs between live and simulated execution.
 
 ## Critical Rules
 

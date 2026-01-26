@@ -27,7 +27,7 @@ mode = "live"
 
 # REQUIRED: Crypto assets to trade
 #   Available: "BTC", "ETH", "SOL", "XRP"
-assets = ["BTC", "ETH", "SOL", "XRP"]         # ["BTC"]
+assets = ["BTC", "ETH", "SOL", "XRP"]         # ["BTC"] ["BTC", "ETH", "SOL", "XRP"]
 
 # REQUIRED: Market window duration
 #   "15min" - 15-minute binary options (higher frequency)
@@ -52,7 +52,7 @@ max_total_exposure = 1000.0
 # REQUIRED: Base order size in USDC
 #   Target size for each order (both arb and directional)
 #   Polymarket minimum is ~$5 worth of shares
-base_order_size = 75.0
+base_order_size = 8.0
 
 # REQUIRED: Total trading capital available in USDC
 #   Used for allowance management in live mode
@@ -61,7 +61,7 @@ available_balance = 1000.0
 [risk]
 # REQUIRED: Maximum daily loss before trading stops (USDC)
 #   Circuit breaker triggers when daily P&L drops below this
-max_daily_loss = 100.0
+max_daily_loss = 200.0
 
 # REQUIRED: Emergency close threshold (ratio)
 #   Close all positions if loss exceeds this % of balance
@@ -107,22 +107,25 @@ test_trade_on_startup = false
 auto_claim_interval = 15
 
 [backtest]
-# Start date for backtesting (YYYY-MM-DD)
-start_date = "2026-01-08"
-
-# End date for backtesting (YYYY-MM-DD)
-end_date = "2026-01-15"
+# Optional: Start/end dates for backtesting (YYYY-MM-DD)
+# If omitted, all data in data_dir is used
+#start_date = "2026-01-26"
+#end_date = "2026-01-27"
 
 # Directory containing CSV data files
-data_dir = "data/2026-01-08_2026-01-15_15min"
+data_dir = "data/live_test_1"
+
+# Decision log path for comparing live vs backtest behavior
+# Logs all skip/execute decisions with full input state to CSV
+#decision_log_path = "decisions_backtest.csv"
 
 # Backtest-specific trading overrides
 # Use different params for backtesting vs live
 [backtest.trading]
 available_balance = 1000.0
-max_market_exposure = 300.0
+max_market_exposure = 250.0
 max_total_exposure = 1000.0
-base_order_size = 75.0
+base_order_size = 8.0
 
 # ============================================================================
 # ADVANCED SETTINGS - Rarely need to change

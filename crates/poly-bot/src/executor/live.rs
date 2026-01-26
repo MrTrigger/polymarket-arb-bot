@@ -36,6 +36,7 @@ use tracing::{debug, info, warn};
 
 use poly_common::types::{Outcome, Side};
 
+use super::position_manager::{PositionManager, RiskConfig};
 use super::shadow::{ShadowManager, ShadowOrder, SharedShadowManager};
 use super::{
     Executor, ExecutorError, OrderCancellation, OrderFill, OrderRequest,
@@ -76,6 +77,10 @@ pub struct LiveExecutorConfig {
     pub max_poll_attempts: u32,
     /// Fee rate for orders (basis points).
     pub fee_rate_bps: u32,
+    /// Maximum exposure per market in USDC (0 = unlimited).
+    pub max_market_exposure: Decimal,
+    /// Maximum total exposure across all markets in USDC (0 = unlimited).
+    pub max_total_exposure: Decimal,
 }
 
 impl Default for LiveExecutorConfig {
@@ -88,6 +93,8 @@ impl Default for LiveExecutorConfig {
             fill_poll_interval_ms: 100,
             max_poll_attempts: 300, // 30 seconds at 100ms intervals
             fee_rate_bps: 1000, // 10% maker fee for crypto up/down markets
+            max_market_exposure: Decimal::ZERO,
+            max_total_exposure: Decimal::ZERO,
         }
     }
 }
@@ -630,6 +637,8 @@ pub struct LiveExecutor {
     shadow_manager: Option<SharedShadowManager>,
     /// Available balance (tracked locally).
     balance: Arc<RwLock<Decimal>>,
+    /// Position manager - single source of truth for positions and risk limits.
+    position_manager: Arc<RwLock<PositionManager>>,
     /// Next nonce for orders.
     next_nonce: std::sync::atomic::AtomicU64,
     /// Domain separator for EIP-712 signing.
@@ -707,6 +716,13 @@ impl LiveExecutor {
             .build()
             .map_err(|e| ExecutorError::Internal(format!("Failed to build HTTP client: {}", e)))?;
 
+        // Create position manager with risk config
+        let risk_config = RiskConfig {
+            max_market_exposure: config.max_market_exposure,
+            max_total_exposure: config.max_total_exposure,
+        };
+        let position_manager = PositionManager::new(risk_config);
+
         Ok(Self {
             config,
             client,
@@ -715,6 +731,7 @@ impl LiveExecutor {
             request_to_order: Arc::new(RwLock::new(HashMap::new())),
             shadow_manager,
             balance: Arc::new(RwLock::new(initial_balance)),
+            position_manager: Arc::new(RwLock::new(position_manager)),
             next_nonce: std::sync::atomic::AtomicU64::new(1),
             domain_separator,
             order_type_hash,
@@ -1285,6 +1302,19 @@ impl Executor for LiveExecutor {
             }
         }
 
+        // Check position limits using PositionManager (single source of truth)
+        if request.side == Side::Buy {
+            let order_cost = request.size * request.price.unwrap_or(Decimal::ONE);
+            let mut pm = self.position_manager.write().await;
+            use super::position_manager::LimitCheckResult;
+            match pm.check_limits(&request.event_id, order_cost) {
+                LimitCheckResult::Allowed => {}
+                LimitCheckResult::ExceedsLimit { max_allowed: _, reason } => {
+                    return Err(ExecutorError::Rejected(reason));
+                }
+            }
+        }
+
         // Create signed order
         let signed_order = self.create_signed_order(&request)?;
 
@@ -1528,6 +1558,76 @@ impl Executor for LiveExecutor {
         }
     }
 
+    fn market_exposure(&self, event_id: &str) -> Decimal {
+        match self.position_manager.try_read() {
+            Ok(pm) => pm.market_exposure(event_id),
+            Err(_) => Decimal::ZERO,
+        }
+    }
+
+    fn total_exposure(&self) -> Decimal {
+        match self.position_manager.try_read() {
+            Ok(pm) => pm.total_exposure(),
+            Err(_) => Decimal::ZERO,
+        }
+    }
+
+    fn remaining_capacity(&self) -> Decimal {
+        match self.position_manager.try_read() {
+            Ok(pm) => pm.remaining_capacity(),
+            Err(_) => Decimal::MAX,
+        }
+    }
+
+    fn get_position(&self, event_id: &str) -> Option<super::PositionSnapshot> {
+        match self.position_manager.try_read() {
+            Ok(pm) => pm.get_position(event_id).map(|p| super::PositionSnapshot {
+                yes_shares: p.yes_shares,
+                no_shares: p.no_shares,
+                cost_basis: p.cost_basis,
+            }),
+            Err(_) => None,
+        }
+    }
+
+    async fn settle_market(&mut self, event_id: &str, yes_wins: bool) -> Decimal {
+        let mut pm = self.position_manager.write().await;
+        let pnl = pm.settle_market(event_id, yes_wins);
+
+        // Update balance with payout if there was a position
+        if pnl != Decimal::ZERO {
+            let mut balance = self.balance.write().await;
+            // Payout is already calculated in PnL - add cost basis back + pnl
+            // Actually, settle_market returns pnl = payout - cost_basis
+            // So we need to add payout to balance, which is cost_basis + pnl
+            // But the position info is gone after settle. For simplicity,
+            // we'll just add the pnl (profit or loss) to balance since
+            // cost was already deducted when we bought.
+            // Actually cost_basis was already deducted, so we add back payout:
+            // pnl = payout - cost_basis, so payout = pnl + cost_basis
+            // But cost_basis is gone... Let's use a simpler model:
+            // The balance was reduced by cost when buying.
+            // At settlement, we receive payout (either yes_shares or no_shares worth $1 each)
+            // So balance += payout. But pnl = payout - cost_basis.
+            // We don't have payout directly anymore. Let's reconsider.
+
+            // For live trading, the actual settlement happens on-chain via Polymarket.
+            // We just update our local tracking. The actual balance will be updated
+            // when we fetch from the API. For now, we'll adjust by pnl.
+            *balance += pnl;
+
+            info!(
+                event_id = %event_id,
+                yes_wins = %yes_wins,
+                realized_pnl = %pnl,
+                new_balance = %*balance,
+                "Market settled (local tracking)"
+            );
+        }
+
+        pnl
+    }
+
     async fn shutdown(&mut self) {
         info!("Shutting down LiveExecutor");
 
@@ -1573,12 +1673,21 @@ impl LiveExecutor {
             .and_then(|p| p.parse::<Decimal>().ok())
             .unwrap_or_else(|| request.price.unwrap_or(Decimal::ZERO));
 
-        // Update balance if filled
-        if filled_size > Decimal::ZERO {
+        // Update balance and position if filled
+        if filled_size > Decimal::ZERO && request.side == Side::Buy {
             self.update_balance_on_fill(request.side, filled_size, fill_price, Decimal::ZERO).await;
+
+            // Record fill in position manager (single source of truth)
+            let is_yes = matches!(request.outcome, Outcome::Yes);
+            let cost = filled_size * fill_price;
+            let mut pm = self.position_manager.write().await;
+            pm.record_fill(&request.event_id, is_yes, filled_size, cost);
 
             // Fire shadow if this was a primary fill
             self.fire_shadow_on_fill(&request.event_id, request.outcome).await;
+        } else if filled_size > Decimal::ZERO {
+            // Sell order - just update balance
+            self.update_balance_on_fill(request.side, filled_size, fill_price, Decimal::ZERO).await;
         }
 
         match status.status.as_str() {

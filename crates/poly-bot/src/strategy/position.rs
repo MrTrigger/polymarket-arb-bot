@@ -524,7 +524,7 @@ impl PositionManager {
 
         // Apply limits
         size = size.min(phase_remaining); // Don't exceed phase budget
-        size = size.min(total_remaining); // Don't exceed total remaining budget
+        size = size.min(total_remaining * dec!(0.15)); // Max 15% of remaining - forces gradual position building
         size = size.max(self.config.min_order_size); // Minimum order size
 
         size

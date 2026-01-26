@@ -11,7 +11,7 @@ use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use chrono::NaiveDate;
-use poly_common::{MarketWindow, OrderBookDelta, OrderBookSnapshot, PriceHistory, SpotPrice};
+use poly_common::{AlignedPricePair, MarketWindow, OrderBookDelta, OrderBookSnapshot, PriceHistory, SpotPrice};
 
 /// CSV file names (descriptive of what they contain and their source).
 const BINANCE_SPOT_PRICES_FILE: &str = "binance_spot_prices.csv";
@@ -19,6 +19,7 @@ const POLYMARKET_SNAPSHOTS_FILE: &str = "polymarket_orderbook_snapshots.csv";
 const POLYMARKET_DELTAS_FILE: &str = "polymarket_orderbook_deltas.csv";
 const POLYMARKET_WINDOWS_FILE: &str = "polymarket_market_windows.csv";
 const POLYMARKET_PRICE_HISTORY_FILE: &str = "polymarket_price_history.csv";
+const POLYMARKET_ALIGNED_PRICES_FILE: &str = "polymarket_aligned_prices.csv";
 
 /// CSV writer for collected data.
 pub struct CsvWriter {
@@ -29,6 +30,7 @@ pub struct CsvWriter {
     deltas: Mutex<Option<csv::Writer<File>>>,
     market_windows: Mutex<Option<csv::Writer<File>>>,
     price_history: Mutex<Option<csv::Writer<File>>>,
+    aligned_prices: Mutex<Option<csv::Writer<File>>>,
 }
 
 impl CsvWriter {
@@ -45,6 +47,7 @@ impl CsvWriter {
             deltas: Mutex::new(None),
             market_windows: Mutex::new(None),
             price_history: Mutex::new(None),
+            aligned_prices: Mutex::new(None),
         })
     }
 
@@ -195,6 +198,27 @@ impl CsvWriter {
         Ok(())
     }
 
+    /// Writes aligned YES/NO price pairs to CSV.
+    /// Each row contains both prices at the same timestamp with arb sanity check.
+    pub fn write_aligned_prices(&self, prices: &[AlignedPricePair]) -> Result<()> {
+        if prices.is_empty() {
+            return Ok(());
+        }
+
+        let path = self.output_dir.join(POLYMARKET_ALIGNED_PRICES_FILE);
+        Self::get_or_create_writer(&self.aligned_prices, &path)?;
+
+        let mut guard = self.aligned_prices.lock().unwrap();
+        let writer = guard.as_mut().unwrap();
+
+        for price in prices {
+            writer.serialize(price)?;
+        }
+        writer.flush()?;
+
+        Ok(())
+    }
+
     /// Flushes all writers.
     pub fn flush_all(&self) -> Result<()> {
         if let Some(ref mut writer) = *self.spot_prices.lock().unwrap() {
@@ -210,6 +234,9 @@ impl CsvWriter {
             writer.flush()?;
         }
         if let Some(ref mut writer) = *self.price_history.lock().unwrap() {
+            writer.flush()?;
+        }
+        if let Some(ref mut writer) = *self.aligned_prices.lock().unwrap() {
             writer.flush()?;
         }
         Ok(())

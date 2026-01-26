@@ -75,6 +75,10 @@ struct Args {
     /// Market window duration: 15min or 1h (overrides config file)
     #[arg(long, short = 'w')]
     window: Option<String>,
+
+    /// Backtest data source: csv or clickhouse (default: csv if data_dir is set)
+    #[arg(long, value_parser = ["csv", "clickhouse"])]
+    data_source: Option<String>,
 }
 
 #[tokio::main]
@@ -321,7 +325,7 @@ async fn run() -> Result<()> {
         TradingMode::Live => run_live_mode(config, clickhouse, shared_state).await,
         TradingMode::Paper => run_paper_mode(config, clickhouse, shared_state).await,
         TradingMode::Shadow => run_shadow_mode(config, clickhouse, shared_state).await,
-        TradingMode::Backtest => run_backtest_mode(config, clickhouse).await,
+        TradingMode::Backtest => run_backtest_mode(config, clickhouse, args.data_source).await,
     };
 
     // Shutdown dashboard servers
@@ -473,7 +477,7 @@ async fn run_shadow_mode(
 }
 
 /// Run backtest mode.
-async fn run_backtest_mode(config: BotConfig, clickhouse: ClickHouseClient) -> Result<()> {
+async fn run_backtest_mode(config: BotConfig, clickhouse: ClickHouseClient, data_source_override: Option<String>) -> Result<()> {
     info!("Initializing backtest mode");
 
     // Log backtest parameters
@@ -490,6 +494,13 @@ async fn run_backtest_mode(config: BotConfig, clickhouse: ClickHouseClient) -> R
     // Create mode config
     let mut mode_config = BacktestModeConfig::from_bot_config(&config, &clickhouse)
         .context("Failed to create backtest config")?;
+
+    // Apply data source override if specified
+    if let Some(ref source) = data_source_override {
+        mode_config = mode_config.with_data_source(source)
+            .context("Failed to apply data source override")?;
+        info!("Data source override: {}", source);
+    }
 
     // Load sweep params from strategy.toml if sweep is enabled
     if config.backtest.sweep_enabled {

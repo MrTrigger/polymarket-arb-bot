@@ -21,20 +21,20 @@
 # ============================================================================
 
 [general]
-assets = ["BTC", "ETH", "SOL"]    # Assets to collect
-timeframes = ["15m"]              # Timeframes: "5m", "15m", "1h"
+assets = ["BTC", "ETH", "SOL", "XRP"]    # Assets to collect
+timeframes = ["5m", "15m", "1h"]  # Timeframes: "5m", "15m", "1h"
 log_level = "info"                # info, debug, trace
 
 [collection]
-mode = "history"                  # "history" or "live"
+mode = "live"                     # "history" or "live"
 # Use start_date/end_date OR days (not both)
 #start_date = "2025-01-01"        # Start date (YYYY-MM-DD)
 #end_date = "2025-01-15"          # End date (YYYY-MM-DD)
-days = 7                          # Alternative: collect last N days
+days = 1                          # Alternative: collect last N days
 
 [output]
-mode = "csv"                      # clickhouse, csv, or both
-csv_dir = "data"                  # Directory for CSV output
+mode = "both"                     # clickhouse, csv, or both
+csv_dir = "data/live_test"        # Directory for CSV output
 
 # ============================================================================
 # DEFAULTS (rarely need to change)

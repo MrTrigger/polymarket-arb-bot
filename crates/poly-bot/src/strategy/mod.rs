@@ -33,11 +33,14 @@ pub mod atr;
 pub mod confidence;
 pub mod directional;
 pub mod maker;
+pub mod pivots;
 pub mod position;
 pub mod pricing;
+pub mod regime;
 pub mod signal;
 pub mod sizing;
 pub mod toxic;
+pub mod decision_log;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -642,6 +645,10 @@ pub struct StrategyLoop<D: DataSource, E: Executor> {
     last_skip_log: std::time::Instant,
     /// Dynamic ATR tracker for volatility-adjusted position sizing.
     atr_tracker: atr::AtrTracker,
+    /// Market regime detector for adaptive parameters.
+    regime_detector: regime::RegimeDetector,
+    /// Pivot tracker for support/resistance based confidence adjustment.
+    pivot_tracker: pivots::PivotTracker,
     /// Simulated time for backtest mode (uses event timestamps instead of wall-clock time).
     simulated_time: DateTime<Utc>,
     /// Price chaser for maker execution with fill polling (legacy - used when async order manager is not enabled).
@@ -655,6 +662,12 @@ pub struct StrategyLoop<D: DataSource, E: Executor> {
     order_update_rx: Option<mpsc::Receiver<OrderUpdateEvent>>,
     /// Handle to the order manager background task.
     order_manager_task: Option<tokio::task::JoinHandle<()>>,
+    /// Decision logger for comparing live vs backtest behavior.
+    decision_logger: Option<decision_log::DecisionLogger>,
+    /// First event timestamp seen (for backtest reporting).
+    first_event_time: Option<DateTime<Utc>>,
+    /// Last event timestamp seen (for backtest reporting).
+    last_event_time: Option<DateTime<Utc>>,
 }
 
 impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
@@ -721,6 +734,8 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             last_status_log: std::time::Instant::now(),
             last_skip_log: std::time::Instant::now(),
             atr_tracker: atr::AtrTracker::default(),
+            regime_detector: regime::RegimeDetector::default(),
+            pivot_tracker: pivots::PivotTracker::default(),
             simulated_time: Utc::now(),
             chaser: PriceChaser::new(ChaseConfig::from_execution_config(
                 chase_enabled,
@@ -733,6 +748,9 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             async_order_manager: None,
             order_update_rx: None,
             order_manager_task: None,
+            decision_logger: None,
+            first_event_time: None,
+            last_event_time: None,
         }
     }
 
@@ -749,6 +767,14 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
     /// Decisions include engine source for multi-engine strategy analysis.
     pub fn with_multi_observability(mut self, sender: mpsc::Sender<MultiEngineDecision>) -> Self {
         self.multi_obs_sender = Some(sender);
+        self
+    }
+
+    /// Enable decision logging for comparing live vs backtest behavior.
+    ///
+    /// Writes all trading decisions (skip and execute) to a CSV file.
+    pub fn with_decision_logger(mut self, logger: decision_log::DecisionLogger) -> Self {
+        self.decision_logger = Some(logger);
         self
     }
 
@@ -837,6 +863,10 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
     pub async fn run(&mut self) -> Result<(), StrategyError> {
         info!("Strategy loop starting (async_order_manager={})", self.async_order_manager.is_some());
 
+        // Create a shutdown check interval (100ms) to ensure Ctrl+C responsiveness
+        let mut shutdown_check = tokio::time::interval(std::time::Duration::from_millis(100));
+        shutdown_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         loop {
             // Check for shutdown
             if self.state.control.is_shutdown_requested() {
@@ -851,6 +881,12 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             // Use select! to handle both data events and order updates concurrently
             tokio::select! {
                 biased;
+
+                // Highest priority: Check for shutdown signal periodically
+                _ = shutdown_check.tick() => {
+                    // Just loop back to check is_shutdown_requested() at top of loop
+                    continue;
+                }
 
                 // High priority: Process order updates from async order manager
                 order_update = async {
@@ -1006,6 +1042,13 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
         // Update simulated time from event timestamp (for backtest mode)
         self.simulated_time = event.timestamp();
 
+        // Track event time range for backtest reporting
+        let ts = event.timestamp();
+        if self.first_event_time.is_none() {
+            self.first_event_time = Some(ts);
+        }
+        self.last_event_time = Some(ts);
+
         // Process event and get which markets were affected
         let affected_markets: Vec<String> = match event {
             MarketEvent::SpotPrice(e) => {
@@ -1020,6 +1063,13 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             MarketEvent::BookSnapshot(e) => {
                 let event_id = self.handle_book_snapshot(e).await;
                 event_id.into_iter().collect()
+            }
+            MarketEvent::BookSnapshotPair(e) => {
+                // Process both YES and NO snapshots atomically
+                let event_id = e.event_id.clone();
+                self.handle_book_snapshot(e.yes_snapshot).await;
+                self.handle_book_snapshot(e.no_snapshot).await;
+                vec![event_id]
             }
             MarketEvent::BookDelta(e) => {
                 let event_id = self.handle_book_delta(e);
@@ -1064,6 +1114,12 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
 
         // Record price for dynamic ATR calculation
         self.atr_tracker.record_price(event.asset, event.price);
+
+        // Update pivot tracker and regime detector with current ATR
+        let current_atr = self.atr_tracker.get_atr(event.asset);
+        self.pivot_tracker.set_atr(event.asset, current_atr);
+        self.pivot_tracker.record_price(event.asset, event.price, event.timestamp.timestamp());
+        self.regime_detector.update_atr(event.asset, current_atr);
 
         // Update global state
         self.state.market_data.update_spot_price(
@@ -1557,8 +1613,9 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             self.markets.remove(id);
             self.token_to_event.remove(yes_token_id);
             self.token_to_event.remove(no_token_id);
-            // Also remove from global state (dashboard display)
+            // Also remove from global state (dashboard display and inventory)
             self.state.market_data.active_windows.remove(id);
+            self.state.market_data.remove_inventory(id);
         }
 
         expired
@@ -1610,8 +1667,8 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             self.log_market_status(self.simulated_time);
         }
 
-        // Calculate total exposure once
-        let total_exposure = self.state.market_data.total_exposure();
+        // Calculate total exposure from executor (single source of truth)
+        let total_exposure = self.executor.total_exposure();
 
         // Check only specified markets (clone to Vec to match check_opportunities)
         let event_ids: Vec<String> = market_ids.to_vec();
@@ -1886,13 +1943,32 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
 
                     // Debug: log confidence calculation for position manager
                     let phase = position::Phase::from_seconds(seconds_remaining);
-                    let pm_conf = market.position_manager.calculate_confidence(
+                    let base_conf = market.position_manager.calculate_confidence(
                         distance_dollars,
                         seconds_remaining,
                         window_duration_secs,
                     );
                     let atr = market.position_manager.atr();
                     let atr_mult = if atr > Decimal::ZERO { distance_dollars.abs() / atr } else { Decimal::ZERO };
+
+                    // Apply pivot-based confidence adjustment
+                    // Determines if current price is near S/R levels and adjusts confidence accordingly
+                    let favor_up = matches!(opp.signal, signal::Signal::StrongUp | signal::Signal::LeanUp);
+                    let spot_price = market.state.spot_price.unwrap_or(market.strike_price);
+                    let pivot_conf = self.pivot_tracker.calculate_confidence(asset, spot_price, favor_up);
+                    let pm_conf = pivot_conf.apply(base_conf);
+
+                    // Log pivot adjustment if significant
+                    if (pivot_conf.multiplier - Decimal::ONE).abs() > dec!(0.05) {
+                        trace!(
+                            "🎯 Pivot adj {} {}: regime={} S={} R={} pos={:.0}% mult={:.2} base_conf={:.2} -> {:.2}",
+                            event_id, asset, pivot_conf.regime,
+                            pivot_conf.support.map(|s| format!("{:.0}", s)).unwrap_or("-".into()),
+                            pivot_conf.resistance.map(|r| format!("{:.0}", r)).unwrap_or("-".into()),
+                            pivot_conf.range_position.unwrap_or(dec!(-1)) * dec!(100),
+                            pivot_conf.multiplier, base_conf, pm_conf
+                        );
+                    }
 
                     // Calculate time and distance confidence components for detailed logging (trace level)
                     // These now use the parameterized formulas from PositionManager
@@ -1961,6 +2037,30 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                                     event_latency_us,
                                 );
                                 self.state.metrics.inc_skipped();
+                                // Decision log for live vs backtest comparison
+                                if let Some(ref logger) = self.decision_logger {
+                                    logger.log_skip(
+                                        self.simulated_time,
+                                        &event_id,
+                                        asset,
+                                        spot_price,
+                                        opp.strike_price,
+                                        opp.distance,
+                                        atr,
+                                        seconds_remaining,
+                                        &format!("{}", phase),
+                                        opp.signal.clone(),
+                                        opp.yes_ask,
+                                        opp.no_ask,
+                                        base_conf,
+                                        pivot_conf.multiplier,
+                                        pm_conf,
+                                        ev,
+                                        min_edge,
+                                        favorable_price,
+                                        reason,
+                                    );
+                                }
                             }
                             continue;
                         }
@@ -2020,6 +2120,32 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                     // Execute directional trade
                     info!("🚀 EXECUTE {} {}: signal={:?} size=${:.2} phase={} conf={:.2} up_ratio={} down_ratio={}",
                         event_id, asset, opp.signal, total_size, phase, pm_confidence, opp.up_ratio, opp.down_ratio);
+
+                    // Decision log for live vs backtest comparison
+                    if let Some(ref logger) = self.decision_logger {
+                        logger.log_execute(
+                            self.simulated_time,
+                            &event_id,
+                            asset,
+                            spot_price,
+                            opp.strike_price,
+                            opp.distance,
+                            atr,
+                            seconds_remaining,
+                            &format!("{}", phase),
+                            opp.signal.clone(),
+                            opp.yes_ask,
+                            opp.no_ask,
+                            base_conf,
+                            pivot_conf.multiplier,
+                            pm_confidence,
+                            ev,
+                            min_edge,
+                            favorable_price,
+                            total_size,
+                            opp.up_ratio,
+                        );
+                    }
 
                     let action = self.execute_directional(opp, total_size).await?;
 
@@ -3291,6 +3417,12 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
     pub fn simulation_stats(&self) -> Option<crate::executor::simulated::SimulatedStats> {
         self.executor.simulation_stats()
     }
+
+    /// Get the actual event time range from processed events.
+    /// Returns (first_event_time, last_event_time) if any events were processed.
+    pub fn event_time_range(&self) -> (Option<DateTime<Utc>>, Option<DateTime<Utc>>) {
+        (self.first_event_time, self.last_event_time)
+    }
 }
 
 #[cfg(test)]
@@ -3388,6 +3520,22 @@ mod tests {
 
         fn available_balance(&self) -> Decimal {
             self.balance
+        }
+
+        fn market_exposure(&self, _event_id: &str) -> Decimal {
+            Decimal::ZERO
+        }
+
+        fn total_exposure(&self) -> Decimal {
+            Decimal::ZERO
+        }
+
+        fn remaining_capacity(&self) -> Decimal {
+            Decimal::MAX
+        }
+
+        fn get_position(&self, _event_id: &str) -> Option<crate::executor::PositionSnapshot> {
+            None
         }
 
         async fn shutdown(&mut self) {}

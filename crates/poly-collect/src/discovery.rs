@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use poly_common::{ClickHouseClient, CryptoAsset, MarketWindow};
+use poly_common::{ClickHouseClient, CryptoAsset, MarketWindow, WindowDuration};
 use reqwest::Client;
 use rust_decimal::Decimal;
 use thiserror::Error;
@@ -16,6 +16,9 @@ use tracing::{debug, error, info, warn};
 
 // Re-export types from poly-market for convenience
 pub use poly_market::{GammaEvent, GammaMarket, GammaTag, TokenIds};
+
+// Use poly-market's discovery for Binance price fetching (same method as live trading)
+use poly_market::{DiscoveryConfig as PolyMarketDiscoveryConfig, MarketDiscovery as PolyMarketDiscovery};
 
 /// Gamma API base URL.
 const GAMMA_API_URL: &str = "https://gamma-api.polymarket.com";
@@ -54,6 +57,8 @@ pub struct MarketDiscovery {
     known_markets: HashSet<String>,
     /// Recently discovered market windows (for CLOB subscription).
     discovered_windows: Vec<MarketWindow>,
+    /// Binance price fetcher (uses same logic as live trading).
+    price_fetcher: PolyMarketDiscovery,
 }
 
 impl MarketDiscovery {
@@ -64,12 +69,20 @@ impl MarketDiscovery {
             .build()
             .expect("Failed to create HTTP client");
 
+        // Create price fetcher using poly-market's discovery (same as live trading)
+        let price_fetcher = PolyMarketDiscovery::new(PolyMarketDiscoveryConfig {
+            assets: assets.clone(),
+            window_duration: WindowDuration::FifteenMin,
+            ..Default::default()
+        });
+
         Self {
             http,
             db,
             assets,
             known_markets: HashSet::new(),
             discovered_windows: Vec::new(),
+            price_fetcher,
         }
     }
 
@@ -95,10 +108,58 @@ impl MarketDiscovery {
             }
 
             // Check if this is a 15-minute crypto market
-            if let Some(market_window) = self.parse_crypto_market(&event)? {
+            if let Some(mut market_window) = self.parse_crypto_market(&event)? {
+                // For "Up or Down" markets with no strike in title, fetch from Binance
+                // This is the same logic used in live trading (poly-market crate)
+                let now = Utc::now();
+                let is_active = now >= market_window.window_start && now < market_window.window_end;
+                let is_expired = now >= market_window.window_end;
+
+                if market_window.strike_price.is_zero() && (is_active || is_expired) {
+                    // Fetch historical price at exact window_start time from Binance
+                    // Parse asset from string (only 4 supported assets)
+                    let asset = match market_window.asset.to_uppercase().as_str() {
+                        "BTC" => CryptoAsset::Btc,
+                        "ETH" => CryptoAsset::Eth,
+                        "SOL" => CryptoAsset::Sol,
+                        "XRP" => CryptoAsset::Xrp,
+                        _ => {
+                            warn!("Unknown asset: {}, defaulting to BTC", market_window.asset);
+                            CryptoAsset::Btc
+                        }
+                    };
+
+                    match self.price_fetcher.fetch_historical_spot_price(asset, market_window.window_start).await {
+                        Ok(Some(price)) => {
+                            info!(
+                                "Setting strike for {} {} from Binance at {}: ${}",
+                                market_window.asset, market_window.event_id, market_window.window_start, price
+                            );
+                            market_window.strike_price = price;
+                        }
+                        Ok(None) => {
+                            warn!(
+                                "Binance returned no price data for {} at {}, strike stays at 0",
+                                market_window.event_id, market_window.window_start
+                            );
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Failed to fetch price for {}: {}, strike stays at 0",
+                                market_window.event_id, e
+                            );
+                        }
+                    }
+                } else if market_window.strike_price.is_zero() && !is_active && !is_expired {
+                    debug!(
+                        "Market {} has no strike, waiting for window to start",
+                        market_window.event_id
+                    );
+                }
+
                 info!(
-                    "Discovered new market: {} {} (ends {})",
-                    market_window.asset, market_window.event_id, market_window.window_end
+                    "Discovered new market: {} {} strike={} (ends {})",
+                    market_window.asset, market_window.event_id, market_window.strike_price, market_window.window_end
                 );
                 new_markets.push(market_window);
                 self.known_markets.insert(event_id);
@@ -107,8 +168,12 @@ impl MarketDiscovery {
 
         // Store new markets to ClickHouse and update discovered windows
         if !new_markets.is_empty() {
-            self.store_markets(&new_markets).await?;
-            // Extend discovered windows for CLOB subscription
+            // Try to store to ClickHouse, but don't fail if it errors
+            // (we can still collect data to CSV)
+            if let Err(e) = self.store_markets(&new_markets).await {
+                warn!("Failed to store markets to ClickHouse (continuing): {}", e);
+            }
+            // Always extend discovered windows for CLOB subscription
             self.discovered_windows.extend(new_markets.clone());
         }
 
@@ -123,25 +188,45 @@ impl MarketDiscovery {
 
     /// Fetch active events from Gamma API.
     async fn fetch_active_events(&self) -> Result<Vec<GammaEvent>, DiscoveryError> {
+        // Fetch from all relevant tag_slugs since markets are hidden from general listings
+        let tag_slugs = ["5M", "15M"]; // 5-minute and 15-minute markets
+        let mut all_events = Vec::new();
+
+        for tag in tag_slugs {
+            let url = format!(
+                "{}/events?tag_slug={}&closed=false&limit=100",
+                GAMMA_API_URL, tag
+            );
+
+            let response = self.http.get(&url).send().await?;
+            if response.status().is_success() {
+                let events: Vec<GammaEvent> = response.json().await?;
+                debug!("Fetched {} events from tag_slug={}", events.len(), tag);
+                all_events.extend(events);
+            }
+        }
+
+        // Also try 1-hour markets (no tag_slug, use active=true)
         let url = format!(
             "{}/events?active=true&closed=false&limit=100",
             GAMMA_API_URL
         );
-
-        let response = self.http.get(&url).send().await?;
-
-        if !response.status().is_success() {
-            return Err(DiscoveryError::InvalidData(format!(
-                "Gamma API returned status {}",
-                response.status()
-            )));
+        if let Ok(response) = self.http.get(&url).send().await {
+            if response.status().is_success() {
+                if let Ok(events) = response.json::<Vec<GammaEvent>>().await {
+                    debug!("Fetched {} events from active=true", events.len());
+                    all_events.extend(events);
+                }
+            }
         }
 
-        let events: Vec<GammaEvent> = response.json().await?;
-        Ok(events)
+        info!("Total events fetched: {}", all_events.len());
+        Ok(all_events)
     }
 
-    /// Parse a Gamma event into a MarketWindow if it's a valid 15-minute crypto market.
+    /// Parse a Gamma event into a MarketWindow if it's a valid crypto up/down market.
+    /// Since we fetch from tag_slug=5M and tag_slug=15M, we don't need to check for
+    /// time duration keywords - just verify it's an up/down market.
     fn parse_crypto_market(
         &self,
         event: &GammaEvent,
@@ -150,15 +235,6 @@ impl MarketDiscovery {
             Some(t) => t.to_lowercase(),
             None => return Ok(None),
         };
-
-        // Check if this is a 15-minute market
-        let is_15min = FIFTEEN_MIN_KEYWORDS
-            .iter()
-            .any(|kw| title.contains(kw));
-
-        if !is_15min {
-            return Ok(None);
-        }
 
         // Check if it's an up/down market
         let is_up_down = UP_DOWN_KEYWORDS
@@ -421,20 +497,30 @@ impl MarketDiscovery {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_detect_asset() {
-        let discovery = MarketDiscovery {
+    fn test_discovery() -> MarketDiscovery {
+        let assets = vec![
+            CryptoAsset::Btc,
+            CryptoAsset::Eth,
+            CryptoAsset::Sol,
+            CryptoAsset::Xrp,
+        ];
+        MarketDiscovery {
             http: Client::new(),
             db: Arc::new(ClickHouseClient::with_defaults()),
-            assets: vec![
-                CryptoAsset::Btc,
-                CryptoAsset::Eth,
-                CryptoAsset::Sol,
-                CryptoAsset::Xrp,
-            ],
+            assets: assets.clone(),
             known_markets: HashSet::new(),
             discovered_windows: Vec::new(),
-        };
+            price_fetcher: PolyMarketDiscovery::new(PolyMarketDiscoveryConfig {
+                assets,
+                window_duration: WindowDuration::FifteenMin,
+                ..Default::default()
+            }),
+        }
+    }
+
+    #[test]
+    fn test_detect_asset() {
+        let discovery = test_discovery();
 
         assert_eq!(
             discovery.detect_asset("will btc go up").unwrap(),
@@ -468,13 +554,7 @@ mod tests {
 
     #[test]
     fn test_parse_strike_price() {
-        let discovery = MarketDiscovery {
-            http: Client::new(),
-            db: Arc::new(ClickHouseClient::with_defaults()),
-            assets: vec![],
-            known_markets: HashSet::new(),
-            discovered_windows: Vec::new(),
-        };
+        let discovery = test_discovery();
 
         assert_eq!(
             discovery.parse_strike_price("Will BTC be above $100,000 at 12:15 UTC?"),
@@ -492,13 +572,7 @@ mod tests {
 
     #[test]
     fn test_parse_token_ids() {
-        let discovery = MarketDiscovery {
-            http: Client::new(),
-            db: Arc::new(ClickHouseClient::with_defaults()),
-            assets: vec![],
-            known_markets: HashSet::new(),
-            discovered_windows: Vec::new(),
-        };
+        let discovery = test_discovery();
 
         let market = GammaMarket {
             id: Some("test".to_string()),

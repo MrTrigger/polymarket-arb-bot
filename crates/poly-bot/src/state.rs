@@ -297,6 +297,16 @@ impl GlobalState {
         self.metrics.trades_failed.fetch_add(1, Ordering::Relaxed);
         failures >= max_failures
     }
+
+    /// Reset all state for a fresh backtest run.
+    ///
+    /// This clears market data, control flags, and metrics while preserving
+    /// the same Arc references (so signal handlers continue to work).
+    pub fn reset(&self) {
+        self.market_data.clear();
+        self.control.reset();
+        self.metrics.reset();
+    }
 }
 
 impl Default for GlobalState {
@@ -406,6 +416,12 @@ impl SharedMarketData {
         self.inventory.get(event_id).map(|r| r.value().clone())
     }
 
+    /// Remove inventory for an event (called when markets settle).
+    #[inline]
+    pub fn remove_inventory(&self, event_id: &str) {
+        self.inventory.remove(event_id);
+    }
+
     /// Calculate total exposure across all positions.
     pub fn total_exposure(&self) -> Decimal {
         self.inventory
@@ -444,6 +460,17 @@ impl SharedMarketData {
     /// Get recent trades for dashboard.
     pub fn get_recent_trades(&self) -> Vec<TradeRecord> {
         self.recent_trades.read().clone()
+    }
+
+    /// Clear all market data for a fresh backtest run.
+    pub fn clear(&self) {
+        self.spot_prices.clear();
+        self.order_books.clear();
+        self.inventory.clear();
+        self.shadow_orders.clear();
+        self.active_windows.clear();
+        self.confidence_snapshots.clear();
+        self.recent_trades.write().clear();
     }
 }
 
@@ -593,6 +620,20 @@ impl ControlFlags {
     #[inline]
     pub fn clear_pending_orders(&self) {
         self.pending_orders_count.store(0, Ordering::Release);
+    }
+
+    /// Reset control flags to initial state (for reuse between backtest runs).
+    ///
+    /// This resets trading state including the shutdown flag.
+    pub fn reset(&self) {
+        self.trading_enabled.store(false, Ordering::Release);
+        self.circuit_breaker_tripped.store(false, Ordering::Release);
+        self.consecutive_failures.store(0, Ordering::Release);
+        self.circuit_breaker_trip_time.store(0, Ordering::Release);
+        self.shutdown_requested.store(false, Ordering::Release);
+        self.bot_status.store(BotStatus::Initializing.to_u8(), Ordering::Release);
+        self.pending_orders_count.store(0, Ordering::Release);
+        *self.error_message.write() = None;
     }
 }
 
@@ -744,6 +785,21 @@ impl MetricsCounters {
             allocated_balance: self.allocated_balance_usdc(),
             current_balance: self.current_balance_usdc(),
         }
+    }
+
+    /// Reset all metrics counters to zero (for reuse between backtest runs).
+    pub fn reset(&self) {
+        self.events_processed.store(0, Ordering::Relaxed);
+        self.opportunities_detected.store(0, Ordering::Relaxed);
+        self.trades_executed.store(0, Ordering::Relaxed);
+        self.trades_failed.store(0, Ordering::Relaxed);
+        self.trades_skipped.store(0, Ordering::Relaxed);
+        self.pnl_cents.store(0, Ordering::Relaxed);
+        self.volume_cents.store(0, Ordering::Relaxed);
+        self.shadow_orders_fired.store(0, Ordering::Relaxed);
+        self.shadow_orders_filled.store(0, Ordering::Relaxed);
+        // Note: allocated_balance and current_balance are intentionally NOT reset
+        // as they represent configuration, not runtime state
     }
 }
 

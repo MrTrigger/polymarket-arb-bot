@@ -599,6 +599,26 @@ impl Executor for LiveSdkExecutor {
         Decimal::ZERO
     }
 
+    fn market_exposure(&self, _event_id: &str) -> Decimal {
+        // TODO: Add position manager for proper tracking
+        Decimal::ZERO
+    }
+
+    fn total_exposure(&self) -> Decimal {
+        // TODO: Add position manager for proper tracking
+        Decimal::ZERO
+    }
+
+    fn remaining_capacity(&self) -> Decimal {
+        // TODO: Add position manager for proper tracking
+        Decimal::MAX
+    }
+
+    fn get_position(&self, _event_id: &str) -> Option<crate::executor::PositionSnapshot> {
+        // TODO: Add position manager for proper tracking
+        None
+    }
+
     async fn shutdown(&mut self) {
         // Stop allowance manager
         if let Some(ref manager) = self.allowance_manager {

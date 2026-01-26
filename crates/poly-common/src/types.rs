@@ -339,6 +339,29 @@ pub struct PriceHistory {
     pub price: Decimal,
 }
 
+/// Aligned YES/NO price pair for backtesting.
+/// Both prices are at the same timestamp, ensuring no staleness issues.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlignedPricePair {
+    /// Event ID for this market.
+    pub event_id: String,
+    /// YES token ID.
+    pub yes_token_id: String,
+    /// NO token ID.
+    pub no_token_id: String,
+    /// Timestamp of both prices.
+    pub timestamp: DateTime<Utc>,
+    /// YES token price (0.00 to 1.00).
+    #[serde(with = "rust_decimal::serde::str")]
+    pub yes_price: Decimal,
+    /// NO token price (0.00 to 1.00).
+    #[serde(with = "rust_decimal::serde::str")]
+    pub no_price: Decimal,
+    /// Combined cost (YES + NO) - sanity check, should be ~1.00.
+    #[serde(with = "rust_decimal::serde::str")]
+    pub arb: Decimal,
+}
+
 /// Historical trade data from Polymarket API.
 #[derive(Debug, Clone, Serialize, Deserialize, Row)]
 pub struct TradeHistory {

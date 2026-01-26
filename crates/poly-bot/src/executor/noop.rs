@@ -139,6 +139,26 @@ impl Executor for NoOpExecutor {
         self.config.virtual_balance
     }
 
+    fn market_exposure(&self, _event_id: &str) -> Decimal {
+        // Noop executor doesn't track positions
+        Decimal::ZERO
+    }
+
+    fn total_exposure(&self) -> Decimal {
+        // Noop executor doesn't track positions
+        Decimal::ZERO
+    }
+
+    fn remaining_capacity(&self) -> Decimal {
+        // Unlimited capacity for noop executor
+        Decimal::MAX
+    }
+
+    fn get_position(&self, _event_id: &str) -> Option<crate::executor::PositionSnapshot> {
+        // Noop executor doesn't track positions
+        None
+    }
+
     async fn shutdown(&mut self) {
         info!(
             orders_received = self.orders_received,

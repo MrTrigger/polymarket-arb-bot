@@ -479,6 +479,9 @@ pub struct BacktestConfig {
     /// If present, backtest uses these instead of the main [trading] config.
     /// This allows keeping stable backtest parameters for comparing commits.
     pub trading: Option<TradingConfig>,
+
+    /// Path to write decision log CSV (for comparing live vs backtest).
+    pub decision_log_path: Option<String>,
 }
 
 impl Default for BacktestConfig {
@@ -491,6 +494,7 @@ impl Default for BacktestConfig {
             data_dir: None,
             sweep_parallel_workers: None,
             trading: None,
+            decision_log_path: None,
         }
     }
 }
@@ -1000,11 +1004,8 @@ impl BotConfig {
             bail!("Live mode requires POLY_PRIVATE_KEY environment variable");
         }
 
-        if self.mode == TradingMode::Backtest
-            && (self.backtest.start_date.is_none() || self.backtest.end_date.is_none())
-        {
-            bail!("Backtest mode requires start_date and end_date");
-        }
+        // Note: start_date and end_date are optional for backtest mode
+        // If not specified, all data in the data_dir will be used
 
         // Trading config validation
         if self.trading.min_margin_early <= Decimal::ZERO {
@@ -1046,6 +1047,8 @@ impl BotConfig {
 /// Sweep configuration loaded from strategy.toml.
 #[derive(Debug, Clone, Default)]
 pub struct SweepConfig {
+    /// Base order size values to sweep (key parameter for trade frequency).
+    pub base_order_sizes: Vec<f64>,
     /// Strong UP ratio values to sweep.
     pub strong_ratios: Vec<f64>,
     /// Lean UP ratio values to sweep.
@@ -1079,6 +1082,7 @@ impl SweepConfig {
         let toml: StrategyToml = toml::from_str(content)
             .context("Failed to parse strategy.toml")?;
         Ok(Self {
+            base_order_sizes: toml.sweep.base_order_sizes,
             strong_ratios: toml.sweep.strong_ratios,
             lean_ratios: toml.sweep.lean_ratios,
             time_conf_floors: toml.sweep.time_conf_floors,
@@ -1104,6 +1108,11 @@ impl SweepConfig {
             } else {
                 None
             }
+        }
+
+        // Base order size (key parameter for trade frequency)
+        if let Some(p) = make_param("base_order_size", &self.base_order_sizes) {
+            params.push(p);
         }
 
         // Allocation ratios
@@ -1145,6 +1154,7 @@ struct StrategyToml {
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 struct SweepToml {
+    base_order_sizes: Vec<f64>,
     strong_ratios: Vec<f64>,
     lean_ratios: Vec<f64>,
     time_conf_floors: Vec<f64>,
@@ -1158,6 +1168,7 @@ impl Default for SweepToml {
     fn default() -> Self {
         // Empty vectors by default - only sweep what's explicitly defined in strategy.toml
         Self {
+            base_order_sizes: Vec::new(),
             strong_ratios: Vec::new(),
             lean_ratios: Vec::new(),
             time_conf_floors: Vec::new(),
@@ -1468,6 +1479,8 @@ struct BacktestToml {
     /// Optional trading config specific to backtest mode.
     /// If present, backtest uses these instead of [trading].
     trading: Option<TradingToml>,
+    /// Path to write decision log CSV.
+    decision_log_path: Option<String>,
 }
 
 impl Default for BacktestToml {
@@ -1480,6 +1493,7 @@ impl Default for BacktestToml {
             data_dir: None,
             sweep_parallel_workers: None,
             trading: None,
+            decision_log_path: None,
         }
     }
 }
@@ -1808,6 +1822,7 @@ impl BotConfig {
                     }),
                     None => None,
                 },
+                decision_log_path: toml.backtest.decision_log_path,
             },
             live: LiveConfig {
                 auto_claim_interval: toml.live.auto_claim_interval,

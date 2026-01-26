@@ -16,8 +16,8 @@ use tracing::{debug, info, warn};
 use poly_common::types::CryptoAsset;
 
 use super::{
-    BookSnapshotEvent, DataSource, DataSourceError, MarketEvent, SpotPriceEvent,
-    WindowCloseEvent, WindowOpenEvent,
+    BookSnapshotEvent, BookSnapshotPairEvent, DataSource, DataSourceError, MarketEvent,
+    SpotPriceEvent, WindowCloseEvent, WindowOpenEvent,
 };
 use crate::types::PriceLevel;
 
@@ -106,8 +106,9 @@ struct MarketWindowRow {
     discovered_at: DateTime<Utc>,
 }
 
-/// CSV row for price history.
+/// CSV row for price history (legacy format).
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 struct PriceHistoryRow {
     token_id: String,
     timestamp: DateTime<Utc>,
@@ -115,8 +116,46 @@ struct PriceHistoryRow {
     price: Decimal,
 }
 
-/// Mapping of token_id to (event_id, is_yes_token)
-type TokenMap = HashMap<String, (String, bool)>;
+/// CSV row for aligned price pairs (new format with arb sanity check).
+#[derive(Debug, Clone, Deserialize)]
+struct AlignedPriceRow {
+    event_id: String,
+    yes_token_id: String,
+    no_token_id: String,
+    timestamp: DateTime<Utc>,
+    #[serde(with = "rust_decimal::serde::str")]
+    yes_price: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    no_price: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    #[allow(dead_code)]
+    arb: Decimal,
+}
+
+/// CSV row for orderbook snapshots (live collected format).
+#[derive(Debug, Clone, Deserialize)]
+struct OrderBookSnapshotRow {
+    token_id: String,
+    event_id: String,
+    timestamp: DateTime<Utc>,
+    #[serde(with = "rust_decimal::serde::str")]
+    best_bid: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    best_bid_size: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    best_ask: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    best_ask_size: Decimal,
+    #[allow(dead_code)]
+    spread_bps: i32,
+    #[serde(with = "rust_decimal::serde::str")]
+    bid_depth: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    ask_depth: Decimal,
+}
+
+/// Mapping of event_id to (yes_token_id, no_token_id)
+type EventTokenMap = HashMap<String, (String, String)>;
 
 /// CSV-based replay data source.
 pub struct CsvReplayDataSource {
@@ -157,14 +196,19 @@ impl CsvReplayDataSource {
 
         info!("Loading CSV replay data from {}", data_dir_str);
 
-        // Load market windows first (they define the token -> event mapping)
-        let token_map = self.load_market_windows(data_dir)?;
+        // Load market windows first (creates window open/close events)
+        let event_tokens = self.load_market_windows(data_dir)?;
 
         // Load spot prices
         self.load_spot_prices(data_dir)?;
 
-        // Load price history and convert to book snapshots
-        self.load_price_history(data_dir, &token_map)?;
+        // Try to load orderbook snapshots first (live collected, full book data)
+        // then fall back to aligned prices (historical, bid-only prices)
+        let snapshots_loaded = self.load_orderbook_snapshots(data_dir, &event_tokens)?;
+        if !snapshots_loaded {
+            // Fall back to aligned prices (historical format)
+            self.load_aligned_prices(data_dir, &event_tokens)?;
+        }
 
         info!("Loaded {} events for replay", self.event_queue.len());
         self.data_loaded = true;
@@ -172,8 +216,8 @@ impl CsvReplayDataSource {
         Ok(())
     }
 
-    /// Load market windows and return token -> event mapping.
-    fn load_market_windows(&mut self, data_dir: &Path) -> Result<TokenMap, DataSourceError> {
+    /// Load market windows and return event -> token mapping.
+    fn load_market_windows(&mut self, data_dir: &Path) -> Result<EventTokenMap, DataSourceError> {
         let path = data_dir.join("polymarket_market_windows.csv");
         if !path.exists() {
             warn!("Market windows file not found: {:?}", path);
@@ -183,7 +227,7 @@ impl CsvReplayDataSource {
         let mut reader = csv::Reader::from_path(&path)
             .map_err(|e| DataSourceError::Parse(format!("Failed to open {:?}: {}", path, e)))?;
 
-        let mut token_map: TokenMap = HashMap::new();
+        let mut event_tokens: EventTokenMap = HashMap::new();
         let mut window_count = 0;
 
         for result in reader.deserialize() {
@@ -211,9 +255,13 @@ impl CsvReplayDataSource {
                 continue;
             }
 
-            // Build token -> event mapping
-            token_map.insert(row.yes_token_id.clone(), (row.event_id.clone(), true));
-            token_map.insert(row.no_token_id.clone(), (row.event_id.clone(), false));
+            // Skip markets that were already expired when discovered (no live data for them)
+            if row.discovered_at > row.window_end {
+                continue;
+            }
+
+            // Build event -> token mapping for validating aligned prices
+            event_tokens.insert(row.event_id.clone(), (row.yes_token_id.clone(), row.no_token_id.clone()));
 
             // Create window open event
             // Use window_start (not discovered_at) so window opens at the correct time
@@ -253,7 +301,7 @@ impl CsvReplayDataSource {
         }
 
         debug!("Loaded {} market windows", window_count);
-        Ok(token_map)
+        Ok(event_tokens)
     }
 
     /// Load spot prices.
@@ -314,15 +362,18 @@ impl CsvReplayDataSource {
         Ok(())
     }
 
-    /// Load price history and convert to book snapshots.
-    fn load_price_history(
+    /// Load aligned price pairs and convert to paired book snapshot events.
+    /// Each aligned row has YES and NO prices at the same timestamp,
+    /// and we emit a single BookSnapshotPair event to ensure both orderbooks
+    /// are updated atomically (no staleness issues from event ordering).
+    fn load_aligned_prices(
         &mut self,
         data_dir: &Path,
-        token_map: &TokenMap,
+        event_tokens: &EventTokenMap,
     ) -> Result<(), DataSourceError> {
-        let path = data_dir.join("polymarket_price_history.csv");
+        let path = data_dir.join("polymarket_aligned_prices.csv");
         if !path.exists() {
-            warn!("Price history file not found: {:?}", path);
+            warn!("Aligned prices file not found: {:?}", path);
             return Ok(());
         }
 
@@ -332,16 +383,15 @@ impl CsvReplayDataSource {
         let mut count = 0;
 
         for result in reader.deserialize() {
-            let row: PriceHistoryRow = result
+            let row: AlignedPriceRow = result
                 .map_err(|e| DataSourceError::Parse(format!("CSV parse error: {}", e)))?;
 
-            // Look up event_id from token_map
-            let (event_id, _is_yes) = match token_map.get(&row.token_id) {
-                Some(mapping) => mapping.clone(),
-                None => continue, // Token not in any tracked market window
-            };
+            // Validate event_id exists in our tracked markets
+            if !event_tokens.contains_key(&row.event_id) {
+                continue;
+            }
 
-            // Filter by time
+            // Filter by config time range
             if let Some(start) = self.config.start_time
                 && row.timestamp < start
             {
@@ -353,47 +403,173 @@ impl CsvReplayDataSource {
                 continue;
             }
 
-            // Convert price history to a simplified book snapshot
-            // Use the price as mid-price with a small spread
+            // Convert prices to book snapshots with small spread
             let spread = Decimal::new(1, 2); // 0.01 spread
             let half_spread = spread / Decimal::TWO;
-
-            let bid_price = (row.price - half_spread).max(Decimal::ZERO);
-            let ask_price = (row.price + half_spread).min(Decimal::ONE);
-
-            // Default size for simulated liquidity
             let default_size = Decimal::new(1000, 0);
 
-            let bids = if bid_price > Decimal::ZERO {
-                vec![PriceLevel::new(bid_price, default_size)]
-            } else {
-                vec![]
+            // Create YES book snapshot
+            let yes_bid = (row.yes_price - half_spread).max(Decimal::ZERO);
+            let yes_ask = (row.yes_price + half_spread).min(Decimal::ONE);
+            let yes_snapshot = BookSnapshotEvent {
+                token_id: row.yes_token_id.clone(),
+                event_id: row.event_id.clone(),
+                bids: if yes_bid > Decimal::ZERO { vec![PriceLevel::new(yes_bid, default_size)] } else { vec![] },
+                asks: if yes_ask < Decimal::ONE { vec![PriceLevel::new(yes_ask, default_size)] } else { vec![] },
+                timestamp: row.timestamp,
             };
 
-            let asks = if ask_price < Decimal::ONE {
-                vec![PriceLevel::new(ask_price, default_size)]
-            } else {
-                vec![]
+            // Create NO book snapshot
+            let no_bid = (row.no_price - half_spread).max(Decimal::ZERO);
+            let no_ask = (row.no_price + half_spread).min(Decimal::ONE);
+            let no_snapshot = BookSnapshotEvent {
+                token_id: row.no_token_id,
+                event_id: row.event_id.clone(),
+                bids: if no_bid > Decimal::ZERO { vec![PriceLevel::new(no_bid, default_size)] } else { vec![] },
+                asks: if no_ask < Decimal::ONE { vec![PriceLevel::new(no_ask, default_size)] } else { vec![] },
+                timestamp: row.timestamp,
             };
 
-            let event = MarketEvent::BookSnapshot(BookSnapshotEvent {
-                token_id: row.token_id,
-                event_id,
-                bids,
-                asks,
+            // Create a single paired event to ensure atomic update of both books
+            let pair_event = MarketEvent::BookSnapshotPair(BookSnapshotPairEvent {
+                event_id: row.event_id,
+                yes_snapshot,
+                no_snapshot,
                 timestamp: row.timestamp,
             });
 
             self.event_queue.push(TimestampedEvent {
                 timestamp: row.timestamp,
-                event,
+                event: pair_event,
             });
 
             count += 1;
         }
 
-        debug!("Loaded {} price history records as book snapshots", count);
+        debug!("Loaded {} aligned price pairs as paired book snapshots", count);
         Ok(())
+    }
+
+    /// Load orderbook snapshots from live collection (with full bid/ask data).
+    /// Returns true if data was loaded, false if file doesn't exist.
+    fn load_orderbook_snapshots(
+        &mut self,
+        data_dir: &Path,
+        event_tokens: &EventTokenMap,
+    ) -> Result<bool, DataSourceError> {
+        let path = data_dir.join("polymarket_orderbook_snapshots.csv");
+        if !path.exists() {
+            debug!("Orderbook snapshots file not found: {:?}", path);
+            return Ok(false);
+        }
+
+        let mut reader = csv::Reader::from_path(&path)
+            .map_err(|e| DataSourceError::Parse(format!("Failed to open {:?}: {}", path, e)))?;
+
+        // Group snapshots by (event_id, timestamp) to pair YES/NO
+        let mut pending: HashMap<(String, DateTime<Utc>), OrderBookSnapshotRow> = HashMap::new();
+        let mut count = 0;
+
+        for result in reader.deserialize() {
+            let row: OrderBookSnapshotRow = result
+                .map_err(|e| DataSourceError::Parse(format!("CSV parse error: {}", e)))?;
+
+            // Filter by config time range
+            if let Some(start) = self.config.start_time
+                && row.timestamp < start
+            {
+                continue;
+            }
+            if let Some(end) = self.config.end_time
+                && row.timestamp > end
+            {
+                continue;
+            }
+
+            // Get token mapping for this event
+            let Some((yes_token, _no_token)) = event_tokens.get(&row.event_id) else {
+                continue;
+            };
+
+            let key = (row.event_id.clone(), row.timestamp);
+
+            // Check if we have a pending partner for this snapshot
+            if let Some(partner) = pending.remove(&key) {
+                // Determine which is YES and which is NO
+                let (yes_row, no_row) = if row.token_id == *yes_token {
+                    (row, partner)
+                } else if partner.token_id == *yes_token {
+                    (partner, row)
+                } else {
+                    // Neither matches YES token, skip
+                    continue;
+                };
+
+                // Create book snapshots with real bid/ask data
+                let yes_snapshot = BookSnapshotEvent {
+                    token_id: yes_row.token_id,
+                    event_id: yes_row.event_id.clone(),
+                    bids: if yes_row.best_bid > Decimal::ZERO {
+                        vec![PriceLevel::new(yes_row.best_bid, yes_row.best_bid_size)]
+                    } else {
+                        vec![]
+                    },
+                    asks: if yes_row.best_ask < Decimal::ONE {
+                        vec![PriceLevel::new(yes_row.best_ask, yes_row.best_ask_size)]
+                    } else {
+                        vec![]
+                    },
+                    timestamp: yes_row.timestamp,
+                };
+
+                let no_snapshot = BookSnapshotEvent {
+                    token_id: no_row.token_id,
+                    event_id: no_row.event_id,
+                    bids: if no_row.best_bid > Decimal::ZERO {
+                        vec![PriceLevel::new(no_row.best_bid, no_row.best_bid_size)]
+                    } else {
+                        vec![]
+                    },
+                    asks: if no_row.best_ask < Decimal::ONE {
+                        vec![PriceLevel::new(no_row.best_ask, no_row.best_ask_size)]
+                    } else {
+                        vec![]
+                    },
+                    timestamp: no_row.timestamp,
+                };
+
+                // Create paired event
+                let pair_event = MarketEvent::BookSnapshotPair(BookSnapshotPairEvent {
+                    event_id: yes_snapshot.event_id.clone(),
+                    yes_snapshot,
+                    no_snapshot,
+                    timestamp: key.1,
+                });
+
+                self.event_queue.push(TimestampedEvent {
+                    timestamp: key.1,
+                    event: pair_event,
+                });
+
+                count += 1;
+            } else {
+                // No partner yet, store this one
+                pending.insert(key, row);
+            }
+        }
+
+        if pending.len() > 10 {
+            warn!(
+                "{} orderbook snapshots had no YES/NO partner",
+                pending.len()
+            );
+        }
+
+        info!(
+            "Loaded {} orderbook snapshot pairs from live data",
+            count
+        );
+        Ok(count > 0)
     }
 }
 
@@ -463,6 +639,74 @@ impl CsvReplayDataSource {
 
         info!("Loaded {} events from CSV files", events.len());
         Ok(events)
+    }
+
+    /// Load warmup prices from CSV for ATR initialization.
+    ///
+    /// Returns spot prices from the CSV file that are BEFORE the start_time,
+    /// grouped by asset. This allows warming up indicators before the backtest
+    /// starts, ensuring consistent behavior with live trading.
+    ///
+    /// # Arguments
+    /// * `data_dir` - Directory containing the CSV files
+    /// * `start_time` - The backtest start time (warmup prices will be before this)
+    /// * `warmup_duration` - How far back to look for warmup prices
+    /// * `assets` - Assets to load prices for (empty = all)
+    pub fn load_warmup_prices(
+        data_dir: &str,
+        start_time: DateTime<Utc>,
+        warmup_duration: chrono::Duration,
+        assets: &[CryptoAsset],
+    ) -> HashMap<CryptoAsset, Vec<Decimal>> {
+        let path = Path::new(data_dir).join("binance_spot_prices.csv");
+        if !path.exists() {
+            warn!("Spot prices file not found for warmup: {:?}", path);
+            return HashMap::new();
+        }
+
+        let warmup_start = start_time - warmup_duration;
+        let mut result: HashMap<CryptoAsset, Vec<Decimal>> = HashMap::new();
+
+        let reader = match csv::Reader::from_path(&path) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("Failed to open spot prices for warmup: {}", e);
+                return HashMap::new();
+            }
+        };
+
+        for row_result in reader.into_deserialize::<SpotPriceRow>() {
+            let row = match row_result {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+
+            // Only include prices in warmup window (before start_time)
+            if row.timestamp >= start_time || row.timestamp < warmup_start {
+                continue;
+            }
+
+            let asset = match parse_asset(&row.asset) {
+                Some(a) => a,
+                None => continue,
+            };
+
+            // Filter by requested assets
+            if !assets.is_empty() && !assets.contains(&asset) {
+                continue;
+            }
+
+            result.entry(asset).or_default().push(row.price);
+        }
+
+        // Prices are already in chronological order from the CSV
+        // Nothing to sort
+
+        for (asset, prices) in &result {
+            debug!("Loaded {} warmup prices for {}", prices.len(), asset);
+        }
+
+        result
     }
 }
 

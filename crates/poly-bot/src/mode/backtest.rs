@@ -70,6 +70,8 @@ pub struct BacktestModeConfig {
     pub sweep_params: Vec<SweepParameter>,
     /// Number of parallel workers for sweep mode (0 = number of CPU cores).
     pub sweep_parallel_workers: usize,
+    /// Path to write decision log (for comparing live vs backtest behavior).
+    pub decision_log_path: Option<String>,
 }
 
 impl Default for BacktestModeConfig {
@@ -86,6 +88,7 @@ impl Default for BacktestModeConfig {
             sweep_enabled: false,
             sweep_params: Vec::new(),
             sweep_parallel_workers: 0, // 0 = use number of CPU cores
+            decision_log_path: None,
         }
     }
 }
@@ -99,6 +102,7 @@ impl BacktestModeConfig {
         executor_config.latency_ms = config.execution.paper_fill_latency_ms;
         executor_config.enforce_balance = true;
         executor_config.max_market_exposure = config.effective_trading_config().max_market_exposure;
+        executor_config.max_total_exposure = config.effective_trading_config().max_total_exposure;
         executor_config.min_fill_ratio = dec!(0.5);
         // Set taker mode based on execution mode from config
         executor_config.is_taker_mode = matches!(
@@ -135,6 +139,7 @@ impl BacktestModeConfig {
             sweep_enabled: config.backtest.sweep_enabled,
             sweep_params: Vec::new(),
             sweep_parallel_workers: config.backtest.sweep_parallel_workers.unwrap_or(0),
+            decision_log_path: config.backtest.decision_log_path.clone(),
         })
     }
 
@@ -156,6 +161,28 @@ impl BacktestModeConfig {
         self.sweep_enabled = true;
         self.sweep_params = params;
         self
+    }
+
+    /// Force a specific data source ("csv" or "clickhouse").
+    /// If "csv" is specified but no data_dir is configured, returns an error.
+    /// If "clickhouse" is specified, clears csv_data_dir to force ClickHouse usage.
+    pub fn with_data_source(mut self, source: &str) -> Result<Self> {
+        match source {
+            "csv" => {
+                if self.csv_data_dir.is_none() {
+                    anyhow::bail!("--data-source csv requires data_dir to be set in config");
+                }
+                // Already using CSV, nothing to change
+            }
+            "clickhouse" => {
+                // Force ClickHouse by clearing CSV path
+                self.csv_data_dir = None;
+            }
+            _ => {
+                anyhow::bail!("Invalid data source '{}', must be 'csv' or 'clickhouse'", source);
+            }
+        }
+        Ok(self)
     }
 }
 
@@ -494,6 +521,7 @@ pub struct PositionSummary {
 fn run_backtest_task_blocking(
     events: Arc<Vec<MarketEvent>>,
     config: BacktestModeConfig,
+    warmup_prices: Arc<HashMap<CryptoAsset, Vec<Decimal>>>,
 ) -> Result<BacktestResult> {
     let start_instant = std::time::Instant::now();
 
@@ -525,6 +553,13 @@ fn run_backtest_task_blocking(
             config.strategy.clone().with_backtest(true),
             config.engines.clone(),
         );
+
+        // Warm up ATR with pre-loaded prices (matching live/backtest behavior)
+        for (asset, prices) in warmup_prices.as_ref() {
+            if !prices.is_empty() {
+                strategy.warmup_atr(*asset, prices);
+            }
+        }
 
         // Enable trading and run
         state.enable_trading();
@@ -667,8 +702,11 @@ impl BacktestMode {
 
         info!("Starting backtest mode");
 
-        // Reset state for this run
-        self.state = Arc::new(GlobalState::new());
+        // Reset state for a fresh backtest run.
+        // We reset the state's internal values (market_data, control, metrics) rather than
+        // creating a new GlobalState, because the signal handler holds a reference to self.state.
+        // If we created a new GlobalState, Ctrl+C would set shutdown on the old state.
+        self.state.reset();
 
         // Create CSV data source
         let shutdown_rx = self.shutdown_tx.subscribe();
@@ -677,6 +715,15 @@ impl BacktestMode {
             speed = self.config.data_source.speed,
             initial_balance = %self.config.initial_balance,
             "Using CSV data source"
+        );
+
+        // Load warmup prices for ATR (5 minutes before start)
+        let warmup_duration = chrono::Duration::minutes(5);
+        let warmup_prices = CsvReplayDataSource::load_warmup_prices(
+            &data_dir,
+            self.config.data_source.start_time,
+            warmup_duration,
+            &self.config.data_source.assets,
         );
 
         let csv_config = CsvReplayConfig {
@@ -693,8 +740,8 @@ impl BacktestMode {
         executor_config.initial_balance = self.config.initial_balance;
         let executor = SimulatedExecutor::new(executor_config);
 
-        // Run the common backtest logic
-        self.run_backtest_common(data_source, executor, shutdown_rx, start_instant).await
+        // Run the common backtest logic with warmup prices
+        self.run_backtest_common(data_source, executor, shutdown_rx, start_instant, warmup_prices).await
     }
 
     /// Run backtest with ClickHouse data source.
@@ -703,8 +750,8 @@ impl BacktestMode {
 
         info!("Starting backtest mode");
 
-        // Reset state for this run
-        self.state = Arc::new(GlobalState::new());
+        // Reset state for a fresh backtest run (see run_with_csv_source for full explanation).
+        self.state.reset();
 
         // Create ClickHouse data source
         let shutdown_rx = self.shutdown_tx.subscribe();
@@ -723,8 +770,9 @@ impl BacktestMode {
         executor_config.initial_balance = self.config.initial_balance;
         let executor = SimulatedExecutor::new(executor_config);
 
-        // Run the common backtest logic
-        self.run_backtest_common(data_source, executor, shutdown_rx, start_instant).await
+        // Run the common backtest logic (no warmup for ClickHouse - ATR warms up from data)
+        let warmup_prices = HashMap::new();
+        self.run_backtest_common(data_source, executor, shutdown_rx, start_instant, warmup_prices).await
     }
 
     /// Common backtest logic that works with any DataSource.
@@ -734,6 +782,7 @@ impl BacktestMode {
         executor: SimulatedExecutor,
         mut shutdown_rx: broadcast::Receiver<()>,
         start_instant: std::time::Instant,
+        warmup_prices: HashMap<CryptoAsset, Vec<Decimal>>,
     ) -> Result<BacktestResult> {
         // Log enabled engines
         let enabled_engines = self.config.engines.enabled_engines();
@@ -757,6 +806,48 @@ impl BacktestMode {
             self.config.strategy.clone().with_backtest(true),
             self.config.engines.clone(),
         );
+
+        // Warm up ATR with prices from before the backtest period
+        // This ensures indicators are ready before the first market, matching live behavior
+        if !warmup_prices.is_empty() {
+            info!("Warming up ATR with {} assets from CSV warmup data", warmup_prices.len());
+            for (asset, prices) in &warmup_prices {
+                if !prices.is_empty() {
+                    strategy.warmup_atr(*asset, prices);
+                    info!(
+                        "Warmed up ATR for {} with {} prices",
+                        asset,
+                        prices.len()
+                    );
+                }
+            }
+        } else {
+            info!("No warmup prices available - ATR will warm up from event data");
+        }
+
+        // Add decision logger if configured (for comparing live vs backtest behavior)
+        if let Some(ref path) = self.config.decision_log_path {
+            let log_config = crate::strategy::decision_log::DecisionLogConfig {
+                base_order_size: self.config.strategy.sizing_config.base_order_size,
+                min_order_size: self.config.strategy.sizing_config.min_order_size,
+                max_market_exposure: self.config.strategy.sizing_config.max_market_exposure,
+                max_total_exposure: self.config.strategy.sizing_config.max_total_exposure,
+                available_balance: self.config.initial_balance,
+                max_edge_factor: self.config.strategy.max_edge_factor,
+                window_duration_secs: self.config.strategy.window_duration_secs,
+                strong_up_ratio: self.config.strategy.strong_up_ratio,
+                lean_up_ratio: self.config.strategy.lean_up_ratio,
+            };
+            match crate::strategy::decision_log::DecisionLogger::with_config(path, "backtest", Some(&log_config)) {
+                Ok(logger) => {
+                    info!("Decision logging enabled: {}", path);
+                    strategy = strategy.with_decision_logger(logger);
+                }
+                Err(e) => {
+                    warn!("Failed to create decision logger at {}: {}", path, e);
+                }
+            }
+        }
 
         // Add observability sender if capture is enabled
         if let Some(ref cap) = capture
@@ -842,12 +933,17 @@ impl BacktestMode {
         let metrics = strategy.metrics();
         let simulation_stats = strategy.simulation_stats().unwrap_or_default();
 
+        // Get actual event time range (instead of config defaults)
+        let (first_event, last_event) = strategy.event_time_range();
+        let actual_start = first_event.unwrap_or(self.config.data_source.start_time);
+        let actual_end = last_event.unwrap_or(self.config.data_source.end_time);
+
         // Generate result using actual simulation stats
         let duration_secs = start_instant.elapsed().as_secs_f64();
 
         let backtest_result = BacktestResult::new(
-            self.config.data_source.start_time,
-            self.config.data_source.end_time,
+            actual_start,
+            actual_end,
             self.config.initial_balance,
             final_balance,
             &simulation_stats,
@@ -890,8 +986,20 @@ impl BacktestMode {
         );
 
         // Pre-load events once if using CSV source (required for parallel execution)
-        let cached_events: Option<Arc<Vec<MarketEvent>>> = if let Some(ref data_dir) = self.config.csv_data_dir {
+        let (cached_events, warmup_prices): (Option<Arc<Vec<MarketEvent>>>, Arc<HashMap<CryptoAsset, Vec<Decimal>>>) = if let Some(ref data_dir) = self.config.csv_data_dir {
             info!("Pre-loading CSV data for sweep");
+
+            // Load warmup prices (5 minutes before start)
+            let warmup_duration = chrono::Duration::minutes(5);
+            let prices = CsvReplayDataSource::load_warmup_prices(
+                data_dir,
+                self.config.data_source.start_time,
+                warmup_duration,
+                &self.config.data_source.assets,
+            );
+            let warmup = Arc::new(prices);
+
+            // Load main events
             let csv_config = CsvReplayConfig {
                 data_dir: data_dir.clone(),
                 start_time: Some(self.config.data_source.start_time),
@@ -902,7 +1010,7 @@ impl BacktestMode {
             match CsvReplayDataSource::load_all_events(csv_config) {
                 Ok(events) => {
                     info!("Cached {} events for sweep", events.len());
-                    Some(Arc::new(events))
+                    (Some(Arc::new(events)), warmup)
                 }
                 Err(e) => {
                     return Err(anyhow::anyhow!("Failed to pre-load CSV data: {}", e));
@@ -918,6 +1026,8 @@ impl BacktestMode {
         let mut run_configs: Vec<(usize, HashMap<String, f64>, BacktestModeConfig)> = Vec::new();
         for (run_idx, params) in combinations.into_iter().enumerate() {
             let mut run_config = self.config.clone();
+            // Disable decision logging during sweeps for performance
+            run_config.decision_log_path = None;
             for (name, value) in &params {
                 apply_parameter(&mut run_config, name, *value);
             }
@@ -932,6 +1042,7 @@ impl BacktestMode {
 
         for (run_idx, params, run_config) in run_configs {
             let events = Arc::clone(&events);
+            let warmup = Arc::clone(&warmup_prices);
             let result_tx = result_tx.clone();
             let active_count = Arc::clone(&active_count);
             let total = total_runs;
@@ -959,7 +1070,7 @@ impl BacktestMode {
                 let count = active_count.load(std::sync::atomic::Ordering::SeqCst);
                 info!("Sweep run {}/{} (active: {}): {:?}", run_idx + 1, total, count, params);
 
-                let result = run_backtest_task_blocking(events, run_config);
+                let result = run_backtest_task_blocking(events, run_config, warmup);
 
                 active_count.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
 
@@ -1161,12 +1272,15 @@ impl BacktestMode {
 }
 
 /// Parse date range from BacktestConfig.
+/// If dates are not specified, uses a wide range to include all data.
 fn parse_date_range(config: &BacktestConfig) -> Result<(DateTime<Utc>, DateTime<Utc>)> {
     let start = if let Some(ref date_str) = config.start_date {
         parse_date(date_str).context("Invalid start_date")?
     } else {
-        // Default to 24 hours ago
-        Utc::now() - chrono::Duration::hours(24)
+        // Default to far past to include all data
+        DateTime::parse_from_rfc3339("2020-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
     };
 
     let end = if let Some(ref date_str) = config.end_date {
@@ -1177,8 +1291,10 @@ fn parse_date_range(config: &BacktestConfig) -> Result<(DateTime<Utc>, DateTime<
             + chrono::Duration::minutes(59)
             + chrono::Duration::seconds(59)
     } else {
-        // Default to now
-        Utc::now()
+        // Default to far future to include all data
+        DateTime::parse_from_rfc3339("2030-12-31T23:59:59Z")
+            .unwrap()
+            .with_timezone(&Utc)
     };
 
     if start >= end {

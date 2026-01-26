@@ -450,7 +450,8 @@ impl ClobCapture {
         let msg: PriceChangeMessage = match serde_json::from_str(text) {
             Ok(m) => m,
             Err(e) => {
-                warn!("Failed to parse price_change message: {e}");
+                // Delta parsing failures are not critical - we have 100ms snapshots
+                debug!("Failed to parse price_change message: {e}");
                 return;
             }
         };

@@ -26,12 +26,13 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use tokio::sync::RwLock;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 use poly_common::types::Side;
 
 use crate::types::{OrderBook, PriceLevel};
 
+use super::position_manager::{LimitCheckResult, PositionManager, RiskConfig};
 use super::{
     Executor, ExecutorError, OrderCancellation, OrderFill, OrderRejection, OrderRequest,
     OrderResult, OrderType, PartialOrderFill, PendingOrder,
@@ -90,6 +91,8 @@ pub struct SimulatedExecutorConfig {
     pub enforce_balance: bool,
     /// Maximum position per market (0 = unlimited).
     pub max_market_exposure: Decimal,
+    /// Maximum total exposure across all markets (0 = unlimited).
+    pub max_total_exposure: Decimal,
     /// Market order slippage factor (e.g., 0.001 for 0.1%, Simple mode only).
     pub market_order_slippage: Decimal,
     /// Minimum fill ratio to accept partial fills (0.0-1.0, OrderBook mode only).
@@ -111,6 +114,7 @@ impl SimulatedExecutorConfig {
             latency_ms: 50,
             enforce_balance: true,
             max_market_exposure: Decimal::ZERO,
+            max_total_exposure: Decimal::ZERO,
             market_order_slippage: Decimal::new(1, 3), // 0.1%
             min_fill_ratio: Decimal::new(5, 1),        // 50%
         }
@@ -130,6 +134,7 @@ impl SimulatedExecutorConfig {
             latency_ms: 0,
             enforce_balance: true,
             max_market_exposure: Decimal::ZERO,
+            max_total_exposure: Decimal::ZERO,
             market_order_slippage: Decimal::ZERO,
             min_fill_ratio: Decimal::new(5, 1), // 50%
         }
@@ -398,7 +403,8 @@ impl SimulatedStats {
 pub struct SimulatedExecutor {
     config: SimulatedExecutorConfig,
     balance: Decimal,
-    positions: HashMap<String, SimulatedPosition>,
+    /// Position manager - single source of truth for positions and risk limits.
+    position_manager: PositionManager,
     orders: HashMap<String, CompletedOrder>,
     pending: HashMap<String, PendingOrder>,
     next_order_id: u64,
@@ -421,10 +427,27 @@ impl SimulatedExecutor {
         stats.peak_balance = initial_balance;
         stats.balance_history.push((Utc::now(), initial_balance));
 
+        // Create position manager with risk config from executor config
+        let risk_config = RiskConfig {
+            max_market_exposure: config.max_market_exposure,
+            max_total_exposure: config.max_total_exposure,
+        };
+        let position_manager = PositionManager::new(risk_config);
+
+        info!(
+            initial_balance = %config.initial_balance,
+            max_market_exposure = %config.max_market_exposure,
+            max_total_exposure = %config.max_total_exposure,
+            enforce_balance = %config.enforce_balance,
+            time_source = ?config.time_source,
+            fill_mode = ?config.fill_mode,
+            "SimulatedExecutor created with configuration"
+        );
+
         Self {
             balance: initial_balance,
             config,
-            positions: HashMap::new(),
+            position_manager,
             orders: HashMap::new(),
             pending: HashMap::new(),
             next_order_id: 1,
@@ -485,14 +508,19 @@ impl SimulatedExecutor {
         self.balance
     }
 
-    /// Get position for an event.
-    pub fn position(&self, event_id: &str) -> Option<&SimulatedPosition> {
-        self.positions.get(event_id)
+    /// Get position for an event (returns a snapshot).
+    pub fn position(&self, event_id: &str) -> Option<SimulatedPosition> {
+        self.position_manager.get_position(event_id).map(|p| SimulatedPosition {
+            yes_shares: p.yes_shares,
+            no_shares: p.no_shares,
+            cost_basis: p.cost_basis,
+        })
     }
 
     /// Get total position value (approximate).
     pub fn total_position_value(&self) -> Decimal {
-        self.positions
+        self.position_manager
+            .positions()
             .values()
             .map(|p| (p.yes_shares + p.no_shares) * Decimal::new(5, 1))
             .sum()
@@ -535,20 +563,28 @@ impl SimulatedExecutor {
             }
         }
 
-        // Check position limit
-        if self.config.max_market_exposure > Decimal::ZERO {
-            let position = self.positions.get(&order.event_id);
-            let current_size = position
-                .map(|p| p.yes_shares + p.no_shares)
-                .unwrap_or(Decimal::ZERO);
-            if current_size + order.size > self.config.max_market_exposure {
+        // Check position limits using the position manager (single source of truth)
+        let order_cost = order.size * order.price.unwrap_or(Decimal::ONE);
+        match self.position_manager.check_limits(&order.event_id, order_cost) {
+            LimitCheckResult::Allowed => {
+                trace!(
+                    event_id = %order.event_id,
+                    order_cost = %order_cost,
+                    "Position limit check passed"
+                );
+            }
+            LimitCheckResult::ExceedsLimit { max_allowed, reason } => {
+                trace!(
+                    event_id = %order.event_id,
+                    order_cost = %order_cost,
+                    max_allowed = %max_allowed,
+                    reason = %reason,
+                    "Position limit exceeded"
+                );
                 self.stats.orders_rejected += 1;
                 return Ok(OrderResult::Rejected(OrderRejection {
                     request_id: order.request_id.clone(),
-                    reason: format!(
-                        "Position limit exceeded: current={}, max={}",
-                        current_size, self.config.max_market_exposure
-                    ),
+                    reason,
                     timestamp: current_time,
                 }));
             }
@@ -797,100 +833,100 @@ impl SimulatedExecutor {
 
     /// Apply fill to balance and position.
     fn apply_fill(&mut self, order: &OrderRequest, filled_size: Decimal, cost: Decimal, fee: Decimal) {
+        let is_yes = matches!(order.outcome, poly_common::types::Outcome::Yes);
+
         match order.side {
             Side::Buy => {
                 self.balance -= cost + fee;
-                let position = self.positions.entry(order.event_id.clone()).or_default();
-                match order.outcome {
-                    poly_common::types::Outcome::Yes => {
-                        position.yes_shares += filled_size;
-                    }
-                    poly_common::types::Outcome::No => {
-                        position.no_shares += filled_size;
-                    }
-                }
-                position.cost_basis += cost + fee;
+                // Record fill in position manager (single source of truth)
+                self.position_manager.record_fill(
+                    &order.event_id,
+                    is_yes,
+                    filled_size,
+                    cost + fee,
+                );
             }
             Side::Sell => {
                 self.balance += cost - fee;
-                let position = self.positions.entry(order.event_id.clone()).or_default();
-                match order.outcome {
-                    poly_common::types::Outcome::Yes => {
-                        position.yes_shares -= filled_size.min(position.yes_shares);
-                    }
-                    poly_common::types::Outcome::No => {
-                        position.no_shares -= filled_size.min(position.no_shares);
-                    }
-                }
+                // For sells, we record negative shares (position reduction)
+                // Note: cost basis reduction on sells is not currently tracked
+                // since we're simplifying - the key metric is exposure tracking
+                self.position_manager.record_fill(
+                    &order.event_id,
+                    is_yes,
+                    -filled_size,
+                    Decimal::ZERO, // Sells don't add to cost basis
+                );
             }
         }
     }
 
     /// Settle a market position when it expires.
     fn settle_position(&mut self, event_id: &str, yes_wins: bool) -> Decimal {
-        let position = match self.positions.remove(event_id) {
-            Some(p) => p,
-            None => return Decimal::ZERO,
-        };
+        // Get position info before settlement for logging
+        let position = self.position_manager.get_position(event_id).cloned();
 
-        // Calculate payout: winning side pays $1.00 per share
-        let payout = if yes_wins {
-            position.yes_shares
-        } else {
-            position.no_shares
-        };
+        // Settle via position manager (single source of truth)
+        let realized_pnl = self.position_manager.settle_market(event_id, yes_wins);
 
-        // Calculate realized PnL
-        let realized_pnl = payout - position.cost_basis;
+        // If there was a position, update executor stats
+        if let Some(pos) = position {
+            // Calculate payout for balance update
+            let payout = if yes_wins {
+                pos.yes_shares
+            } else {
+                pos.no_shares
+            };
 
-        // Update balance with payout
-        self.balance += payout;
+            // Update balance with payout
+            self.balance += payout;
 
-        // Track win/loss statistics and profit/loss amounts
-        if realized_pnl > Decimal::ZERO {
-            self.stats.markets_won += 1;
-            self.stats.gross_profit += realized_pnl;
-        } else {
-            self.stats.markets_lost += 1;
-            self.stats.gross_loss += realized_pnl.abs();
-        }
+            // Track win/loss statistics and profit/loss amounts
+            if realized_pnl > Decimal::ZERO {
+                self.stats.markets_won += 1;
+                self.stats.gross_profit += realized_pnl;
+            } else {
+                self.stats.markets_lost += 1;
+                self.stats.gross_loss += realized_pnl.abs();
+            }
 
-        // Track balance history for Sharpe calculation
-        let current_time = self.current_time();
-        self.stats.balance_history.push((current_time, self.balance));
+            // Track balance history for Sharpe calculation
+            let current_time = self.current_time();
+            self.stats.balance_history.push((current_time, self.balance));
 
-        // Update peak balance, max drawdown, and drawdown duration
-        if self.balance >= self.stats.peak_balance {
-            // At or above peak - record drawdown duration if we were in a drawdown
-            if let Some(dd_start) = self.stats.drawdown_start.take() {
-                let duration_secs = (current_time - dd_start).num_seconds();
-                if duration_secs > self.stats.max_drawdown_duration_secs {
-                    self.stats.max_drawdown_duration_secs = duration_secs;
+            // Update peak balance, max drawdown, and drawdown duration
+            if self.balance >= self.stats.peak_balance {
+                // At or above peak - record drawdown duration if we were in a drawdown
+                if let Some(dd_start) = self.stats.drawdown_start.take() {
+                    let duration_secs = (current_time - dd_start).num_seconds();
+                    if duration_secs > self.stats.max_drawdown_duration_secs {
+                        self.stats.max_drawdown_duration_secs = duration_secs;
+                    }
+                }
+                self.stats.peak_balance = self.balance;
+            } else {
+                // In drawdown - start tracking if not already
+                if self.stats.drawdown_start.is_none() {
+                    self.stats.drawdown_start = Some(current_time);
+                }
+                let drawdown = self.stats.peak_balance - self.balance;
+                if drawdown > self.stats.max_drawdown {
+                    self.stats.max_drawdown = drawdown;
                 }
             }
-            self.stats.peak_balance = self.balance;
-        } else {
-            // In drawdown - start tracking if not already
-            if self.stats.drawdown_start.is_none() {
-                self.stats.drawdown_start = Some(current_time);
-            }
-            let drawdown = self.stats.peak_balance - self.balance;
-            if drawdown > self.stats.max_drawdown {
-                self.stats.max_drawdown = drawdown;
-            }
-        }
 
-        info!(
-            event_id = %event_id,
-            yes_wins = %yes_wins,
-            yes_shares = %position.yes_shares,
-            no_shares = %position.no_shares,
-            cost_basis = %position.cost_basis,
-            payout = %payout,
-            realized_pnl = %realized_pnl,
-            new_balance = %self.balance,
-            "Market settled"
-        );
+            info!(
+                event_id = %event_id,
+                yes_wins = %yes_wins,
+                yes_shares = %pos.yes_shares,
+                no_shares = %pos.no_shares,
+                cost_basis = %pos.cost_basis,
+                payout = %payout,
+                realized_pnl = %realized_pnl,
+                new_balance = %self.balance,
+                "Market settled"
+            );
+        }
 
         realized_pnl
     }
@@ -967,6 +1003,26 @@ impl Executor for SimulatedExecutor {
 
     fn available_balance(&self) -> Decimal {
         self.balance
+    }
+
+    fn market_exposure(&self, event_id: &str) -> Decimal {
+        self.position_manager.market_exposure(event_id)
+    }
+
+    fn total_exposure(&self) -> Decimal {
+        self.position_manager.total_exposure()
+    }
+
+    fn remaining_capacity(&self) -> Decimal {
+        self.position_manager.remaining_capacity()
+    }
+
+    fn get_position(&self, event_id: &str) -> Option<super::PositionSnapshot> {
+        self.position_manager.get_position(event_id).map(|p| super::PositionSnapshot {
+            yes_shares: p.yes_shares,
+            no_shares: p.no_shares,
+            cost_basis: p.cost_basis,
+        })
     }
 
     async fn settle_market(&mut self, event_id: &str, yes_wins: bool) -> Decimal {

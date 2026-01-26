@@ -33,6 +33,7 @@ pub mod interval;
 pub mod live;
 pub mod live_sdk;
 pub mod noop;
+pub mod position_manager;
 pub mod shadow;
 pub mod simulated;
 
@@ -364,6 +365,68 @@ pub struct OrderCancellation {
     pub timestamp: DateTime<Utc>,
 }
 
+/// Snapshot of a position for a single market.
+///
+/// This is returned by `Executor::get_position()` to allow querying
+/// position details without coupling to internal position tracking.
+#[derive(Debug, Clone, Default)]
+pub struct PositionSnapshot {
+    /// Number of YES shares held.
+    pub yes_shares: Decimal,
+    /// Number of NO shares held.
+    pub no_shares: Decimal,
+    /// Total cost basis in USDC.
+    pub cost_basis: Decimal,
+}
+
+impl PositionSnapshot {
+    /// Check if position is empty.
+    pub fn is_empty(&self) -> bool {
+        self.yes_shares.is_zero() && self.no_shares.is_zero()
+    }
+
+    /// Total exposure (same as cost_basis).
+    pub fn total_exposure(&self) -> Decimal {
+        self.cost_basis
+    }
+
+    /// Total shares held (YES + NO).
+    pub fn total_shares(&self) -> Decimal {
+        self.yes_shares + self.no_shares
+    }
+
+    /// Imbalance ratio (0.0 = balanced, 1.0 = fully one-sided).
+    pub fn imbalance_ratio(&self) -> Decimal {
+        let total = self.total_shares();
+        if total.is_zero() {
+            return Decimal::ZERO;
+        }
+        let diff = (self.yes_shares - self.no_shares).abs();
+        diff / total
+    }
+
+    /// Get inventory state based on imbalance ratio.
+    ///
+    /// Uses the same thresholds as Inventory::state():
+    /// - Balanced: ratio <= 0.2
+    /// - Skewed: ratio <= 0.5
+    /// - Exposed: ratio <= 0.8
+    /// - Crisis: ratio > 0.8
+    pub fn inventory_state(&self) -> crate::types::InventoryState {
+        use crate::types::InventoryState;
+        let ratio = self.imbalance_ratio();
+        if ratio <= Decimal::new(2, 1) {
+            InventoryState::Balanced
+        } else if ratio <= Decimal::new(5, 1) {
+            InventoryState::Skewed
+        } else if ratio <= Decimal::new(8, 1) {
+            InventoryState::Exposed
+        } else {
+            InventoryState::Crisis
+        }
+    }
+}
+
 /// Order execution trait.
 ///
 /// Implementations provide different execution modes:
@@ -422,6 +485,24 @@ pub trait Executor: Send + Sync {
     ///
     /// For paper trading, returns simulated balance.
     fn available_balance(&self) -> Decimal;
+
+    /// Get current exposure for a specific market (cost basis in USDC).
+    ///
+    /// Returns zero if no position exists for the market.
+    fn market_exposure(&self, event_id: &str) -> Decimal;
+
+    /// Get total exposure across all positions (sum of cost bases in USDC).
+    fn total_exposure(&self) -> Decimal;
+
+    /// Get remaining capacity before hitting total exposure limit.
+    ///
+    /// Returns Decimal::MAX if no limit is configured.
+    fn remaining_capacity(&self) -> Decimal;
+
+    /// Get position details for a market.
+    ///
+    /// Returns None if no position exists for the market.
+    fn get_position(&self, event_id: &str) -> Option<PositionSnapshot>;
 
     /// Settle a market position when it expires.
     ///

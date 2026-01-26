@@ -44,6 +44,8 @@ pub enum DirectionalSkipReason {
     InsufficientTime,
     /// Spread too wide to profitably trade.
     SpreadTooWide,
+    /// Stale prices - YES+NO combined cost < 0.98 indicates one side hasn't updated.
+    StalePrices,
 }
 
 impl std::fmt::Display for DirectionalSkipReason {
@@ -55,6 +57,7 @@ impl std::fmt::Display for DirectionalSkipReason {
             Self::BookNotReady => write!(f, "book not ready"),
             Self::InsufficientTime => write!(f, "insufficient time"),
             Self::SpreadTooWide => write!(f, "spread too wide"),
+            Self::StalePrices => write!(f, "stale prices"),
         }
     }
 }
@@ -226,7 +229,15 @@ impl DirectionalDetector {
         }
 
         // Check combined cost
+        // YES + NO should always sum close to $1.00 on Polymarket.
+        // If sum is too low (< 0.98), one side has stale prices - skip to avoid bad trades.
+        // If sum is too high (> max_combined_cost), no profit margin exists.
         let combined_cost = yes_ask + no_ask;
+        let min_combined_cost = Decimal::new(98, 2); // 0.98
+        if combined_cost < min_combined_cost {
+            // Stale prices - one side hasn't been updated yet
+            return Err(DirectionalSkipReason::StalePrices);
+        }
         if combined_cost > self.config.max_combined_cost {
             // No profit margin even without directional edge
             // Still allow if there's a strong signal (directional edge compensates)

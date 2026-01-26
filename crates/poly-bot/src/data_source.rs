@@ -65,6 +65,10 @@ pub enum MarketEvent {
     /// Full order book snapshot from Polymarket.
     BookSnapshot(BookSnapshotEvent),
 
+    /// Paired YES/NO book snapshots for atomic update.
+    /// Used by CSV replay to ensure both books update together.
+    BookSnapshotPair(BookSnapshotPairEvent),
+
     /// Incremental order book delta from Polymarket.
     BookDelta(BookDeltaEvent),
 
@@ -87,6 +91,7 @@ impl MarketEvent {
         match self {
             MarketEvent::SpotPrice(e) => e.timestamp,
             MarketEvent::BookSnapshot(e) => e.timestamp,
+            MarketEvent::BookSnapshotPair(e) => e.timestamp,
             MarketEvent::BookDelta(e) => e.timestamp,
             MarketEvent::Fill(e) => e.timestamp,
             MarketEvent::WindowOpen(e) => e.timestamp,
@@ -106,6 +111,9 @@ impl fmt::Display for MarketEvent {
         match self {
             MarketEvent::SpotPrice(e) => write!(f, "SpotPrice({} @ {})", e.asset, e.price),
             MarketEvent::BookSnapshot(e) => write!(f, "BookSnapshot({})", e.token_id),
+            MarketEvent::BookSnapshotPair(e) => {
+                write!(f, "BookSnapshotPair({} YES/NO)", e.event_id)
+            }
             MarketEvent::BookDelta(e) => {
                 write!(f, "BookDelta({} {} @ {})", e.token_id, e.side, e.price)
             }
@@ -147,6 +155,22 @@ pub struct BookSnapshotEvent {
     pub bids: Vec<PriceLevel>,
     /// Ask levels (sorted by price ascending).
     pub asks: Vec<PriceLevel>,
+    /// Event timestamp.
+    pub timestamp: DateTime<Utc>,
+}
+
+/// Paired YES/NO book snapshots for atomic update.
+///
+/// Used by CSV replay to ensure both YES and NO order books are updated
+/// together, avoiding stale price comparisons when calculating arb margins.
+#[derive(Debug, Clone)]
+pub struct BookSnapshotPairEvent {
+    /// Event ID for correlation.
+    pub event_id: String,
+    /// YES token book snapshot.
+    pub yes_snapshot: BookSnapshotEvent,
+    /// NO token book snapshot.
+    pub no_snapshot: BookSnapshotEvent,
     /// Event timestamp.
     pub timestamp: DateTime<Utc>,
 }
