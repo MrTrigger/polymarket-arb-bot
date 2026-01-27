@@ -342,8 +342,8 @@ impl PnLReport {
 
         report.push_str(&format!(
             "Period: {} to {}\n",
-            self.result.start_time.format("%Y-%m-%d %H:%M"),
-            self.result.end_time.format("%Y-%m-%d %H:%M")
+            self.result.start_time.format("%Y-%m-%d %H:%M:%S"),
+            self.result.end_time.format("%Y-%m-%d %H:%M:%S")
         ));
         report.push_str(&format!(
             "Duration: {:.2} seconds\n\n",
@@ -571,6 +571,13 @@ fn run_backtest_task_blocking(
         let metrics = strategy.metrics();
         let simulation_stats = strategy.simulation_stats().unwrap_or_default();
 
+        // Get actual event time range
+        let (first_event, last_event) = strategy.event_time_range();
+        let actual_start = first_event.unwrap_or(config.data_source.start_time);
+        let actual_end = last_event
+            .or(first_event)
+            .unwrap_or_else(Utc::now);
+
         // Shutdown strategy
         strategy.shutdown().await;
 
@@ -587,8 +594,8 @@ fn run_backtest_task_blocking(
         let duration_secs = start_instant.elapsed().as_secs_f64();
 
         Ok(BacktestResult::new(
-            config.data_source.start_time,
-            config.data_source.end_time,
+            actual_start,
+            actual_end,
             config.initial_balance,
             final_balance,
             &simulation_stats,
@@ -934,9 +941,14 @@ impl BacktestMode {
         let simulation_stats = strategy.simulation_stats().unwrap_or_default();
 
         // Get actual event time range (instead of config defaults)
+        // This ensures the report shows the real data period, not placeholder config values
         let (first_event, last_event) = strategy.event_time_range();
         let actual_start = first_event.unwrap_or(self.config.data_source.start_time);
-        let actual_end = last_event.unwrap_or(self.config.data_source.end_time);
+        // For end time: prefer actual last event, then first event, then current time
+        // (never use far-future config placeholder which would be confusing)
+        let actual_end = last_event
+            .or(first_event)
+            .unwrap_or_else(Utc::now);
 
         // Generate result using actual simulation stats
         let duration_secs = start_instant.elapsed().as_secs_f64();
