@@ -109,6 +109,11 @@ impl BacktestModeConfig {
             config.execution.execution_mode,
             crate::config::ExecutionMode::Market
         );
+        // Only 15-minute markets have fees/rebates; 5-min and 1-hour are fee-free
+        executor_config.use_realistic_fees = matches!(
+            config.window_duration,
+            poly_common::WindowDuration::FifteenMin
+        );
 
         // Parse date range from config
         let (start_time, end_time) = parse_date_range(&config.backtest)?;

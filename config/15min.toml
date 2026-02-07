@@ -1,0 +1,99 @@
+# Polymarket Bot Config - 15-MINUTE MARKETS (WITH FEES)
+# ======================================================
+#
+# 15-minute markets have taker fees (~1.5-2.5% depending on price).
+# Higher margin thresholds required to overcome fee drag.
+# Makers earn rebates, so limit orders preferred.
+#
+# Usage:
+#   cargo run -p poly-bot --release -- --config config/15min.toml --mode backtest
+#   cargo run -p poly-bot --release -- --config config/15min.toml --mode live
+
+[general]
+mode = "backtest"
+assets = ["BTC", "ETH", "SOL", "XRP"]
+window_duration = "15min"
+console_log_level = "warn"
+file_log_level = "debug"
+
+[trading]
+max_market_exposure = 250.0
+max_total_exposure = 1000.0
+base_order_size = 10.0
+available_balance = 1000.0
+
+# 15-MIN PHASE THRESHOLDS (900 seconds total)
+# - Early: >300s remaining (>5 min)
+# - Mid: 120-300s remaining (2-5 min)
+# - Late: <120s remaining (<2 min)
+early_threshold_secs = 300
+mid_threshold_secs = 120
+min_time_remaining_secs = 30
+
+# HIGHER MARGINS - MUST BEAT ~2-3% TAKER FEES
+min_margin_early_pct = 4.0    # 4.0% for early phase
+min_margin_mid_pct = 3.0      # 3.0% for mid phase
+min_margin_late_pct = 2.0     # 2.0% for late phase (still above fees)
+
+[risk]
+max_daily_loss = 200.0
+emergency_close_threshold = 0.15
+risk_mode = "directional"
+max_consecutive_failures = 3
+circuit_breaker_cooldown_secs = 300
+
+[execution]
+# LIMIT ORDERS PREFERRED - earn rebates instead of paying fees
+execution_mode = "limit"
+chase_enabled = true
+chase_step_size = 0.01
+chase_check_interval_ms = 500
+max_chase_time_ms = 5000
+
+[engines]
+priority = ["directional", "arbitrage", "maker"]
+
+[engines.arbitrage]
+# Usually not viable due to fees eating margins
+enabled = false
+min_margin_early_bps = 400    # 4.0% - need high edge
+min_margin_mid_bps = 300      # 3.0%
+min_margin_late_bps = 200     # 2.0%
+
+[engines.directional]
+enabled = true
+min_seconds_remaining = 60
+max_combined_cost = 1.02
+max_spread_bps = 1500
+min_favorable_depth = 50.0
+
+strong_threshold_late_bps = 9
+lean_threshold_late_bps = 6
+strong_up_ratio = 0.82
+lean_up_ratio = 0.65
+
+[engines.maker]
+# Market making can work since makers earn rebates
+enabled = false
+min_seconds_remaining = 120
+min_spread_bps = 100
+
+[backtest]
+data_dir = "data/live_test"
+speed = 0.0
+
+[backtest.trading]
+available_balance = 1000.0
+max_market_exposure = 250.0
+max_total_exposure = 1000.0
+base_order_size = 10.0
+
+[observability]
+capture_decisions = true
+capture_counterfactuals = true
+detect_anomalies = true
+
+[dashboard]
+enabled = true
+websocket_port = 3001
+api_port = 3002

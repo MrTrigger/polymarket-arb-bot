@@ -1,0 +1,93 @@
+# Polymarket Bot Config - 1-HOUR MARKETS (FEE-FREE)
+# ==================================================
+#
+# 1-hour markets have NO fees, so lower margin thresholds are profitable.
+# Longer phase transitions, more time for price discovery.
+#
+# Usage:
+#   cargo run -p poly-bot --release -- --config config/1hour.toml --mode backtest
+#   cargo run -p poly-bot --release -- --config config/1hour.toml --mode live
+
+[general]
+mode = "backtest"
+assets = ["BTC", "ETH", "SOL", "XRP"]
+window_duration = "1h"
+console_log_level = "info"
+file_log_level = "debug"
+
+[trading]
+max_market_exposure = 250.0
+max_total_exposure = 1000.0
+base_order_size = 10.0
+available_balance = 1000.0
+
+# 1-HOUR PHASE THRESHOLDS (3600 seconds total)
+# - Early: >1200s remaining (>20 min)
+# - Mid: 600-1200s remaining (10-20 min)
+# - Late: <600s remaining (<10 min)
+early_threshold_secs = 1200
+mid_threshold_secs = 600
+min_time_remaining_secs = 60
+
+# LOWER MARGINS - NO FEES TO OVERCOME
+min_margin_early_pct = 1.5    # 1.5% for early phase
+min_margin_mid_pct = 1.0      # 1.0% for mid phase
+min_margin_late_pct = 0.5     # 0.5% for late phase
+
+[risk]
+max_daily_loss = 200.0
+emergency_close_threshold = 0.15
+risk_mode = "directional"
+max_consecutive_failures = 3
+circuit_breaker_cooldown_secs = 600  # Longer cooldown for slower markets
+
+[execution]
+execution_mode = "market"     # Can use market orders since no fees
+chase_enabled = false         # Less important without fees
+max_chase_time_ms = 10000     # Longer chase ok for slower markets
+
+[engines]
+priority = ["directional", "arbitrage", "maker"]
+
+[engines.arbitrage]
+enabled = true                # Viable since no fees!
+min_margin_early_bps = 150    # 1.5%
+min_margin_mid_bps = 100      # 1.0%
+min_margin_late_bps = 50      # 0.5%
+
+[engines.directional]
+enabled = true
+min_seconds_remaining = 120   # More time in 1-hour windows
+max_combined_cost = 1.02
+max_spread_bps = 1500
+min_favorable_depth = 50.0
+
+# ATR thresholds scaled for 1-hour volatility
+strong_threshold_late_bps = 15
+lean_threshold_late_bps = 10
+strong_up_ratio = 0.82
+lean_up_ratio = 0.65
+
+[engines.maker]
+enabled = false
+min_seconds_remaining = 300   # 5 min minimum for market making
+
+[backtest]
+data_dir = "data/1hour"
+speed = 0.0
+
+[backtest.trading]
+available_balance = 1000.0
+max_market_exposure = 250.0
+max_total_exposure = 1000.0
+base_order_size = 10.0
+
+[observability]
+capture_decisions = true
+capture_counterfactuals = true
+detect_anomalies = true
+
+[dashboard]
+enabled = true
+websocket_port = 3001
+api_port = 3002

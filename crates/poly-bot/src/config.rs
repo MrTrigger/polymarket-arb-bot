@@ -143,19 +143,90 @@ pub struct TradingConfig {
 
 impl Default for TradingConfig {
     fn default() -> Self {
+        // Default to 15-minute config for backwards compatibility
+        Self::for_fifteen_min()
+    }
+}
+
+impl TradingConfig {
+    /// Config preset for 5-minute markets (fee-free).
+    ///
+    /// Lower thresholds since no fees. Faster phase transitions.
+    /// - Early: >90s remaining (>1.5 min)
+    /// - Mid: 30-90s remaining (0.5-1.5 min)
+    /// - Late: <30s remaining
+    pub fn for_five_min() -> Self {
         Self {
-            // Time-based thresholds from spec
-            min_margin_early: Decimal::new(25, 3),    // 2.5%
-            min_margin_mid: Decimal::new(15, 3),      // 1.5%
-            min_margin_late: Decimal::new(5, 3),      // 0.5%
+            // Lower thresholds - no fees to overcome
+            min_margin_early: Decimal::new(10, 3),    // 1.0%
+            min_margin_mid: Decimal::new(5, 3),       // 0.5%
+            min_margin_late: Decimal::new(25, 4),     // 0.25%
+            min_time_remaining_secs: 10,              // 10 seconds minimum
+            max_market_exposure: Decimal::new(1000, 0),
+            max_total_exposure: Decimal::new(5000, 0),
+            base_order_size: Decimal::new(50, 0),
+            min_order_size: Decimal::ONE,
+            available_balance: Decimal::new(5000, 0),
+            // 5-minute window phases (300 seconds total)
+            early_threshold_secs: 90,  // >1.5 min = early
+            mid_threshold_secs: 30,    // 30s-1.5min = mid, <30s = late
+        }
+    }
+
+    /// Config preset for 15-minute markets (with fees/rebates).
+    ///
+    /// Higher thresholds to overcome ~2-3% fee drag.
+    /// - Early: >300s remaining (>5 min)
+    /// - Mid: 120-300s remaining (2-5 min)
+    /// - Late: <120s remaining (<2 min)
+    pub fn for_fifteen_min() -> Self {
+        Self {
+            // Higher thresholds - need to beat ~2-3% taker fees
+            min_margin_early: Decimal::new(40, 3),    // 4.0% (conservative for fees)
+            min_margin_mid: Decimal::new(30, 3),      // 3.0%
+            min_margin_late: Decimal::new(20, 3),     // 2.0% (still above fee drag)
             min_time_remaining_secs: 30,
-            max_market_exposure: Decimal::new(1000, 0),    // $1000
-            max_total_exposure: Decimal::new(5000, 0),     // $5000
-            base_order_size: Decimal::new(50, 0),          // $50
-            min_order_size: Decimal::ONE,                  // $1.00
-            available_balance: Decimal::new(5000, 0),      // $5000
-            early_threshold_secs: 300, // 5 minutes
-            mid_threshold_secs: 120,   // 2 minutes
+            max_market_exposure: Decimal::new(1000, 0),
+            max_total_exposure: Decimal::new(5000, 0),
+            base_order_size: Decimal::new(50, 0),
+            min_order_size: Decimal::ONE,
+            available_balance: Decimal::new(5000, 0),
+            // 15-minute window phases (900 seconds total)
+            early_threshold_secs: 300, // >5 min = early
+            mid_threshold_secs: 120,   // 2-5 min = mid, <2 min = late
+        }
+    }
+
+    /// Config preset for 1-hour markets (fee-free).
+    ///
+    /// Lower thresholds since no fees. Longer phase transitions.
+    /// - Early: >1200s remaining (>20 min)
+    /// - Mid: 600-1200s remaining (10-20 min)
+    /// - Late: <600s remaining (<10 min)
+    pub fn for_one_hour() -> Self {
+        Self {
+            // Lower thresholds - no fees to overcome
+            min_margin_early: Decimal::new(15, 3),    // 1.5%
+            min_margin_mid: Decimal::new(10, 3),      // 1.0%
+            min_margin_late: Decimal::new(5, 3),      // 0.5%
+            min_time_remaining_secs: 60,              // 60 seconds minimum
+            max_market_exposure: Decimal::new(1000, 0),
+            max_total_exposure: Decimal::new(5000, 0),
+            base_order_size: Decimal::new(50, 0),
+            min_order_size: Decimal::ONE,
+            available_balance: Decimal::new(5000, 0),
+            // 1-hour window phases (3600 seconds total)
+            early_threshold_secs: 1200,  // >20 min = early
+            mid_threshold_secs: 600,     // 10-20 min = mid, <10 min = late
+        }
+    }
+
+    /// Get the appropriate preset for a window duration.
+    pub fn for_window_duration(duration: poly_common::WindowDuration) -> Self {
+        match duration {
+            poly_common::WindowDuration::FiveMin => Self::for_five_min(),
+            poly_common::WindowDuration::FifteenMin => Self::for_fifteen_min(),
+            poly_common::WindowDuration::OneHour => Self::for_one_hour(),
         }
     }
 }
@@ -1306,7 +1377,7 @@ impl Default for TradingToml {
             max_total_exposure: None,
             base_order_size: None,
             available_balance: None,
-            // Optional with defaults
+            // Optional with defaults (for backwards compatibility)
             min_order_size: 1.0,
             min_margin_early_pct: 2.5,
             min_margin_mid_pct: 1.5,

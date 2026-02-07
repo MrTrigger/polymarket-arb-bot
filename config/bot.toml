@@ -32,7 +32,7 @@ assets = ["BTC", "ETH", "SOL", "XRP"]         # ["BTC"] ["BTC", "ETH", "SOL", "X
 # REQUIRED: Market window duration
 #   "15min" - 15-minute binary options (higher frequency)
 #   "1h"    - 1-hour binary options
-window_duration = "15min"
+window_duration = "5min"
 
 # optional: Console logging verbosity: "error", "warn", "info", "debug", "trace"
 console_log_level = "info"
@@ -76,7 +76,7 @@ execution_mode = "market"
 
 # optional: Enable price chasing for unfilled limit orders
 # WARNING: Can block event loop - usually keep disabled
-chase_enabled = false
+chase_enabled = true
 
 # optional: Price step for chasing (must match Polymarket tick size)
 chase_step_size = 0.01

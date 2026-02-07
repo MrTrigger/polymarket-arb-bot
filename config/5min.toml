@@ -1,0 +1,93 @@
+# Polymarket Bot Config - 5-MINUTE MARKETS (FEE-FREE)
+# =====================================================
+#
+# 5-minute markets have NO fees, so lower margin thresholds are profitable.
+# Faster phase transitions due to shorter window.
+#
+# Usage:
+#   cargo run -p poly-bot --release -- --config config/5min.toml --mode backtest
+#   cargo run -p poly-bot --release -- --config config/5min.toml --mode live
+
+[general]
+mode = "backtest"
+assets = ["BTC", "ETH", "SOL", "XRP"]
+window_duration = "5min"
+console_log_level = "info"
+file_log_level = "debug"
+
+[trading]
+max_market_exposure = 250.0
+max_total_exposure = 1000.0
+base_order_size = 10.0
+available_balance = 1000.0
+
+# 5-MIN PHASE THRESHOLDS (300 seconds total)
+# - Early: >90s remaining (>1.5 min)
+# - Mid: 30-90s remaining (0.5-1.5 min)
+# - Late: <30s remaining
+early_threshold_secs = 90
+mid_threshold_secs = 30
+min_time_remaining_secs = 10
+
+# LOWER MARGINS - NO FEES TO OVERCOME
+min_margin_early_pct = 1.0    # 1.0% for early phase
+min_margin_mid_pct = 0.5      # 0.5% for mid phase
+min_margin_late_pct = 0.25    # 0.25% for late phase
+
+[risk]
+max_daily_loss = 200.0
+emergency_close_threshold = 0.15
+risk_mode = "directional"
+max_consecutive_failures = 3
+circuit_breaker_cooldown_secs = 180  # Shorter cooldown for faster markets
+
+[execution]
+execution_mode = "market"     # Can use market orders since no fees
+chase_enabled = false         # Less important without fees
+max_chase_time_ms = 2000      # Shorter chase for faster markets
+
+[engines]
+priority = ["directional", "arbitrage", "maker"]
+
+[engines.arbitrage]
+enabled = true                # Viable since no fees!
+min_margin_early_bps = 100    # 1.0%
+min_margin_mid_bps = 50       # 0.5%
+min_margin_late_bps = 25      # 0.25%
+
+[engines.directional]
+enabled = true
+min_seconds_remaining = 20    # Shorter min for 5-min windows
+max_combined_cost = 1.02
+max_spread_bps = 1500
+min_favorable_depth = 25.0
+
+# Adjusted thresholds for 5-min volatility
+strong_threshold_late_bps = 6
+lean_threshold_late_bps = 4
+strong_up_ratio = 0.82
+lean_up_ratio = 0.65
+
+[engines.maker]
+enabled = false
+min_seconds_remaining = 60
+
+[backtest]
+data_dir = "data/5min"
+speed = 0.0
+
+[backtest.trading]
+available_balance = 1000.0
+max_market_exposure = 250.0
+max_total_exposure = 1000.0
+base_order_size = 10.0
+
+[observability]
+capture_decisions = true
+capture_counterfactuals = true
+detect_anomalies = true
+
+[dashboard]
+enabled = true
+websocket_port = 3001
+api_port = 3002

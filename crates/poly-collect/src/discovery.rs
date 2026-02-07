@@ -157,9 +157,11 @@ impl MarketDiscovery {
                     );
                 }
 
+                let duration_mins = (market_window.window_end - market_window.window_start).num_minutes();
                 info!(
-                    "Discovered new market: {} {} strike={} (ends {})",
-                    market_window.asset, market_window.event_id, market_window.strike_price, market_window.window_end
+                    "Discovered new market: {} {} strike={} ({}min window, ends {})",
+                    market_window.asset, market_window.event_id, market_window.strike_price,
+                    duration_mins, market_window.window_end
                 );
                 new_markets.push(market_window);
                 self.known_markets.insert(event_id);
@@ -283,8 +285,9 @@ impl MarketDiscovery {
             }
         };
 
-        // Parse timestamps
-        let window_end = self.parse_datetime(&event.end_date)?;
+        // Parse timestamps - try event.end_date first, fall back to market.end_date
+        let window_end = self.parse_datetime(&event.end_date)?
+            .or_else(|| self.parse_datetime(&market.end_date).ok().flatten());
         let window_end = match window_end {
             Some(t) => t,
             None => {
@@ -293,8 +296,9 @@ impl MarketDiscovery {
             }
         };
 
-        // For 15-minute markets, window_start is 15 minutes before end
-        let window_start = window_end - chrono::Duration::minutes(15);
+        // Detect window duration from tags (5M, 15M, 1H)
+        let window_duration = self.detect_window_duration(event);
+        let window_start = window_end - window_duration;
 
         // Parse strike price from title (e.g., "BTC above $100,000")
         let strike_price = self.parse_strike_price(&title);
@@ -312,6 +316,41 @@ impl MarketDiscovery {
         };
 
         Ok(Some(market_window))
+    }
+
+    /// Detect window duration from event tags (5M, 15M, 1H).
+    /// Defaults to 15 minutes if no recognized tag is found.
+    fn detect_window_duration(&self, event: &GammaEvent) -> chrono::Duration {
+        if let Some(tags) = &event.tags {
+            for tag in tags {
+                if let Some(slug) = &tag.slug {
+                    let slug_upper = slug.to_uppercase();
+                    if slug_upper == "5M" || slug_upper.contains("5-MIN") || slug_upper.contains("5MIN") {
+                        return chrono::Duration::minutes(5);
+                    }
+                    if slug_upper == "1H" || slug_upper.contains("1-HOUR") || slug_upper.contains("1HOUR") {
+                        return chrono::Duration::minutes(60);
+                    }
+                    if slug_upper == "15M" || slug_upper.contains("15-MIN") || slug_upper.contains("15MIN") {
+                        return chrono::Duration::minutes(15);
+                    }
+                }
+            }
+        }
+
+        // Also check title for duration hints
+        if let Some(title) = &event.title {
+            let title_lower = title.to_lowercase();
+            if title_lower.contains("5 min") || title_lower.contains("5-min") || title_lower.contains("5min") {
+                return chrono::Duration::minutes(5);
+            }
+            if title_lower.contains("1 hour") || title_lower.contains("1-hour") || title_lower.contains("1hour") || title_lower.contains("hourly") {
+                return chrono::Duration::minutes(60);
+            }
+        }
+
+        // Default to 15 minutes
+        chrono::Duration::minutes(15)
     }
 
     /// Detect which crypto asset a market title refers to.

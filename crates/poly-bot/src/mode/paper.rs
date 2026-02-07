@@ -88,9 +88,19 @@ impl PaperModeConfig {
         let mut executor_config = SimulatedExecutorConfig::paper();
         executor_config.initial_balance = allocated_balance;
         executor_config.latency_ms = config.execution.paper_fill_latency_ms;
-        executor_config.fee_rate = Decimal::ZERO; // Polymarket has 0% maker fees
+        executor_config.fee_rate = Decimal::ZERO; // Fallback rate (not used when use_realistic_fees=true)
         executor_config.enforce_balance = true;
         executor_config.max_market_exposure = config.trading.max_market_exposure;
+        // Only 15-minute markets have fees/rebates; 5-min and 1-hour are fee-free
+        executor_config.use_realistic_fees = matches!(
+            config.window_duration,
+            poly_common::WindowDuration::FifteenMin
+        );
+        // Set taker mode based on execution mode
+        executor_config.is_taker_mode = matches!(
+            config.execution.execution_mode,
+            crate::config::ExecutionMode::Market
+        );
 
         // Convert string assets to CryptoAsset enum for discovery
         let discovery_assets: Vec<CryptoAsset> = config
