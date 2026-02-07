@@ -1,10 +1,14 @@
 //! CSV-based replay data source for backtesting.
 //!
-//! Loads historical data from CSV files and replays events in chronological
-//! order for backtesting trading strategies.
+//! Streams historical data from CSV files using a k-way merge, keeping only
+//! ~1MB in memory regardless of dataset size. This replaces the previous
+//! approach of loading all rows into a BinaryHeap which OOM-killed on large
+//! datasets (~14GB / 92M rows).
 
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::cmp::Ordering;
+use std::fs::File;
+use std::io::BufReader;
 use std::path::Path;
 
 use async_trait::async_trait;
@@ -52,32 +56,9 @@ impl Default for CsvReplayConfig {
     }
 }
 
-/// A timestamped event for the priority queue.
-struct TimestampedEvent {
-    timestamp: DateTime<Utc>,
-    event: MarketEvent,
-}
-
-impl Eq for TimestampedEvent {}
-
-impl PartialEq for TimestampedEvent {
-    fn eq(&self, other: &Self) -> bool {
-        self.timestamp == other.timestamp
-    }
-}
-
-impl Ord for TimestampedEvent {
-    fn cmp(&self, other: &Self) -> Ordering {
-        // Reverse ordering for min-heap behavior (earliest first)
-        other.timestamp.cmp(&self.timestamp)
-    }
-}
-
-impl PartialOrd for TimestampedEvent {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
+// ---------------------------------------------------------------------------
+// CSV row types
+// ---------------------------------------------------------------------------
 
 /// CSV row for spot prices.
 #[derive(Debug, Clone, Deserialize)]
@@ -149,25 +130,359 @@ struct OrderBookSnapshotRow {
     #[allow(dead_code)]
     spread_bps: i32,
     #[serde(with = "rust_decimal::serde::str")]
+    #[allow(dead_code)]
     bid_depth: Decimal,
     #[serde(with = "rust_decimal::serde::str")]
+    #[allow(dead_code)]
     ask_depth: Decimal,
 }
 
 /// Mapping of event_id to (yes_token_id, no_token_id)
 type EventTokenMap = HashMap<String, (String, String)>;
 
+// ---------------------------------------------------------------------------
+// Tiebreak priority: at the same timestamp, WindowOpen < data < WindowClose
+// ---------------------------------------------------------------------------
+
+fn event_priority(event: &MarketEvent) -> u8 {
+    match event {
+        MarketEvent::WindowOpen(_) => 0,
+        MarketEvent::SpotPrice(_) => 1,
+        MarketEvent::BookSnapshot(_) | MarketEvent::BookSnapshotPair(_) => 1,
+        MarketEvent::BookDelta(_) => 1,
+        MarketEvent::Fill(_) => 1,
+        MarketEvent::WindowClose(_) => 2,
+        MarketEvent::Heartbeat(_) => 1,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Merge entry: one peeked event per stream source, used in the k-way heap
+// ---------------------------------------------------------------------------
+
+struct MergeEntry {
+    timestamp: DateTime<Utc>,
+    priority: u8,
+    source_idx: usize,
+    event: MarketEvent,
+}
+
+impl Eq for MergeEntry {}
+
+impl PartialEq for MergeEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.timestamp == other.timestamp && self.priority == other.priority
+    }
+}
+
+impl Ord for MergeEntry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Reverse for min-heap (earliest timestamp first, then lowest priority)
+        other.timestamp.cmp(&self.timestamp)
+            .then_with(|| other.priority.cmp(&self.priority))
+    }
+}
+
+impl PartialOrd for MergeEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stream sources: each produces events on demand from CSV or in-memory data
+// ---------------------------------------------------------------------------
+
+/// Market windows: small enough to load entirely into memory (~500KB for ~860 rows).
+/// Produces WindowOpen and WindowClose events sorted by timestamp.
+struct WindowSource {
+    events: VecDeque<(DateTime<Utc>, MarketEvent)>,
+}
+
+impl WindowSource {
+    fn next_event(&mut self) -> Option<MarketEvent> {
+        self.events.pop_front().map(|(_ts, ev)| ev)
+    }
+}
+
+/// Spot prices: streamed row-by-row from CSV.
+struct SpotPriceSource {
+    reader: csv::DeserializeRecordsIntoIter<BufReader<File>, SpotPriceRow>,
+    config_assets: Vec<CryptoAsset>,
+    start_time: Option<DateTime<Utc>>,
+    end_time: Option<DateTime<Utc>>,
+    exhausted: bool,
+}
+
+impl SpotPriceSource {
+    fn next_event(&mut self) -> Option<MarketEvent> {
+        if self.exhausted {
+            return None;
+        }
+        loop {
+            match self.reader.next() {
+                Some(Ok(row)) => {
+                    let asset = match parse_asset(&row.asset) {
+                        Some(a) => a,
+                        None => continue,
+                    };
+                    if !self.config_assets.is_empty() && !self.config_assets.contains(&asset) {
+                        continue;
+                    }
+                    if let Some(start) = self.start_time
+                        && row.timestamp < start { continue; }
+                    if let Some(end) = self.end_time
+                        && row.timestamp > end { continue; }
+                    return Some(MarketEvent::SpotPrice(SpotPriceEvent {
+                        asset,
+                        price: row.price,
+                        quantity: row.quantity,
+                        timestamp: row.timestamp,
+                    }));
+                }
+                Some(Err(e)) => {
+                    warn!("Spot price CSV parse error (skipping row): {}", e);
+                    continue;
+                }
+                None => {
+                    self.exhausted = true;
+                    return None;
+                }
+            }
+        }
+    }
+
+}
+
+/// Orderbook snapshots: streamed row-by-row, pairing YES/NO on the fly.
+struct OrderbookSource {
+    reader: csv::DeserializeRecordsIntoIter<BufReader<File>, OrderBookSnapshotRow>,
+    event_tokens: EventTokenMap,
+    start_time: Option<DateTime<Utc>>,
+    end_time: Option<DateTime<Utc>>,
+    /// Buffer for unpaired rows: (event_id, timestamp) -> row
+    pending: HashMap<(String, DateTime<Utc>), OrderBookSnapshotRow>,
+    exhausted: bool,
+    unpaired_count: usize,
+}
+
+impl OrderbookSource {
+    fn next_event(&mut self) -> Option<MarketEvent> {
+        if self.exhausted {
+            return None;
+        }
+        loop {
+            match self.reader.next() {
+                Some(Ok(row)) => {
+                    // Time filter
+                    if let Some(start) = self.start_time
+                        && row.timestamp < start { continue; }
+                    if let Some(end) = self.end_time
+                        && row.timestamp > end { continue; }
+                    // Event filter
+                    let Some((yes_token, _no_token)) = self.event_tokens.get(&row.event_id) else {
+                        continue;
+                    };
+                    let yes_token = yes_token.clone();
+
+                    let key = (row.event_id.clone(), row.timestamp);
+
+                    if let Some(partner) = self.pending.remove(&key) {
+                        // Pair found - determine YES vs NO
+                        let (yes_row, no_row) = if row.token_id == yes_token {
+                            (row, partner)
+                        } else if partner.token_id == yes_token {
+                            (partner, row)
+                        } else {
+                            continue;
+                        };
+
+                        return Some(make_orderbook_pair_event(yes_row, no_row));
+                    } else {
+                        self.pending.insert(key, row);
+                    }
+                }
+                Some(Err(e)) => {
+                    warn!("Orderbook CSV parse error (skipping row): {}", e);
+                    continue;
+                }
+                None => {
+                    self.exhausted = true;
+                    self.unpaired_count = self.pending.len();
+                    if self.unpaired_count > 10 {
+                        warn!("{} orderbook snapshots had no YES/NO partner", self.unpaired_count);
+                    }
+                    return None;
+                }
+            }
+        }
+    }
+
+}
+
+/// Aligned prices: streamed row-by-row (already paired YES/NO in CSV).
+struct AlignedPriceSource {
+    reader: csv::DeserializeRecordsIntoIter<BufReader<File>, AlignedPriceRow>,
+    event_tokens: EventTokenMap,
+    start_time: Option<DateTime<Utc>>,
+    end_time: Option<DateTime<Utc>>,
+    exhausted: bool,
+}
+
+impl AlignedPriceSource {
+    fn next_event(&mut self) -> Option<MarketEvent> {
+        if self.exhausted {
+            return None;
+        }
+        loop {
+            match self.reader.next() {
+                Some(Ok(row)) => {
+                    if !self.event_tokens.contains_key(&row.event_id) {
+                        continue;
+                    }
+                    if let Some(start) = self.start_time
+                        && row.timestamp < start { continue; }
+                    if let Some(end) = self.end_time
+                        && row.timestamp > end { continue; }
+                    return Some(make_aligned_pair_event(row));
+                }
+                Some(Err(e)) => {
+                    warn!("Aligned price CSV parse error (skipping row): {}", e);
+                    continue;
+                }
+                None => {
+                    self.exhausted = true;
+                    return None;
+                }
+            }
+        }
+    }
+
+}
+
+// ---------------------------------------------------------------------------
+// Helper: convert rows to MarketEvent
+// ---------------------------------------------------------------------------
+
+fn make_orderbook_pair_event(yes_row: OrderBookSnapshotRow, no_row: OrderBookSnapshotRow) -> MarketEvent {
+    let timestamp = yes_row.timestamp;
+    let event_id = yes_row.event_id.clone();
+
+    let yes_snapshot = BookSnapshotEvent {
+        token_id: yes_row.token_id,
+        event_id: yes_row.event_id,
+        bids: if yes_row.best_bid > Decimal::ZERO {
+            vec![PriceLevel::new(yes_row.best_bid, yes_row.best_bid_size)]
+        } else {
+            vec![]
+        },
+        asks: if yes_row.best_ask < Decimal::ONE {
+            vec![PriceLevel::new(yes_row.best_ask, yes_row.best_ask_size)]
+        } else {
+            vec![]
+        },
+        timestamp,
+    };
+
+    let no_snapshot = BookSnapshotEvent {
+        token_id: no_row.token_id,
+        event_id: no_row.event_id,
+        bids: if no_row.best_bid > Decimal::ZERO {
+            vec![PriceLevel::new(no_row.best_bid, no_row.best_bid_size)]
+        } else {
+            vec![]
+        },
+        asks: if no_row.best_ask < Decimal::ONE {
+            vec![PriceLevel::new(no_row.best_ask, no_row.best_ask_size)]
+        } else {
+            vec![]
+        },
+        timestamp,
+    };
+
+    MarketEvent::BookSnapshotPair(BookSnapshotPairEvent {
+        event_id,
+        yes_snapshot,
+        no_snapshot,
+        timestamp,
+    })
+}
+
+fn make_aligned_pair_event(row: AlignedPriceRow) -> MarketEvent {
+    let spread = Decimal::new(1, 2); // 0.01 spread
+    let half_spread = spread / Decimal::TWO;
+    let default_size = Decimal::new(1000, 0);
+
+    let yes_bid = (row.yes_price - half_spread).max(Decimal::ZERO);
+    let yes_ask = (row.yes_price + half_spread).min(Decimal::ONE);
+    let yes_snapshot = BookSnapshotEvent {
+        token_id: row.yes_token_id.clone(),
+        event_id: row.event_id.clone(),
+        bids: if yes_bid > Decimal::ZERO { vec![PriceLevel::new(yes_bid, default_size)] } else { vec![] },
+        asks: if yes_ask < Decimal::ONE { vec![PriceLevel::new(yes_ask, default_size)] } else { vec![] },
+        timestamp: row.timestamp,
+    };
+
+    let no_bid = (row.no_price - half_spread).max(Decimal::ZERO);
+    let no_ask = (row.no_price + half_spread).min(Decimal::ONE);
+    let no_snapshot = BookSnapshotEvent {
+        token_id: row.no_token_id,
+        event_id: row.event_id.clone(),
+        bids: if no_bid > Decimal::ZERO { vec![PriceLevel::new(no_bid, default_size)] } else { vec![] },
+        asks: if no_ask < Decimal::ONE { vec![PriceLevel::new(no_ask, default_size)] } else { vec![] },
+        timestamp: row.timestamp,
+    };
+
+    MarketEvent::BookSnapshotPair(BookSnapshotPairEvent {
+        event_id: row.event_id,
+        yes_snapshot,
+        no_snapshot,
+        timestamp: row.timestamp,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// CsvReplayDataSource: streaming k-way merge
+// ---------------------------------------------------------------------------
+
+/// Index constants for source types in the sources array.
+const SOURCE_WINDOWS: usize = 0;
+const SOURCE_SPOT: usize = 1;
+const SOURCE_BOOK: usize = 2; // orderbook snapshots OR aligned prices
+
 /// CSV-based replay data source.
+///
+/// Streams events using a k-way merge with ~1MB memory overhead regardless
+/// of dataset size.
 pub struct CsvReplayDataSource {
     config: CsvReplayConfig,
-    /// Priority queue for merging events by timestamp.
-    event_queue: BinaryHeap<TimestampedEvent>,
+    /// Streaming sources (up to 3: windows, spot prices, book data).
+    window_source: Option<WindowSource>,
+    spot_source: Option<SpotPriceSource>,
+    book_source: Option<BookSource>,
+    /// Tiny merge heap (at most 3 entries, one per source).
+    merge_heap: BinaryHeap<MergeEntry>,
     /// Current replay time.
     current_time: Option<DateTime<Utc>>,
-    /// Whether initial data has been loaded.
-    data_loaded: bool,
+    /// Whether streaming has been initialized.
+    initialized: bool,
     /// Whether replay is complete.
     is_exhausted: bool,
+}
+
+/// Either orderbook snapshots or aligned prices (mutually exclusive).
+enum BookSource {
+    Orderbook(OrderbookSource),
+    Aligned(AlignedPriceSource),
+}
+
+impl BookSource {
+    fn next_event(&mut self) -> Option<MarketEvent> {
+        match self {
+            BookSource::Orderbook(s) => s.next_event(),
+            BookSource::Aligned(s) => s.next_event(),
+        }
+    }
 }
 
 impl CsvReplayDataSource {
@@ -175,15 +490,18 @@ impl CsvReplayDataSource {
     pub fn new(config: CsvReplayConfig) -> Self {
         Self {
             config,
-            event_queue: BinaryHeap::new(),
+            window_source: None,
+            spot_source: None,
+            book_source: None,
+            merge_heap: BinaryHeap::with_capacity(4),
             current_time: None,
-            data_loaded: false,
+            initialized: false,
             is_exhausted: false,
         }
     }
 
-    /// Load all historical data into the event queue.
-    fn load_data(&mut self) -> Result<(), DataSourceError> {
+    /// Initialize streaming: open CSV readers, load windows, prime merge heap.
+    fn init_streaming(&mut self) -> Result<(), DataSourceError> {
         let data_dir_str = self.config.data_dir.clone();
         let data_dir = Path::new(&data_dir_str);
 
@@ -194,401 +512,132 @@ impl CsvReplayDataSource {
             )));
         }
 
-        info!("Loading CSV replay data from {}", data_dir_str);
+        info!("Initializing streaming CSV replay from {}", data_dir_str);
 
-        // Load market windows first (creates window open/close events)
-        let event_tokens = self.load_market_windows(data_dir)?;
+        // 1. Load market windows entirely (small: ~860 rows, ~500KB)
+        let (window_events, event_tokens) = load_market_windows(
+            data_dir,
+            &self.config.assets,
+            self.config.start_time,
+            self.config.end_time,
+        )?;
+        let window_count = window_events.len() / 2; // open + close per window
+        debug!("Loaded {} market windows ({} events)", window_count, window_events.len());
 
-        // Load spot prices
-        self.load_spot_prices(data_dir)?;
-
-        // Try to load orderbook snapshots first (live collected, full book data)
-        // then fall back to aligned prices (historical, bid-only prices)
-        let snapshots_loaded = self.load_orderbook_snapshots(data_dir, &event_tokens)?;
-        if !snapshots_loaded {
-            // Fall back to aligned prices (historical format)
-            self.load_aligned_prices(data_dir, &event_tokens)?;
+        if !window_events.is_empty() {
+            self.window_source = Some(WindowSource {
+                events: VecDeque::from(window_events),
+            });
         }
 
-        info!("Loaded {} events for replay", self.event_queue.len());
-        self.data_loaded = true;
+        // 2. Open spot prices CSV reader (streaming)
+        let spot_path = data_dir.join("binance_spot_prices.csv");
+        if spot_path.exists() {
+            let file = File::open(&spot_path)
+                .map_err(|e| DataSourceError::Parse(format!("Failed to open {:?}: {}", spot_path, e)))?;
+            let buf_reader = BufReader::with_capacity(64 * 1024, file);
+            let reader = csv::Reader::from_reader(buf_reader);
+            self.spot_source = Some(SpotPriceSource {
+                reader: reader.into_deserialize(),
+                config_assets: self.config.assets.clone(),
+                start_time: self.config.start_time,
+                end_time: self.config.end_time,
+                exhausted: false,
+            });
+        } else {
+            warn!("Spot prices file not found: {:?}", spot_path);
+        }
+
+        // 3. Open book data CSV reader (orderbook snapshots preferred, fallback to aligned prices)
+        let ob_path = data_dir.join("polymarket_orderbook_snapshots.csv");
+        let aligned_path = data_dir.join("polymarket_aligned_prices.csv");
+
+        if ob_path.exists() {
+            let file = File::open(&ob_path)
+                .map_err(|e| DataSourceError::Parse(format!("Failed to open {:?}: {}", ob_path, e)))?;
+            let buf_reader = BufReader::with_capacity(64 * 1024, file);
+            let reader = csv::Reader::from_reader(buf_reader);
+            self.book_source = Some(BookSource::Orderbook(OrderbookSource {
+                reader: reader.into_deserialize(),
+                event_tokens,
+                start_time: self.config.start_time,
+                end_time: self.config.end_time,
+                pending: HashMap::new(),
+                exhausted: false,
+                unpaired_count: 0,
+            }));
+        } else if aligned_path.exists() {
+            let file = File::open(&aligned_path)
+                .map_err(|e| DataSourceError::Parse(format!("Failed to open {:?}: {}", aligned_path, e)))?;
+            let buf_reader = BufReader::with_capacity(64 * 1024, file);
+            let reader = csv::Reader::from_reader(buf_reader);
+            self.book_source = Some(BookSource::Aligned(AlignedPriceSource {
+                reader: reader.into_deserialize(),
+                event_tokens,
+                start_time: self.config.start_time,
+                end_time: self.config.end_time,
+                exhausted: false,
+            }));
+        } else {
+            debug!("No book data files found (orderbook snapshots or aligned prices)");
+        }
+
+        // 4. Prime the merge heap: get first event from each source
+        self.prime_source(SOURCE_WINDOWS);
+        self.prime_source(SOURCE_SPOT);
+        self.prime_source(SOURCE_BOOK);
+
+        self.initialized = true;
+        info!("Streaming CSV replay initialized (merge heap size: {})", self.merge_heap.len());
 
         Ok(())
     }
 
-    /// Load market windows and return event -> token mapping.
-    fn load_market_windows(&mut self, data_dir: &Path) -> Result<EventTokenMap, DataSourceError> {
-        let path = data_dir.join("polymarket_market_windows.csv");
-        if !path.exists() {
-            warn!("Market windows file not found: {:?}", path);
-            return Ok(HashMap::new());
+    /// Pull the next event from the given source and push it onto the merge heap.
+    fn prime_source(&mut self, source_idx: usize) {
+        let event = match source_idx {
+            SOURCE_WINDOWS => self.window_source.as_mut().and_then(|s| s.next_event()),
+            SOURCE_SPOT => self.spot_source.as_mut().and_then(|s| s.next_event()),
+            SOURCE_BOOK => self.book_source.as_mut().and_then(|s| s.next_event()),
+            _ => None,
+        };
+
+        if let Some(ev) = event {
+            let ts = ev.timestamp();
+            let prio = event_priority(&ev);
+            self.merge_heap.push(MergeEntry {
+                timestamp: ts,
+                priority: prio,
+                source_idx,
+                event: ev,
+            });
         }
-
-        let mut reader = csv::Reader::from_path(&path)
-            .map_err(|e| DataSourceError::Parse(format!("Failed to open {:?}: {}", path, e)))?;
-
-        let mut event_tokens: EventTokenMap = HashMap::new();
-        let mut window_count = 0;
-
-        for result in reader.deserialize() {
-            let row: MarketWindowRow = result
-                .map_err(|e| DataSourceError::Parse(format!("CSV parse error: {}", e)))?;
-
-            // Filter by asset if specified
-            let asset = parse_asset(&row.asset);
-            if let Some(a) = asset
-                && !self.config.assets.is_empty()
-                && !self.config.assets.contains(&a)
-            {
-                continue;
-            }
-
-            // Filter by time if specified
-            if let Some(start) = self.config.start_time
-                && row.window_end < start
-            {
-                continue;
-            }
-            if let Some(end) = self.config.end_time
-                && row.window_start > end
-            {
-                continue;
-            }
-
-            // Skip markets that were already expired when discovered (no live data for them)
-            if row.discovered_at > row.window_end {
-                continue;
-            }
-
-            // Build event -> token mapping for validating aligned prices
-            event_tokens.insert(row.event_id.clone(), (row.yes_token_id.clone(), row.no_token_id.clone()));
-
-            // Create window open event
-            // Use window_start (not discovered_at) so window opens at the correct time
-            if let Some(asset) = asset {
-                let open_event = MarketEvent::WindowOpen(WindowOpenEvent {
-                    event_id: row.event_id.clone(),
-                    condition_id: row.condition_id.clone(),
-                    asset,
-                    yes_token_id: row.yes_token_id,
-                    no_token_id: row.no_token_id,
-                    strike_price: row.strike_price,
-                    window_start: row.window_start,
-                    window_end: row.window_end,
-                    timestamp: row.window_start, // Use window_start as event timestamp
-                });
-
-                self.event_queue.push(TimestampedEvent {
-                    timestamp: row.window_start, // Queue at window_start time
-                    event: open_event,
-                });
-
-                // Create window close event
-                let close_event = MarketEvent::WindowClose(WindowCloseEvent {
-                    event_id: row.event_id,
-                    outcome: None,
-                    final_price: None,
-                    timestamp: row.window_end,
-                });
-
-                self.event_queue.push(TimestampedEvent {
-                    timestamp: row.window_end,
-                    event: close_event,
-                });
-
-                window_count += 1;
-            }
-        }
-
-        debug!("Loaded {} market windows", window_count);
-        Ok(event_tokens)
     }
 
-    /// Load spot prices.
-    fn load_spot_prices(&mut self, data_dir: &Path) -> Result<(), DataSourceError> {
-        let path = data_dir.join("binance_spot_prices.csv");
-        if !path.exists() {
-            warn!("Spot prices file not found: {:?}", path);
-            return Ok(());
-        }
-
-        let mut reader = csv::Reader::from_path(&path)
-            .map_err(|e| DataSourceError::Parse(format!("Failed to open {:?}: {}", path, e)))?;
-
-        let mut count = 0;
-
-        for result in reader.deserialize() {
-            let row: SpotPriceRow = result
-                .map_err(|e| DataSourceError::Parse(format!("CSV parse error: {}", e)))?;
-
-            // Filter by asset
-            let asset = match parse_asset(&row.asset) {
-                Some(a) => a,
-                None => continue,
-            };
-
-            if !self.config.assets.is_empty() && !self.config.assets.contains(&asset) {
-                continue;
-            }
-
-            // Filter by time
-            if let Some(start) = self.config.start_time
-                && row.timestamp < start
-            {
-                continue;
-            }
-            if let Some(end) = self.config.end_time
-                && row.timestamp > end
-            {
-                continue;
-            }
-
-            let event = MarketEvent::SpotPrice(SpotPriceEvent {
-                asset,
-                price: row.price,
-                quantity: row.quantity,
-                timestamp: row.timestamp,
-            });
-
-            self.event_queue.push(TimestampedEvent {
-                timestamp: row.timestamp,
-                event,
-            });
-
-            count += 1;
-        }
-
-        debug!("Loaded {} spot prices", count);
-        Ok(())
-    }
-
-    /// Load aligned price pairs and convert to paired book snapshot events.
-    /// Each aligned row has YES and NO prices at the same timestamp,
-    /// and we emit a single BookSnapshotPair event to ensure both orderbooks
-    /// are updated atomically (no staleness issues from event ordering).
-    fn load_aligned_prices(
-        &mut self,
-        data_dir: &Path,
-        event_tokens: &EventTokenMap,
-    ) -> Result<(), DataSourceError> {
-        let path = data_dir.join("polymarket_aligned_prices.csv");
-        if !path.exists() {
-            warn!("Aligned prices file not found: {:?}", path);
-            return Ok(());
-        }
-
-        let mut reader = csv::Reader::from_path(&path)
-            .map_err(|e| DataSourceError::Parse(format!("Failed to open {:?}: {}", path, e)))?;
-
-        let mut count = 0;
-
-        for result in reader.deserialize() {
-            let row: AlignedPriceRow = result
-                .map_err(|e| DataSourceError::Parse(format!("CSV parse error: {}", e)))?;
-
-            // Validate event_id exists in our tracked markets
-            if !event_tokens.contains_key(&row.event_id) {
-                continue;
-            }
-
-            // Filter by config time range
-            if let Some(start) = self.config.start_time
-                && row.timestamp < start
-            {
-                continue;
-            }
-            if let Some(end) = self.config.end_time
-                && row.timestamp > end
-            {
-                continue;
-            }
-
-            // Convert prices to book snapshots with small spread
-            let spread = Decimal::new(1, 2); // 0.01 spread
-            let half_spread = spread / Decimal::TWO;
-            let default_size = Decimal::new(1000, 0);
-
-            // Create YES book snapshot
-            let yes_bid = (row.yes_price - half_spread).max(Decimal::ZERO);
-            let yes_ask = (row.yes_price + half_spread).min(Decimal::ONE);
-            let yes_snapshot = BookSnapshotEvent {
-                token_id: row.yes_token_id.clone(),
-                event_id: row.event_id.clone(),
-                bids: if yes_bid > Decimal::ZERO { vec![PriceLevel::new(yes_bid, default_size)] } else { vec![] },
-                asks: if yes_ask < Decimal::ONE { vec![PriceLevel::new(yes_ask, default_size)] } else { vec![] },
-                timestamp: row.timestamp,
-            };
-
-            // Create NO book snapshot
-            let no_bid = (row.no_price - half_spread).max(Decimal::ZERO);
-            let no_ask = (row.no_price + half_spread).min(Decimal::ONE);
-            let no_snapshot = BookSnapshotEvent {
-                token_id: row.no_token_id,
-                event_id: row.event_id.clone(),
-                bids: if no_bid > Decimal::ZERO { vec![PriceLevel::new(no_bid, default_size)] } else { vec![] },
-                asks: if no_ask < Decimal::ONE { vec![PriceLevel::new(no_ask, default_size)] } else { vec![] },
-                timestamp: row.timestamp,
-            };
-
-            // Create a single paired event to ensure atomic update of both books
-            let pair_event = MarketEvent::BookSnapshotPair(BookSnapshotPairEvent {
-                event_id: row.event_id,
-                yes_snapshot,
-                no_snapshot,
-                timestamp: row.timestamp,
-            });
-
-            self.event_queue.push(TimestampedEvent {
-                timestamp: row.timestamp,
-                event: pair_event,
-            });
-
-            count += 1;
-        }
-
-        debug!("Loaded {} aligned price pairs as paired book snapshots", count);
-        Ok(())
-    }
-
-    /// Load orderbook snapshots from live collection (with full bid/ask data).
-    /// Returns true if data was loaded, false if file doesn't exist.
-    fn load_orderbook_snapshots(
-        &mut self,
-        data_dir: &Path,
-        event_tokens: &EventTokenMap,
-    ) -> Result<bool, DataSourceError> {
-        let path = data_dir.join("polymarket_orderbook_snapshots.csv");
-        if !path.exists() {
-            debug!("Orderbook snapshots file not found: {:?}", path);
-            return Ok(false);
-        }
-
-        let mut reader = csv::Reader::from_path(&path)
-            .map_err(|e| DataSourceError::Parse(format!("Failed to open {:?}: {}", path, e)))?;
-
-        // Group snapshots by (event_id, timestamp) to pair YES/NO
-        let mut pending: HashMap<(String, DateTime<Utc>), OrderBookSnapshotRow> = HashMap::new();
-        let mut count = 0;
-
-        for result in reader.deserialize() {
-            let row: OrderBookSnapshotRow = result
-                .map_err(|e| DataSourceError::Parse(format!("CSV parse error: {}", e)))?;
-
-            // Filter by config time range
-            if let Some(start) = self.config.start_time
-                && row.timestamp < start
-            {
-                continue;
-            }
-            if let Some(end) = self.config.end_time
-                && row.timestamp > end
-            {
-                continue;
-            }
-
-            // Get token mapping for this event
-            let Some((yes_token, _no_token)) = event_tokens.get(&row.event_id) else {
-                continue;
-            };
-
-            let key = (row.event_id.clone(), row.timestamp);
-
-            // Check if we have a pending partner for this snapshot
-            if let Some(partner) = pending.remove(&key) {
-                // Determine which is YES and which is NO
-                let (yes_row, no_row) = if row.token_id == *yes_token {
-                    (row, partner)
-                } else if partner.token_id == *yes_token {
-                    (partner, row)
-                } else {
-                    // Neither matches YES token, skip
-                    continue;
-                };
-
-                // Create book snapshots with real bid/ask data
-                let yes_snapshot = BookSnapshotEvent {
-                    token_id: yes_row.token_id,
-                    event_id: yes_row.event_id.clone(),
-                    bids: if yes_row.best_bid > Decimal::ZERO {
-                        vec![PriceLevel::new(yes_row.best_bid, yes_row.best_bid_size)]
-                    } else {
-                        vec![]
-                    },
-                    asks: if yes_row.best_ask < Decimal::ONE {
-                        vec![PriceLevel::new(yes_row.best_ask, yes_row.best_ask_size)]
-                    } else {
-                        vec![]
-                    },
-                    timestamp: yes_row.timestamp,
-                };
-
-                let no_snapshot = BookSnapshotEvent {
-                    token_id: no_row.token_id,
-                    event_id: no_row.event_id,
-                    bids: if no_row.best_bid > Decimal::ZERO {
-                        vec![PriceLevel::new(no_row.best_bid, no_row.best_bid_size)]
-                    } else {
-                        vec![]
-                    },
-                    asks: if no_row.best_ask < Decimal::ONE {
-                        vec![PriceLevel::new(no_row.best_ask, no_row.best_ask_size)]
-                    } else {
-                        vec![]
-                    },
-                    timestamp: no_row.timestamp,
-                };
-
-                // Create paired event
-                let pair_event = MarketEvent::BookSnapshotPair(BookSnapshotPairEvent {
-                    event_id: yes_snapshot.event_id.clone(),
-                    yes_snapshot,
-                    no_snapshot,
-                    timestamp: key.1,
-                });
-
-                self.event_queue.push(TimestampedEvent {
-                    timestamp: key.1,
-                    event: pair_event,
-                });
-
-                count += 1;
-            } else {
-                // No partner yet, store this one
-                pending.insert(key, row);
-            }
-        }
-
-        if pending.len() > 10 {
-            warn!(
-                "{} orderbook snapshots had no YES/NO partner",
-                pending.len()
-            );
-        }
-
-        info!(
-            "Loaded {} orderbook snapshot pairs from live data",
-            count
-        );
-        Ok(count > 0)
+    /// Pop the next event from the merge heap and refill from that source.
+    fn pop_next(&mut self) -> Option<MarketEvent> {
+        let entry = self.merge_heap.pop()?;
+        // Refill from the source that just produced this event
+        self.prime_source(entry.source_idx);
+        Some(entry.event)
     }
 }
 
 #[async_trait]
 impl DataSource for CsvReplayDataSource {
     async fn next_event(&mut self) -> Result<Option<MarketEvent>, DataSourceError> {
-        // Load data on first call
-        if !self.data_loaded {
-            self.load_data()?;
+        // Initialize streaming on first call
+        if !self.initialized {
+            self.init_streaming()?;
         }
 
-        // Get next event from queue
-        match self.event_queue.pop() {
-            Some(timestamped) => {
+        match self.pop_next() {
+            Some(event) => {
                 // Apply speed control if configured
                 if self.config.speed > 0.0
                     && let Some(prev_time) = self.current_time
                 {
-                    let delta = timestamped.timestamp - prev_time;
+                    let delta = event.timestamp() - prev_time;
                     if delta.num_milliseconds() > 0 {
                         let sleep_ms = (delta.num_milliseconds() as f64 / self.config.speed) as u64;
                         if sleep_ms > 0 {
@@ -597,8 +646,8 @@ impl DataSource for CsvReplayDataSource {
                     }
                 }
 
-                self.current_time = Some(timestamped.timestamp);
-                Ok(Some(timestamped.event))
+                self.current_time = Some(event.timestamp());
+                Ok(Some(event))
             }
             None => {
                 self.is_exhausted = true;
@@ -608,7 +657,13 @@ impl DataSource for CsvReplayDataSource {
     }
 
     fn has_more(&self) -> bool {
-        !self.is_exhausted && (!self.data_loaded || !self.event_queue.is_empty())
+        if self.is_exhausted {
+            return false;
+        }
+        if !self.initialized {
+            return true; // Haven't started yet
+        }
+        !self.merge_heap.is_empty()
     }
 
     fn current_time(&self) -> Option<DateTime<Utc>> {
@@ -617,7 +672,11 @@ impl DataSource for CsvReplayDataSource {
 
     async fn shutdown(&mut self) {
         self.is_exhausted = true;
-        self.event_queue.clear();
+        self.merge_heap.clear();
+        // Drop sources to close file handles
+        self.window_source = None;
+        self.spot_source = None;
+        self.book_source = None;
     }
 }
 
@@ -626,15 +685,16 @@ impl CsvReplayDataSource {
     ///
     /// This is useful for caching events when running multiple backtests
     /// (e.g., parameter sweeps) to avoid reloading CSV files each time.
+    /// Uses streaming internally so no duplicate parsing logic, but still
+    /// collects everything into a Vec for Arc sharing.
     pub fn load_all_events(config: CsvReplayConfig) -> Result<Vec<MarketEvent>, DataSourceError> {
         let mut source = CsvReplayDataSource::new(config);
-        source.load_data()?;
+        source.init_streaming()?;
 
-        // Drain the heap - events come out in chronological order
-        // (BinaryHeap uses reversed Ord so pop() gives earliest first)
-        let mut events = Vec::with_capacity(source.event_queue.len());
-        while let Some(timestamped) = source.event_queue.pop() {
-            events.push(timestamped.event);
+        // Drain the merge heap - events come out in chronological order
+        let mut events = Vec::new();
+        while let Some(event) = source.pop_next() {
+            events.push(event);
         }
 
         info!("Loaded {} events from CSV files", events.len());
@@ -646,12 +706,6 @@ impl CsvReplayDataSource {
     /// Returns spot prices from the CSV file that are BEFORE the start_time,
     /// grouped by asset. This allows warming up indicators before the backtest
     /// starts, ensuring consistent behavior with live trading.
-    ///
-    /// # Arguments
-    /// * `data_dir` - Directory containing the CSV files
-    /// * `start_time` - The backtest start time (warmup prices will be before this)
-    /// * `warmup_duration` - How far back to look for warmup prices
-    /// * `assets` - Assets to load prices for (empty = all)
     pub fn load_warmup_prices(
         data_dir: &str,
         start_time: DateTime<Utc>,
@@ -710,6 +764,101 @@ impl CsvReplayDataSource {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Free functions
+// ---------------------------------------------------------------------------
+
+/// Sorted window events paired with their timestamps, plus the event->token mapping.
+type WindowLoadResult = (Vec<(DateTime<Utc>, MarketEvent)>, EventTokenMap);
+
+/// Load market windows from CSV and return sorted events + token mapping.
+///
+/// This is a free function (not a method on CsvReplayDataSource) so it can be
+/// called during init_streaming without borrowing self.
+fn load_market_windows(
+    data_dir: &Path,
+    assets: &[CryptoAsset],
+    start_time: Option<DateTime<Utc>>,
+    end_time: Option<DateTime<Utc>>,
+) -> Result<WindowLoadResult, DataSourceError> {
+    let path = data_dir.join("polymarket_market_windows.csv");
+    if !path.exists() {
+        warn!("Market windows file not found: {:?}", path);
+        return Ok((Vec::new(), HashMap::new()));
+    }
+
+    let mut reader = csv::Reader::from_path(&path)
+        .map_err(|e| DataSourceError::Parse(format!("Failed to open {:?}: {}", path, e)))?;
+
+    let mut event_tokens: EventTokenMap = HashMap::new();
+    let mut events: Vec<(DateTime<Utc>, MarketEvent)> = Vec::new();
+
+    for result in reader.deserialize() {
+        let row: MarketWindowRow = result
+            .map_err(|e| DataSourceError::Parse(format!("CSV parse error: {}", e)))?;
+
+        // Filter by asset if specified
+        let asset = parse_asset(&row.asset);
+        if let Some(a) = asset
+            && !assets.is_empty()
+            && !assets.contains(&a)
+        {
+            continue;
+        }
+
+        // Filter by time if specified
+        if let Some(start) = start_time
+            && row.window_end < start
+        {
+            continue;
+        }
+        if let Some(end) = end_time
+            && row.window_start > end
+        {
+            continue;
+        }
+
+        // Skip markets that were already expired when discovered (no live data for them)
+        if row.discovered_at > row.window_end {
+            continue;
+        }
+
+        // Build event -> token mapping for validating book data
+        event_tokens.insert(row.event_id.clone(), (row.yes_token_id.clone(), row.no_token_id.clone()));
+
+        if let Some(asset) = asset {
+            let open_event = MarketEvent::WindowOpen(WindowOpenEvent {
+                event_id: row.event_id.clone(),
+                condition_id: row.condition_id.clone(),
+                asset,
+                yes_token_id: row.yes_token_id,
+                no_token_id: row.no_token_id,
+                strike_price: row.strike_price,
+                window_start: row.window_start,
+                window_end: row.window_end,
+                timestamp: row.window_start,
+            });
+            events.push((row.window_start, open_event));
+
+            let close_event = MarketEvent::WindowClose(WindowCloseEvent {
+                event_id: row.event_id,
+                outcome: None,
+                final_price: None,
+                timestamp: row.window_end,
+            });
+            events.push((row.window_end, close_event));
+        }
+    }
+
+    // Sort by timestamp, then by priority (WindowOpen before WindowClose at same time)
+    events.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| event_priority(&a.1).cmp(&event_priority(&b.1)))
+    });
+
+    Ok((events, event_tokens))
+}
+
 /// Parse asset string to CryptoAsset.
 fn parse_asset(s: &str) -> Option<CryptoAsset> {
     match s.to_uppercase().as_str() {
@@ -744,21 +893,79 @@ mod tests {
     }
 
     #[test]
-    fn test_timestamped_event_ordering() {
+    fn test_merge_entry_ordering() {
         let now = Utc::now();
         let earlier = now - chrono::Duration::seconds(10);
         let later = now + chrono::Duration::seconds(10);
 
-        let event1 = TimestampedEvent {
+        let entry1 = MergeEntry {
             timestamp: earlier,
+            priority: 1,
+            source_idx: 0,
             event: MarketEvent::Heartbeat(earlier),
         };
-        let event2 = TimestampedEvent {
+        let entry2 = MergeEntry {
             timestamp: later,
+            priority: 1,
+            source_idx: 1,
             event: MarketEvent::Heartbeat(later),
         };
 
         // Min-heap: earlier should come first (reversed ordering)
-        assert!(event1 > event2);
+        assert!(entry1 > entry2);
+    }
+
+    #[test]
+    fn test_merge_entry_tiebreak() {
+        let now = Utc::now();
+
+        // WindowOpen (priority 0) should come before SpotPrice (priority 1) at same timestamp
+        let window_open = MergeEntry {
+            timestamp: now,
+            priority: 0,
+            source_idx: 0,
+            event: MarketEvent::Heartbeat(now), // placeholder
+        };
+        let spot = MergeEntry {
+            timestamp: now,
+            priority: 1,
+            source_idx: 1,
+            event: MarketEvent::Heartbeat(now),
+        };
+
+        // In min-heap, window_open should be "greater" so it gets popped first
+        assert!(window_open > spot);
+    }
+
+    #[test]
+    fn test_event_priority() {
+        let now = Utc::now();
+        let open = MarketEvent::WindowOpen(WindowOpenEvent {
+            event_id: "e".into(),
+            condition_id: "c".into(),
+            asset: CryptoAsset::Btc,
+            yes_token_id: "y".into(),
+            no_token_id: "n".into(),
+            strike_price: Decimal::ZERO,
+            window_start: now,
+            window_end: now,
+            timestamp: now,
+        });
+        let close = MarketEvent::WindowClose(WindowCloseEvent {
+            event_id: "e".into(),
+            outcome: None,
+            final_price: None,
+            timestamp: now,
+        });
+        let spot = MarketEvent::SpotPrice(SpotPriceEvent {
+            asset: CryptoAsset::Btc,
+            price: Decimal::ZERO,
+            quantity: Decimal::ZERO,
+            timestamp: now,
+        });
+
+        assert_eq!(event_priority(&open), 0);
+        assert_eq!(event_priority(&spot), 1);
+        assert_eq!(event_priority(&close), 2);
     }
 }
