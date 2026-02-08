@@ -29,6 +29,7 @@ Desktop.ini
 *.csv
 *.json.bak
 logs/
+backtests/
 
 # Temporary files
 tmpclaude*

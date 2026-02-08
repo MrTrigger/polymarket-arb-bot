@@ -72,6 +72,10 @@ pub struct BacktestModeConfig {
     pub sweep_parallel_workers: usize,
     /// Path to write decision log (for comparing live vs backtest behavior).
     pub decision_log_path: Option<String>,
+    /// Maximum duration to replay from first event (e.g., "2h" limits to 2 hours of data).
+    pub max_duration: Option<chrono::Duration>,
+    /// Minimum interval between orderbook snapshots per event (ms). Downsamples L2 data.
+    pub book_interval_ms: Option<u64>,
 }
 
 impl Default for BacktestModeConfig {
@@ -89,6 +93,8 @@ impl Default for BacktestModeConfig {
             sweep_params: Vec::new(),
             sweep_parallel_workers: 0, // 0 = use number of CPU cores
             decision_log_path: None,
+            max_duration: None,
+            book_interval_ms: None,
         }
     }
 }
@@ -116,7 +122,7 @@ impl BacktestModeConfig {
         );
 
         // Parse date range from config
-        let (start_time, end_time) = parse_date_range(&config.backtest)?;
+        let (start_time, end_time, max_duration) = parse_date_range(&config.backtest)?;
 
         let replay_config = ReplayConfig {
             start_time,
@@ -131,12 +137,21 @@ impl BacktestModeConfig {
             speed: config.backtest.speed,
         };
 
+        let mut strategy = StrategyConfig::from_trading_config(config.effective_trading_config(), (config.window_duration.minutes() * 60) as i64)
+            .with_execution(config.execution.clone());
+
+        // Apply directional engine overrides from TOML (if set)
+        let dir = &config.engines.directional;
+        if let Some(v) = dir.time_conf_floor { strategy.time_conf_floor = v; }
+        if let Some(v) = dir.dist_conf_floor { strategy.dist_conf_floor = v; }
+        if let Some(v) = dir.dist_conf_per_atr { strategy.dist_conf_per_atr = v; }
+        if let Some(v) = dir.max_edge_factor { strategy.max_edge_factor = v; }
+
         Ok(Self {
             data_source: replay_config,
             csv_data_dir: config.backtest.data_dir.clone(),
             executor: executor_config,
-            strategy: StrategyConfig::from_trading_config(config.effective_trading_config(), (config.window_duration.minutes() * 60) as i64)
-                .with_execution(config.execution.clone()),
+            strategy,
             engines: config.engines.clone(),
             observability: config.observability.clone(),
             initial_balance: config.effective_trading_config().available_balance,
@@ -145,6 +160,8 @@ impl BacktestModeConfig {
             sweep_params: Vec::new(),
             sweep_parallel_workers: config.backtest.sweep_parallel_workers.unwrap_or(0),
             decision_log_path: config.backtest.decision_log_path.clone(),
+            max_duration,
+            book_interval_ms: config.backtest.book_interval_ms,
         })
     }
 
@@ -274,6 +291,8 @@ pub struct BacktestResult {
     pub parameters: HashMap<String, f64>,
     /// Execution duration.
     pub duration_secs: f64,
+    /// Git commit hash at time of backtest.
+    pub git_commit: Option<String>,
 }
 
 impl BacktestResult {
@@ -318,6 +337,19 @@ impl BacktestResult {
             max_drawdown_duration_secs: stats.max_drawdown_duration(),
             parameters: HashMap::new(),
             duration_secs,
+            git_commit: std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .ok()
+                .and_then(|o| {
+                    if o.status.success() {
+                        String::from_utf8(o.stdout)
+                            .ok()
+                            .map(|s| s.trim().to_string())
+                    } else {
+                        None
+                    }
+                }),
         }
     }
 
@@ -325,6 +357,76 @@ impl BacktestResult {
     pub fn with_parameter(mut self, name: &str, value: f64) -> Self {
         self.parameters.insert(name.to_string(), value);
         self
+    }
+
+    /// Save backtest results to a directory under `backtests/`.
+    ///
+    /// Creates `backtests/<timestamp>/` containing:
+    /// - `result.json` - full backtest result (machine-readable)
+    /// - `report.txt` - human-readable P&L report
+    ///
+    /// Returns the path to the created directory.
+    pub fn save(&self) -> Result<std::path::PathBuf> {
+        let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
+        let dir = std::path::PathBuf::from("backtests").join(timestamp.to_string());
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("Failed to create backtest output dir: {:?}", dir))?;
+
+        // Write machine-readable JSON result
+        let json = serde_json::to_string_pretty(self)
+            .context("Failed to serialize backtest result")?;
+        let json_path = dir.join("result.json");
+        std::fs::write(&json_path, json)
+            .with_context(|| format!("Failed to write {:?}", json_path))?;
+
+        // Write human-readable report
+        let report = PnLReport {
+            result: self.clone(),
+            positions: Vec::new(),
+        };
+        let report_path = dir.join("report.txt");
+        std::fs::write(&report_path, report.to_string_report())
+            .with_context(|| format!("Failed to write {:?}", report_path))?;
+
+        Ok(dir)
+    }
+
+    /// Save sweep results (multiple runs) to a directory under `backtests/`.
+    ///
+    /// Creates `backtests/sweep_<timestamp>/` containing:
+    /// - `sweep_results.json` - all sweep results
+    /// - `best_result.json` - best result by P&L
+    /// - `report.txt` - human-readable best result report
+    pub fn save_sweep(results: &[BacktestResult], best: &BacktestResult) -> Result<std::path::PathBuf> {
+        let timestamp = Utc::now().format("%Y%m%d_%H%M%S");
+        let dir = std::path::PathBuf::from("backtests").join(format!("sweep_{}", timestamp));
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("Failed to create sweep output dir: {:?}", dir))?;
+
+        // Write all sweep results
+        let json = serde_json::to_string_pretty(results)
+            .context("Failed to serialize sweep results")?;
+        let json_path = dir.join("sweep_results.json");
+        std::fs::write(&json_path, json)
+            .with_context(|| format!("Failed to write {:?}", json_path))?;
+
+        // Write best result
+        let best_json = serde_json::to_string_pretty(best)
+            .context("Failed to serialize best result")?;
+        let best_path = dir.join("best_result.json");
+        std::fs::write(&best_path, best_json)
+            .with_context(|| format!("Failed to write {:?}", best_path))?;
+
+        // Write human-readable report for best
+        let report = PnLReport {
+            result: best.clone(),
+            positions: Vec::new(),
+        };
+        let report_path = dir.join("report.txt");
+        std::fs::write(&report_path, report.to_string_report())
+            .with_context(|| format!("Failed to write {:?}", report_path))?;
+
+        Ok(dir)
     }
 }
 
@@ -499,6 +601,10 @@ impl PnLReport {
             report.push('\n');
         }
 
+        if let Some(commit) = &self.result.git_commit {
+            report.push_str(&format!("Git Commit: {}\n", commit));
+        }
+
         report.push_str("═══════════════════════════════════════════════════════════\n");
 
         report
@@ -609,6 +715,8 @@ fn run_backtest_task_blocking(
         ))
     })
 }
+
+
 
 
 /// Backtest trading mode runner.
@@ -726,6 +834,7 @@ impl BacktestMode {
             data_dir = %data_dir,
             speed = self.config.data_source.speed,
             initial_balance = %self.config.initial_balance,
+            max_duration = ?self.config.max_duration.map(|d| format!("{}s", d.num_seconds())),
             "Using CSV data source"
         );
 
@@ -744,6 +853,8 @@ impl BacktestMode {
             end_time: Some(self.config.data_source.end_time),
             assets: self.config.data_source.assets.clone(),
             speed: self.config.data_source.speed,
+            max_duration: self.config.max_duration,
+            book_interval_ms: self.config.book_interval_ms,
         };
         let data_source = CsvReplayDataSource::new(csv_config);
 
@@ -976,17 +1087,39 @@ impl BacktestMode {
         };
         println!("\n{}", report.to_string_report());
 
+        // Save results to backtests/ directory
+        match backtest_result.save() {
+            Ok(dir) => info!("Backtest results saved to {:?}", dir),
+            Err(e) => warn!("Failed to save backtest results: {}", e),
+        }
+
         result?;
         Ok(backtest_result)
     }
 
-    /// Run parameter sweep with parallel execution.
+    /// Run parameter sweep with sequential streaming execution.
+    ///
+    /// Each run streams CSV from disk independently, using constant memory.
+    /// Runs sequentially to avoid loading the entire dataset into memory.
     async fn run_sweep(&mut self) -> Result<BacktestResult> {
         info!("Starting parameter sweep backtest");
 
-        // Generate all parameter combinations
         let combinations = self.generate_sweep_combinations();
         let total_runs = combinations.len();
+
+        let data_dir = self.config.csv_data_dir.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Sweep requires CSV data source"))?
+            .clone();
+
+        // Load warmup prices once (small)
+        let warmup_duration = chrono::Duration::minutes(5);
+        let prices = CsvReplayDataSource::load_warmup_prices(
+            &data_dir,
+            self.config.data_source.start_time,
+            warmup_duration,
+            &self.config.data_source.assets,
+        );
+        let warmup_prices = Arc::new(prices);
 
         // Determine number of workers
         let num_workers = if self.config.sweep_parallel_workers == 0 {
@@ -997,53 +1130,38 @@ impl BacktestMode {
             self.config.sweep_parallel_workers
         };
 
-        info!(
-            "Running {} parameter combinations with {} parallel workers",
+        eprintln!(
+            "Starting sweep: {} parameter combinations, {} parallel workers",
             total_runs, num_workers
         );
 
-        // Pre-load events once if using CSV source (required for parallel execution)
-        let (cached_events, warmup_prices): (Option<Arc<Vec<MarketEvent>>>, Arc<HashMap<CryptoAsset, Vec<Decimal>>>) = if let Some(ref data_dir) = self.config.csv_data_dir {
-            info!("Pre-loading CSV data for sweep");
-
-            // Load warmup prices (5 minutes before start)
-            let warmup_duration = chrono::Duration::minutes(5);
-            let prices = CsvReplayDataSource::load_warmup_prices(
-                data_dir,
-                self.config.data_source.start_time,
-                warmup_duration,
-                &self.config.data_source.assets,
-            );
-            let warmup = Arc::new(prices);
-
-            // Load main events
-            let csv_config = CsvReplayConfig {
-                data_dir: data_dir.clone(),
-                start_time: Some(self.config.data_source.start_time),
-                end_time: Some(self.config.data_source.end_time),
-                assets: self.config.data_source.assets.clone(),
-                speed: 0.0,
-            };
-            match CsvReplayDataSource::load_all_events(csv_config) {
-                Ok(events) => {
-                    info!("Cached {} events for sweep", events.len());
-                    (Some(Arc::new(events)), warmup)
-                }
-                Err(e) => {
-                    return Err(anyhow::anyhow!("Failed to pre-load CSV data: {}", e));
-                }
-            }
-        } else {
-            return Err(anyhow::anyhow!("Parallel sweep requires CSV data source"));
+        // Load all events into memory ONCE and share across workers via Arc.
+        // This avoids 5x disk I/O contention from parallel CSV reads.
+        eprintln!("  Loading events into memory...");
+        let load_start = std::time::Instant::now();
+        let csv_config = CsvReplayConfig {
+            data_dir: data_dir.clone(),
+            start_time: Some(self.config.data_source.start_time),
+            end_time: Some(self.config.data_source.end_time),
+            assets: self.config.data_source.assets.clone(),
+            speed: 0.0,
+            max_duration: self.config.max_duration,
+            book_interval_ms: self.config.book_interval_ms,
         };
+        let events = CsvReplayDataSource::load_all_events(csv_config)
+            .map_err(|e| anyhow::anyhow!("Failed to load events: {}", e))?;
+        let events = Arc::new(events);
+        eprintln!("  Loaded {} events in {:.1}s", events.len(), load_start.elapsed().as_secs_f64());
 
-        let events = cached_events.unwrap();
+        info!(
+            "Running {} parameter combinations with {} parallel workers (shared memory)",
+            total_runs, num_workers
+        );
 
         // Prepare all run configs
         let mut run_configs: Vec<(usize, HashMap<String, f64>, BacktestModeConfig)> = Vec::new();
         for (run_idx, params) in combinations.into_iter().enumerate() {
             let mut run_config = self.config.clone();
-            // Disable decision logging during sweeps for performance
             run_config.decision_log_path = None;
             for (name, value) in &params {
                 apply_parameter(&mut run_config, name, *value);
@@ -1051,8 +1169,7 @@ impl BacktestMode {
             run_configs.push((run_idx, params, run_config));
         }
 
-        // Use std::thread for true parallel execution
-        // Simple concurrency limiting with atomic counter and spin-wait
+        // Spawn threads that share the same in-memory event data.
         let (result_tx, result_rx) = std::sync::mpsc::channel();
         let active_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut handles = Vec::new();
@@ -1066,7 +1183,7 @@ impl BacktestMode {
             let max_workers = num_workers;
 
             let handle = std::thread::spawn(move || {
-                // Simple spin-wait to limit concurrency
+                // Spin-wait to limit concurrency
                 loop {
                     let current = active_count.load(std::sync::atomic::Ordering::SeqCst);
                     if current < max_workers
@@ -1081,13 +1198,18 @@ impl BacktestMode {
                     {
                         break;
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    std::thread::sleep(std::time::Duration::from_millis(50));
                 }
 
                 let count = active_count.load(std::sync::atomic::Ordering::SeqCst);
+                eprintln!("  Launching run {}/{} (active: {})...", run_idx + 1, total, count);
                 info!("Sweep run {}/{} (active: {}): {:?}", run_idx + 1, total, count, params);
 
                 let result = run_backtest_task_blocking(events, run_config, warmup);
+
+                if let Err(ref e) = result {
+                    eprintln!("  Run {}/{} ERRORED: {:#}", run_idx + 1, total, e);
+                }
 
                 active_count.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
 
@@ -1097,41 +1219,50 @@ impl BacktestMode {
             handles.push(handle);
         }
 
-        // Drop our sender so the channel closes when all threads finish
         drop(result_tx);
 
         // Collect results as they complete
         let mut results: Vec<(usize, BacktestResult)> = Vec::new();
+        let mut completed = 0usize;
+        let sweep_start = std::time::Instant::now();
 
         for (run_idx, params, result) in result_rx {
+            completed += 1;
             match result {
                 Ok(mut res) => {
-                    // Add parameters to result
                     for (name, value) in &params {
                         res = res.with_parameter(name, *value);
                     }
-
-                    info!(
-                        "Run {}: P&L=${:.2}, Return={:.2}%",
-                        run_idx + 1,
+                    let elapsed = sweep_start.elapsed();
+                    let per_run = elapsed / completed as u32;
+                    let remaining = per_run * (total_runs - completed) as u32;
+                    eprintln!(
+                        "[{}/{}] Run {}: Return={:.1}%, DD={:.1}%, P&L=${:.0} (elapsed: {}m, ~{}m remaining)",
+                        completed, total_runs, run_idx + 1,
+                        res.return_pct, res.max_drawdown.unwrap_or_default(),
                         res.total_pnl,
-                        res.return_pct
+                        elapsed.as_secs() / 60,
+                        remaining.as_secs() / 60,
                     );
-
+                    info!(
+                        "Run {}/{}: P&L=${:.2}, Return={:.2}%, DD={:.2}%",
+                        run_idx + 1, total_runs,
+                        res.total_pnl, res.return_pct,
+                        res.max_drawdown.unwrap_or_default()
+                    );
                     results.push((run_idx, res));
                 }
                 Err(e) => {
-                    warn!("Sweep run {} failed: {}", run_idx + 1, e);
+                    eprintln!("[{}/{}] Run {} FAILED: {}", completed, total_runs, run_idx + 1, e);
+                    warn!("Sweep run {}/{} failed: {}", run_idx + 1, total_runs, e);
                 }
             }
         }
 
-        // Wait for all threads to finish
         for handle in handles {
             let _ = handle.join();
         }
 
-        // Sort results by run index for consistent ordering
         results.sort_by_key(|(idx, _)| *idx);
 
         // Find best result and collect all results
@@ -1146,7 +1277,18 @@ impl BacktestMode {
             self.sweep_results.push(res);
         }
 
+        // Save sweep results to backtests/ directory
+        if let Some(ref best) = best_result {
+            match BacktestResult::save_sweep(&self.sweep_results, best) {
+                Ok(dir) => info!("Sweep results saved to {:?}", dir),
+                Err(e) => warn!("Failed to save sweep results: {}", e),
+            }
+        }
+
         // Return best result or error
+        if best_result.is_none() {
+            eprintln!("ERROR: All {} sweep runs failed! No results collected.", total_runs);
+        }
         best_result.ok_or_else(|| anyhow::anyhow!("All sweep runs failed"))
     }
 
@@ -1290,7 +1432,16 @@ impl BacktestMode {
 
 /// Parse date range from BacktestConfig.
 /// If dates are not specified, uses a wide range to include all data.
-fn parse_date_range(config: &BacktestConfig) -> Result<(DateTime<Utc>, DateTime<Utc>)> {
+/// Returns (start, end, max_duration) where max_duration is set when
+/// duration is specified without a start_date (deferred cutoff).
+fn parse_date_range(config: &BacktestConfig) -> Result<(DateTime<Utc>, DateTime<Utc>, Option<chrono::Duration>)> {
+    // Parse duration if provided
+    let parsed_duration = if let Some(ref dur_str) = config.duration {
+        Some(parse_duration(dur_str).context("Invalid duration")?)
+    } else {
+        None
+    };
+
     let start = if let Some(ref date_str) = config.start_date {
         parse_date(date_str).context("Invalid start_date")?
     } else {
@@ -1300,25 +1451,59 @@ fn parse_date_range(config: &BacktestConfig) -> Result<(DateTime<Utc>, DateTime<
             .with_timezone(&Utc)
     };
 
-    let end = if let Some(ref date_str) = config.end_date {
-        parse_date(date_str)
+    let (end, max_duration) = if let Some(ref date_str) = config.end_date {
+        // Explicit end_date takes priority
+        let end = parse_date(date_str)
             .context("Invalid end_date")?
-            // End of day
             + chrono::Duration::hours(23)
             + chrono::Duration::minutes(59)
-            + chrono::Duration::seconds(59)
-    } else {
-        // Default to far future to include all data
-        DateTime::parse_from_rfc3339("2030-12-31T23:59:59Z")
+            + chrono::Duration::seconds(59);
+        (end, None)
+    } else if let (Some(dur), true) = (parsed_duration, config.start_date.is_some()) {
+        // start_date + duration: compute end upfront
+        (start + dur, None)
+    } else if let Some(dur) = parsed_duration {
+        // duration only (no start_date): defer cutoff to data source
+        let end = DateTime::parse_from_rfc3339("2030-12-31T23:59:59Z")
             .unwrap()
-            .with_timezone(&Utc)
+            .with_timezone(&Utc);
+        (end, Some(dur))
+    } else {
+        // No end_date, no duration: include all data
+        let end = DateTime::parse_from_rfc3339("2030-12-31T23:59:59Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        (end, None)
     };
 
     if start >= end {
         anyhow::bail!("start_date must be before end_date");
     }
 
-    Ok((start, end))
+    Ok((start, end, max_duration))
+}
+
+/// Parse a human-readable duration string (e.g., "30m", "2h", "1d").
+fn parse_duration(s: &str) -> Result<chrono::Duration> {
+    let s = s.trim();
+    if s.is_empty() {
+        anyhow::bail!("Empty duration string");
+    }
+
+    let (num_str, suffix) = s.split_at(s.len() - 1);
+    let value: i64 = num_str.parse()
+        .with_context(|| format!("Invalid duration number: '{}'", num_str))?;
+
+    if value <= 0 {
+        anyhow::bail!("Duration must be positive, got: {}", value);
+    }
+
+    match suffix {
+        "m" => Ok(chrono::Duration::minutes(value)),
+        "h" => Ok(chrono::Duration::hours(value)),
+        "d" => Ok(chrono::Duration::days(value)),
+        _ => anyhow::bail!("Unknown duration suffix '{}'. Use 'm' (minutes), 'h' (hours), or 'd' (days)", suffix),
+    }
 }
 
 /// Parse a date string (YYYY-MM-DD) to DateTime<Utc>.
@@ -1507,6 +1692,7 @@ mod tests {
             max_drawdown_duration_secs: None,
             parameters: HashMap::new(),
             duration_secs: 60.5,
+            git_commit: Some("abc1234".to_string()),
         };
 
         let report = PnLReport {
@@ -1542,6 +1728,61 @@ mod tests {
         let combinations = mode.generate_sweep_combinations();
         // 2 values for param_a * 2 values for param_b = 4 combinations
         assert_eq!(combinations.len(), 4);
+    }
+
+    #[test]
+    fn test_parse_duration_minutes() {
+        let dur = parse_duration("30m").unwrap();
+        assert_eq!(dur.num_minutes(), 30);
+    }
+
+    #[test]
+    fn test_parse_duration_hours() {
+        let dur = parse_duration("2h").unwrap();
+        assert_eq!(dur.num_hours(), 2);
+        assert_eq!(dur.num_minutes(), 120);
+    }
+
+    #[test]
+    fn test_parse_duration_days() {
+        let dur = parse_duration("1d").unwrap();
+        assert_eq!(dur.num_days(), 1);
+    }
+
+    #[test]
+    fn test_parse_duration_invalid() {
+        assert!(parse_duration("").is_err());
+        assert!(parse_duration("abc").is_err());
+        assert!(parse_duration("2x").is_err());
+        assert!(parse_duration("0h").is_err());
+        assert!(parse_duration("-1h").is_err());
+    }
+
+    #[test]
+    fn test_parse_date_range_duration_only() {
+        let config = BacktestConfig {
+            duration: Some("2h".to_string()),
+            ..Default::default()
+        };
+        let (start, _end, max_dur) = parse_date_range(&config).unwrap();
+        // No start_date: should get wide range + deferred max_duration
+        assert!(max_dur.is_some());
+        assert_eq!(max_dur.unwrap().num_hours(), 2);
+        assert_eq!(start.format("%Y").to_string(), "2020"); // far past default
+    }
+
+    #[test]
+    fn test_parse_date_range_start_plus_duration() {
+        let config = BacktestConfig {
+            start_date: Some("2026-02-01".to_string()),
+            duration: Some("4h".to_string()),
+            ..Default::default()
+        };
+        let (start, end, max_dur) = parse_date_range(&config).unwrap();
+        // start_date + duration: end computed upfront, no deferred duration
+        assert!(max_dur.is_none());
+        assert_eq!(start.format("%Y-%m-%d").to_string(), "2026-02-01");
+        assert_eq!((end - start).num_hours(), 4);
     }
 
     #[test]

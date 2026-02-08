@@ -290,11 +290,24 @@ impl Executor for LiveSdkExecutor {
         let price = price.round_dp(2);
 
         // Round size to whole shares and enforce minimum of 5
-        let size = request.size.round_dp(0);
+        let mut size = request.size.round_dp(0);
         if size < Decimal::from(5) {
             return Err(ExecutorError::InvalidOrder(
                 format!("Size {} is below minimum of 5 shares", size)
             ));
+        }
+
+        // Polymarket requires minimum $1 USDC per order.
+        // For buy orders: usdc_cost = price * shares. Bump shares if needed.
+        let usdc_cost = price * size;
+        if usdc_cost < Decimal::ONE {
+            let min_shares = (Decimal::ONE / price).ceil();
+            info!(
+                request_id = %request.request_id,
+                "Order cost ${} < $1 minimum, bumping shares {} -> {}",
+                usdc_cost, size, min_shares
+            );
+            size = min_shares;
         }
 
         // Parse token_id as U256
@@ -304,21 +317,21 @@ impl Executor for LiveSdkExecutor {
         // Create authenticated client
         let client = self.create_authenticated_client().await?;
 
-        // Build order using SDK with rounded price/size
-        // Market orders use native market_order() which auto-calculates price from orderbook
-        // Limit orders use GTC + POST_ONLY to be a maker (rejected if would cross book)
+        // Build order using SDK.
+        // Market orders use the SDK's market_order() which auto-calculates from the orderbook.
+        // Limit orders use GTC + POST_ONLY to be a maker (rejected if would cross book).
         let order = if is_market_order {
             info!(
                 request_id = %request.request_id,
                 size = %size,
-                "Placing MARKET order (FOK, taker) - price auto-calculated from orderbook"
+                "Placing MARKET order (FOK, taker)"
             );
             let amount = Amount::shares(size)
                 .map_err(|e| ExecutorError::Internal(format!("Invalid amount: {}", e)))?;
             client
                 .market_order()
                 .token_id(token_id)
-                .order_type(SdkOrderType::FOK)
+                .order_type(SdkOrderType::FAK)
                 .amount(amount)
                 .side(Self::to_sdk_side(request.side))
                 .build()

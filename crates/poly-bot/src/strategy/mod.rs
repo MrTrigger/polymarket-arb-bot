@@ -668,6 +668,8 @@ pub struct StrategyLoop<D: DataSource, E: Executor> {
     first_event_time: Option<DateTime<Utc>>,
     /// Last event timestamp seen (for backtest reporting).
     last_event_time: Option<DateTime<Utc>>,
+    /// Market client for fetching min_order_size from CLOB API (live only).
+    market_client: Option<crate::api::MarketClient>,
 }
 
 impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
@@ -751,6 +753,7 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             decision_logger: None,
             first_event_time: None,
             last_event_time: None,
+            market_client: None,
         }
     }
 
@@ -767,6 +770,12 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
     /// Decisions include engine source for multi-engine strategy analysis.
     pub fn with_multi_observability(mut self, sender: mpsc::Sender<MultiEngineDecision>) -> Self {
         self.multi_obs_sender = Some(sender);
+        self
+    }
+
+    /// Set market client for fetching min_order_size from CLOB API (live trading).
+    pub fn with_market_client(mut self, client: crate::api::MarketClient) -> Self {
+        self.market_client = Some(client);
         self
     }
 
@@ -1081,7 +1090,7 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             }
             MarketEvent::WindowOpen(e) => {
                 let event_id = e.event_id.clone();
-                self.handle_window_open(e);
+                self.handle_window_open(e).await;
                 vec![event_id]
             }
             MarketEvent::WindowClose(e) => {
@@ -1483,27 +1492,26 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
     }
 
     /// Handle new market window.
-    fn handle_window_open(&mut self, mut event: WindowOpenEvent) {
-        // NOTE: With the new discovery flow, markets should only be sent here
-        // once they have a valid strike from Binance historical data.
-        // The strike_price=0 case is a fallback that shouldn't normally happen.
-        if event.strike_price.is_zero() {
-            if let Some(&spot) = self.spot_prices.get(&event.asset) {
-                warn!(
-                    "FALLBACK: Window open {} {} with strike=0, using current spot={} (may be inaccurate!)",
-                    event.event_id, event.asset, spot
-                );
-                event.strike_price = spot;
-            } else {
-                warn!(
-                    "Window open: {} {} has no strike price and no spot price available. \
-                     Market will not trade until spot price is received.",
-                    event.event_id, event.asset
-                );
-            }
-        } else {
-            info!("Window open: {} {} strike={}",
+    async fn handle_window_open(&mut self, mut event: WindowOpenEvent) {
+        // For up/down markets, the strike IS the spot price at window open.
+        // Always use current spot price — the CSV strike_price field is unreliable
+        // (e.g. "26" parsed from date in title instead of actual price).
+        if let Some(&spot) = self.spot_prices.get(&event.asset) {
+            // Live spot available — use it as strike (most accurate)
+            event.strike_price = spot;
+            info!("Window open: {} {} strike={} (from live spot)",
                 event.event_id, event.asset, event.strike_price);
+        } else if !event.strike_price.is_zero() {
+            // No live spot yet, but discovery set strike from Binance klines — keep it
+            info!("Window open: {} {} strike={} (from discovery kline)",
+                event.event_id, event.asset, event.strike_price);
+        } else {
+            // No spot and no kline — set to zero, will be set from first tick
+            debug!(
+                "Window open: {} {} no spot yet, strike=0 (will set from first tick)",
+                event.event_id, event.asset
+            );
+            event.strike_price = Decimal::ZERO;
         }
 
         // Calculate budget per market from sizing config
@@ -1511,13 +1519,25 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
 
         // Create tracked market with phase-based position management
         // Pass strategy config so confidence params flow through to PositionManager
-        // For backtest, use default min_order_size (5 shares) since we don't have API access
-        // For live, min_order_size should be fetched from CLOB API during discovery
         let market = if self.config.is_backtest {
             TrackedMarket::new_for_backtest(&event, market_budget, &self.config)
         } else {
-            // For live trading, default to 5 shares (TODO: fetch from API in discovery)
-            TrackedMarket::new(&event, market_budget, &self.config, dec!(5))
+            // Fetch min_order_size from CLOB API (falls back to 5 on error)
+            let min_order_size = if let Some(ref client) = self.market_client {
+                match client.get_min_order_size(&event.condition_id).await {
+                    Ok(size) => {
+                        info!("Fetched min_order_size={} for {}", size, event.event_id);
+                        size
+                    }
+                    Err(e) => {
+                        warn!("Failed to fetch min_order_size for {}: {}, using default 5", event.event_id, e);
+                        dec!(5)
+                    }
+                }
+            } else {
+                dec!(5)
+            };
+            TrackedMarket::new(&event, market_budget, &self.config, min_order_size)
         };
 
         // Update token mapping

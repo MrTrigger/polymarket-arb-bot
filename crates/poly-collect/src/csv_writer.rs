@@ -5,13 +5,16 @@
 //! - `data/{start_date}_{end_date}_{interval}/polymarket_orderbook_snapshots.csv`
 //! - etc.
 
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use anyhow::{Context, Result};
-use chrono::NaiveDate;
+use chrono::{DateTime, NaiveDate, Utc};
 use poly_common::{AlignedPricePair, MarketWindow, OrderBookDelta, OrderBookSnapshot, PriceHistory, SpotPrice};
+use serde::Serialize;
 
 /// CSV file names (descriptive of what they contain and their source).
 const BINANCE_SPOT_PRICES_FILE: &str = "binance_spot_prices.csv";
@@ -21,6 +24,35 @@ const POLYMARKET_WINDOWS_FILE: &str = "polymarket_market_windows.csv";
 const POLYMARKET_PRICE_HISTORY_FILE: &str = "polymarket_price_history.csv";
 const POLYMARKET_ALIGNED_PRICES_FILE: &str = "polymarket_aligned_prices.csv";
 
+/// Information for the manifest file.
+pub struct ManifestInfo {
+    pub collection_start: DateTime<Utc>,
+    pub collection_end: DateTime<Utc>,
+    pub assets: Vec<String>,
+    pub timeframes: Vec<String>,
+}
+
+/// JSON structure written to manifest.json.
+#[derive(Serialize)]
+struct ManifestJson {
+    collection_start: String,
+    collection_end: String,
+    duration_secs: i64,
+    assets: Vec<String>,
+    timeframes: Vec<String>,
+    row_counts: ManifestRowCounts,
+}
+
+#[derive(Serialize)]
+struct ManifestRowCounts {
+    spot_prices: u64,
+    orderbook_snapshots: u64,
+    orderbook_deltas: u64,
+    market_windows: u64,
+    price_history: u64,
+    aligned_prices: u64,
+}
+
 /// CSV writer for collected data.
 pub struct CsvWriter {
     output_dir: PathBuf,
@@ -28,9 +60,20 @@ pub struct CsvWriter {
     spot_prices: Mutex<Option<csv::Writer<File>>>,
     snapshots: Mutex<Option<csv::Writer<File>>>,
     deltas: Mutex<Option<csv::Writer<File>>>,
-    market_windows: Mutex<Option<csv::Writer<File>>>,
     price_history: Mutex<Option<csv::Writer<File>>>,
     aligned_prices: Mutex<Option<csv::Writer<File>>>,
+    /// Market windows are buffered in memory and only written on finalize,
+    /// filtered to events that actually have L2 orderbook data.
+    pending_windows: Mutex<HashMap<String, MarketWindow>>,
+    /// Event IDs that have received at least one orderbook snapshot.
+    seen_orderbook_events: Mutex<HashSet<String>>,
+    /// Row counters for manifest
+    spot_price_count: AtomicU64,
+    snapshot_count: AtomicU64,
+    delta_count: AtomicU64,
+    window_count: AtomicU64,
+    price_history_count: AtomicU64,
+    aligned_price_count: AtomicU64,
 }
 
 impl CsvWriter {
@@ -45,9 +88,16 @@ impl CsvWriter {
             spot_prices: Mutex::new(None),
             snapshots: Mutex::new(None),
             deltas: Mutex::new(None),
-            market_windows: Mutex::new(None),
             price_history: Mutex::new(None),
             aligned_prices: Mutex::new(None),
+            pending_windows: Mutex::new(HashMap::new()),
+            seen_orderbook_events: Mutex::new(HashSet::new()),
+            spot_price_count: AtomicU64::new(0),
+            snapshot_count: AtomicU64::new(0),
+            delta_count: AtomicU64::new(0),
+            window_count: AtomicU64::new(0),
+            price_history_count: AtomicU64::new(0),
+            aligned_price_count: AtomicU64::new(0),
         })
     }
 
@@ -114,14 +164,24 @@ impl CsvWriter {
             writer.serialize(price)?;
         }
         writer.flush()?;
+        self.spot_price_count.fetch_add(prices.len() as u64, Ordering::Relaxed);
 
         Ok(())
     }
 
     /// Writes Polymarket order book snapshots to CSV.
+    /// Also records event_ids so we know which markets have L2 data.
     pub fn write_snapshots(&self, snapshots: &[OrderBookSnapshot]) -> Result<()> {
         if snapshots.is_empty() {
             return Ok(());
+        }
+
+        // Track which events have L2 data
+        {
+            let mut seen = self.seen_orderbook_events.lock().unwrap();
+            for snapshot in snapshots {
+                seen.insert(snapshot.event_id.clone());
+            }
         }
 
         let path = self.output_dir.join(POLYMARKET_SNAPSHOTS_FILE);
@@ -134,6 +194,7 @@ impl CsvWriter {
             writer.serialize(snapshot)?;
         }
         writer.flush()?;
+        self.snapshot_count.fetch_add(snapshots.len() as u64, Ordering::Relaxed);
 
         Ok(())
     }
@@ -154,26 +215,23 @@ impl CsvWriter {
             writer.serialize(delta)?;
         }
         writer.flush()?;
+        self.delta_count.fetch_add(deltas.len() as u64, Ordering::Relaxed);
 
         Ok(())
     }
 
-    /// Writes Polymarket market windows to CSV.
+    /// Buffers market windows in memory. They are only written to CSV
+    /// on `finalize()`, filtered to events that have L2 orderbook data.
     pub fn write_market_windows(&self, windows: &[MarketWindow]) -> Result<()> {
         if windows.is_empty() {
             return Ok(());
         }
 
-        let path = self.output_dir.join(POLYMARKET_WINDOWS_FILE);
-        Self::get_or_create_writer(&self.market_windows, &path)?;
-
-        let mut guard = self.market_windows.lock().unwrap();
-        let writer = guard.as_mut().unwrap();
-
+        let mut pending = self.pending_windows.lock().unwrap();
         for window in windows {
-            writer.serialize(window)?;
+            // Dedup by event_id (keep latest discovery)
+            pending.insert(window.event_id.clone(), window.clone());
         }
-        writer.flush()?;
 
         Ok(())
     }
@@ -194,6 +252,7 @@ impl CsvWriter {
             writer.serialize(price)?;
         }
         writer.flush()?;
+        self.price_history_count.fetch_add(prices.len() as u64, Ordering::Relaxed);
 
         Ok(())
     }
@@ -215,11 +274,12 @@ impl CsvWriter {
             writer.serialize(price)?;
         }
         writer.flush()?;
+        self.aligned_price_count.fetch_add(prices.len() as u64, Ordering::Relaxed);
 
         Ok(())
     }
 
-    /// Flushes all writers.
+    /// Flushes all active writers (does NOT finalize market windows).
     pub fn flush_all(&self) -> Result<()> {
         if let Some(ref mut writer) = *self.spot_prices.lock().unwrap() {
             writer.flush()?;
@@ -230,15 +290,84 @@ impl CsvWriter {
         if let Some(ref mut writer) = *self.deltas.lock().unwrap() {
             writer.flush()?;
         }
-        if let Some(ref mut writer) = *self.market_windows.lock().unwrap() {
-            writer.flush()?;
-        }
         if let Some(ref mut writer) = *self.price_history.lock().unwrap() {
             writer.flush()?;
         }
         if let Some(ref mut writer) = *self.aligned_prices.lock().unwrap() {
             writer.flush()?;
         }
+        Ok(())
+    }
+
+    /// Writes market windows to CSV, filtered to only those with L2 orderbook data.
+    /// Call this once on shutdown, before writing the manifest.
+    pub fn finalize_market_windows(&self) -> Result<()> {
+        let pending = self.pending_windows.lock().unwrap();
+        let seen = self.seen_orderbook_events.lock().unwrap();
+
+        let mut matched: Vec<&MarketWindow> = pending
+            .values()
+            .filter(|w| seen.contains(&w.event_id))
+            .collect();
+        matched.sort_by_key(|w| w.window_start);
+
+        let total = pending.len();
+        let kept = matched.len();
+        let dropped = total - kept;
+
+        if dropped > 0 {
+            tracing::info!(
+                "Market windows: {} total, {} with L2 data, {} dropped (no orderbook data)",
+                total, kept, dropped
+            );
+        }
+
+        if matched.is_empty() {
+            return Ok(());
+        }
+
+        let path = self.output_dir.join(POLYMARKET_WINDOWS_FILE);
+        // Overwrite (not append) since we write all windows at once
+        let file = File::create(&path)
+            .with_context(|| format!("Failed to create {:?}", path))?;
+        let mut writer = csv::Writer::from_writer(file);
+
+        for window in &matched {
+            writer.serialize(window)?;
+        }
+        writer.flush()?;
+        self.window_count.store(kept as u64, Ordering::Relaxed);
+
+        Ok(())
+    }
+
+    /// Writes a manifest.json describing the collected dataset.
+    pub fn write_manifest(&self, info: ManifestInfo) -> Result<()> {
+        let duration_secs = (info.collection_end - info.collection_start).num_seconds();
+
+        let manifest = ManifestJson {
+            collection_start: info.collection_start.to_rfc3339(),
+            collection_end: info.collection_end.to_rfc3339(),
+            duration_secs,
+            assets: info.assets,
+            timeframes: info.timeframes,
+            row_counts: ManifestRowCounts {
+                spot_prices: self.spot_price_count.load(Ordering::Relaxed),
+                orderbook_snapshots: self.snapshot_count.load(Ordering::Relaxed),
+                orderbook_deltas: self.delta_count.load(Ordering::Relaxed),
+                market_windows: self.window_count.load(Ordering::Relaxed),
+                price_history: self.price_history_count.load(Ordering::Relaxed),
+                aligned_prices: self.aligned_price_count.load(Ordering::Relaxed),
+            },
+        };
+
+        let json = serde_json::to_string_pretty(&manifest)
+            .context("Failed to serialize manifest")?;
+
+        let path = self.output_dir.join("manifest.json");
+        fs::write(&path, json)
+            .with_context(|| format!("Failed to write manifest: {:?}", path))?;
+
         Ok(())
     }
 }

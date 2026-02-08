@@ -351,7 +351,8 @@ impl LiveMode {
             self.state.clone(),
             self.config.strategy.clone(),
             self.config.engines.clone(),
-        );
+        )
+        .with_market_client(crate::api::MarketClient::production());
 
         // Add decision logger if DECISION_LOG_PATH env var is set (for comparing live vs backtest)
         if let Ok(path) = std::env::var("DECISION_LOG_PATH") {

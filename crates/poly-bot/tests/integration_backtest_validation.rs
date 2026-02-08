@@ -497,6 +497,7 @@ fn test_pnl_report_contains_required_fields() {
         max_drawdown_duration_secs: Some(3600),
         parameters: HashMap::new(),
         duration_secs: 3600.0,
+        git_commit: None,
     };
 
     let report = PnLReport {
@@ -550,6 +551,7 @@ fn test_pnl_report_formats_negative_pnl_correctly() {
         max_drawdown_duration_secs: None,
         parameters: HashMap::new(),
         duration_secs: 3600.0,
+        git_commit: None,
     };
 
     let report = PnLReport {

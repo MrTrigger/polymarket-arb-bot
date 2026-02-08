@@ -12,7 +12,7 @@ use poly_common::{ClickHouseClient, MarketWindow, OrderBookDelta, OrderBookSnaps
 use tracing::warn;
 
 use crate::config::OutputMode;
-use crate::csv_writer::CsvWriter;
+use crate::csv_writer::{CsvWriter, ManifestInfo};
 
 /// Collection parameters for organizing CSV output.
 #[derive(Debug, Clone)]
@@ -320,6 +320,23 @@ impl DataWriter {
     pub fn flush(&self) -> Result<()> {
         if let Some(ref csv) = self.csv {
             csv.flush_all()?;
+        }
+        Ok(())
+    }
+
+    /// Finalizes market windows: writes only windows with L2 data to CSV.
+    /// Call before write_manifest on shutdown.
+    pub fn finalize_market_windows(&self) -> Result<()> {
+        if let Some(ref csv) = self.csv {
+            csv.finalize_market_windows()?;
+        }
+        Ok(())
+    }
+
+    /// Writes a manifest.json describing the collected dataset.
+    pub fn write_manifest(&self, info: ManifestInfo) -> Result<()> {
+        if let Some(ref csv) = self.csv {
+            csv.write_manifest(info)?;
         }
         Ok(())
     }

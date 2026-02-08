@@ -300,8 +300,9 @@ impl MarketDiscovery {
         let window_duration = self.detect_window_duration(event);
         let window_start = window_end - window_duration;
 
-        // Parse strike price from title (e.g., "BTC above $100,000")
-        let strike_price = self.parse_strike_price(&title);
+        // Strike price will be fetched from Binance at window_start time.
+        // Don't parse from title — titles like "BTC up at 1/26 20:05" yield garbage values.
+        let strike_price = Decimal::ZERO;
 
         let market_window = MarketWindow {
             event_id: event.id.clone().unwrap_or_default(),

@@ -24,7 +24,7 @@ use poly_common::{ClickHouseClient, WindowDuration};
 use tracing::{error, info, warn, Level};
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 
-use poly_bot::config::{BotConfig, DashboardConfig, SweepConfig, TradingMode};
+use poly_bot::config::{BotConfig, DashboardConfig, TradingMode};
 use poly_bot::dashboard::{
     create_shared_dashboard_state_manager, spawn_api_server, spawn_websocket_server,
     ApiServerConfig, WebSocketServerConfig,
@@ -182,13 +182,13 @@ async fn run() -> Result<()> {
         )));
 
     // File layer: configurable level, full format with timestamps
-    // Strategy module stays at info to avoid flooding logs with per-tick debug output
+    // Strategy module capped at configured level (no separate override)
     let file_layer = fmt::layer()
         .with_writer(non_blocking_file)
         .with_target(true)
         .with_ansi(false)
         .with_filter(EnvFilter::new(format!(
-            "poly_bot={},poly_market={},poly_common={},poly_bot::strategy=info",
+            "poly_bot={},poly_market={},poly_common={}",
             file_level, file_level, file_level
         )));
 
@@ -502,26 +502,17 @@ async fn run_backtest_mode(config: BotConfig, clickhouse: ClickHouseClient, data
         info!("Data source override: {}", source);
     }
 
-    // Load sweep params from strategy.toml if sweep is enabled
+    // Load sweep params from [backtest.sweep] config section
     if config.backtest.sweep_enabled {
-        let strategy_path = std::path::Path::new("config/strategy.toml");
-        match SweepConfig::from_file(strategy_path) {
-            Ok(sweep_config) => {
-                let sweep_params = sweep_config.to_sweep_parameters();
-                if sweep_params.is_empty() {
-                    warn!("Sweep enabled but no sweep parameters found in {}", strategy_path.display());
-                } else {
-                    info!("Loaded {} sweep parameters from {}", sweep_params.len(), strategy_path.display());
-                    for param in &sweep_params {
-                        info!("  {} [{} to {} step {}]", param.name, param.start, param.end, param.step);
-                    }
-                    mode_config.sweep_params = sweep_params;
-                }
+        let sweep_params = config.backtest.sweep_params.to_sweep_parameters();
+        if sweep_params.is_empty() {
+            warn!("Sweep enabled but no sweep parameters found in [backtest.sweep]");
+        } else {
+            info!("Loaded {} sweep parameters from config", sweep_params.len());
+            for param in &sweep_params {
+                info!("  {} [{} to {} step {}]", param.name, param.start, param.end, param.step);
             }
-            Err(e) => {
-                warn!("Failed to load sweep config from {}: {}", strategy_path.display(), e);
-                warn!("Sweep will run with default parameters");
-            }
+            mode_config.sweep_params = sweep_params;
         }
     }
 

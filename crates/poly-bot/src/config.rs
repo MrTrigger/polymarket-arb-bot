@@ -534,6 +534,10 @@ pub struct BacktestConfig {
     /// End date for backtest (YYYY-MM-DD).
     pub end_date: Option<String>,
 
+    /// Duration limit for backtest (e.g., "2h", "30m", "1d").
+    /// Can be used alone (first N of data) or with start_date.
+    pub duration: Option<String>,
+
     /// Playback speed multiplier (1.0 = real-time, 0 = max speed).
     pub speed: f64,
 
@@ -553,6 +557,13 @@ pub struct BacktestConfig {
 
     /// Path to write decision log CSV (for comparing live vs backtest).
     pub decision_log_path: Option<String>,
+
+    /// Sweep parameters (from [backtest.sweep] in config TOML).
+    pub sweep_params: SweepConfig,
+
+    /// Minimum interval between orderbook snapshots per event (ms).
+    /// Downsamples L2 data for faster backtesting. E.g. 1000 = 1 snapshot/sec.
+    pub book_interval_ms: Option<u64>,
 }
 
 impl Default for BacktestConfig {
@@ -560,12 +571,15 @@ impl Default for BacktestConfig {
         Self {
             start_date: None,
             end_date: None,
+            duration: None,
             speed: 0.0, // Max speed by default
             sweep_enabled: false,
             data_dir: None,
             sweep_parallel_workers: None,
             trading: None,
             decision_log_path: None,
+            sweep_params: SweepConfig::default(),
+            book_interval_ms: None,
         }
     }
 }
@@ -811,6 +825,18 @@ pub struct DirectionalEngineConfig {
     /// Default: 0.50 (50% UP, 50% DOWN)
     pub neutral_ratio: Decimal,
 
+    // --- Confidence / Edge Params ---
+    // Optional overrides for strategy-level confidence params.
+    // If None, code defaults are used.
+
+    /// Minimum time confidence at window start.
+    pub time_conf_floor: Option<Decimal>,
+    /// Minimum distance confidence for tiny moves.
+    pub dist_conf_floor: Option<Decimal>,
+    /// Confidence gained per ATR of movement.
+    pub dist_conf_per_atr: Option<Decimal>,
+    /// Maximum edge required at window start (decays to 0).
+    pub max_edge_factor: Option<Decimal>,
 }
 
 impl Default for DirectionalEngineConfig {
@@ -828,6 +854,10 @@ impl Default for DirectionalEngineConfig {
             strong_up_ratio: Decimal::new(78, 2),  // 0.78
             lean_up_ratio: Decimal::new(60, 2),    // 0.60
             neutral_ratio: Decimal::new(50, 2),    // 0.50
+            time_conf_floor: None,
+            dist_conf_floor: None,
+            dist_conf_per_atr: None,
+            max_edge_factor: None,
         }
     }
 }
@@ -1136,8 +1166,6 @@ pub struct SweepConfig {
     /// Edge factor values to sweep (quality filter).
     /// This is the minimum EV required at window start.
     pub edge_factors: Vec<f64>,
-    /// Output file for sweep results.
-    pub results_file: String,
 }
 
 impl SweepConfig {
@@ -1160,7 +1188,6 @@ impl SweepConfig {
             dist_conf_floors: toml.sweep.dist_conf_floors,
             dist_conf_per_atrs: toml.sweep.dist_conf_per_atrs,
             edge_factors: toml.sweep.edge_factors,
-            results_file: toml.sweep.results_file,
         })
     }
 
@@ -1232,12 +1259,10 @@ struct SweepToml {
     dist_conf_floors: Vec<f64>,
     dist_conf_per_atrs: Vec<f64>,
     edge_factors: Vec<f64>,
-    results_file: String,
 }
 
 impl Default for SweepToml {
     fn default() -> Self {
-        // Empty vectors by default - only sweep what's explicitly defined in strategy.toml
         Self {
             base_order_sizes: Vec::new(),
             strong_ratios: Vec::new(),
@@ -1246,7 +1271,6 @@ impl Default for SweepToml {
             dist_conf_floors: Vec::new(),
             dist_conf_per_atrs: Vec::new(),
             edge_factors: Vec::new(),
-            results_file: "sweep_results.json".to_string(),
         }
     }
 }
@@ -1543,6 +1567,8 @@ impl Default for DashboardToml {
 struct BacktestToml {
     start_date: Option<String>,
     end_date: Option<String>,
+    /// Duration limit (e.g., "2h", "30m", "1d").
+    duration: Option<String>,
     speed: f64,
     sweep_enabled: bool,
     data_dir: Option<String>,
@@ -1552,6 +1578,11 @@ struct BacktestToml {
     trading: Option<TradingToml>,
     /// Path to write decision log CSV.
     decision_log_path: Option<String>,
+    /// Sweep parameters (inline in this config).
+    #[serde(default)]
+    sweep: SweepToml,
+    /// Minimum interval between orderbook snapshots per event (ms).
+    book_interval_ms: Option<u64>,
 }
 
 impl Default for BacktestToml {
@@ -1559,12 +1590,15 @@ impl Default for BacktestToml {
         Self {
             start_date: None,
             end_date: None,
+            duration: None,
             speed: 0.0,
             sweep_enabled: false,
             data_dir: None,
             sweep_parallel_workers: None,
             trading: None,
             decision_log_path: None,
+            sweep: SweepToml::default(),
+            book_interval_ms: None,
         }
     }
 }
@@ -1671,6 +1705,11 @@ struct DirectionalEngineToml {
     strong_up_ratio: f64,
     lean_up_ratio: f64,
     neutral_ratio: f64,
+    // Confidence / edge params (optional, use code defaults if not set)
+    time_conf_floor: Option<f64>,
+    dist_conf_floor: Option<f64>,
+    dist_conf_per_atr: Option<f64>,
+    max_edge_factor: Option<f64>,
 }
 
 impl Default for DirectionalEngineToml {
@@ -1686,6 +1725,10 @@ impl Default for DirectionalEngineToml {
             strong_up_ratio: 0.78,
             lean_up_ratio: 0.60,
             neutral_ratio: 0.50,
+            time_conf_floor: None,
+            dist_conf_floor: None,
+            dist_conf_per_atr: None,
+            max_edge_factor: None,
         }
     }
 }
@@ -1868,6 +1911,7 @@ impl BotConfig {
             backtest: BacktestConfig {
                 start_date: toml.backtest.start_date,
                 end_date: toml.backtest.end_date,
+                duration: toml.backtest.duration,
                 speed: toml.backtest.speed,
                 sweep_enabled: toml.backtest.sweep_enabled,
                 data_dir: toml.backtest.data_dir,
@@ -1894,6 +1938,16 @@ impl BotConfig {
                     None => None,
                 },
                 decision_log_path: toml.backtest.decision_log_path,
+                sweep_params: SweepConfig {
+                    base_order_sizes: toml.backtest.sweep.base_order_sizes,
+                    strong_ratios: toml.backtest.sweep.strong_ratios,
+                    lean_ratios: toml.backtest.sweep.lean_ratios,
+                    time_conf_floors: toml.backtest.sweep.time_conf_floors,
+                    dist_conf_floors: toml.backtest.sweep.dist_conf_floors,
+                    dist_conf_per_atrs: toml.backtest.sweep.dist_conf_per_atrs,
+                    edge_factors: toml.backtest.sweep.edge_factors,
+                },
+                book_interval_ms: toml.backtest.book_interval_ms,
             },
             live: LiveConfig {
                 auto_claim_interval: toml.live.auto_claim_interval,
@@ -1921,6 +1975,10 @@ impl BotConfig {
                     strong_up_ratio: f64_to_decimal(toml.engines.directional.strong_up_ratio),
                     lean_up_ratio: f64_to_decimal(toml.engines.directional.lean_up_ratio),
                     neutral_ratio: f64_to_decimal(toml.engines.directional.neutral_ratio),
+                    time_conf_floor: toml.engines.directional.time_conf_floor.map(f64_to_decimal),
+                    dist_conf_floor: toml.engines.directional.dist_conf_floor.map(f64_to_decimal),
+                    dist_conf_per_atr: toml.engines.directional.dist_conf_per_atr.map(f64_to_decimal),
+                    max_edge_factor: toml.engines.directional.max_edge_factor.map(f64_to_decimal),
                 },
                 maker: MakerEngineConfig {
                     enabled: toml.engines.maker.enabled,

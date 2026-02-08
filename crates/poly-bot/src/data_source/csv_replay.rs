@@ -38,6 +38,13 @@ pub struct CsvReplayConfig {
     pub assets: Vec<CryptoAsset>,
     /// Replay speed multiplier (1.0 = real-time, 0.0 = max speed).
     pub speed: f64,
+    /// Maximum duration from first event. When set, replay stops after
+    /// this much time has elapsed from the first event's timestamp.
+    pub max_duration: Option<chrono::Duration>,
+    /// Minimum interval between orderbook snapshots per event (milliseconds).
+    /// E.g. 1000 = keep at most one snapshot per second per event.
+    /// 0 or None = no downsampling (use all data).
+    pub book_interval_ms: Option<u64>,
 }
 
 impl Default for CsvReplayConfig {
@@ -52,6 +59,8 @@ impl Default for CsvReplayConfig {
                 CryptoAsset::Sol,
             ],
             speed: 0.0, // Max speed by default for backtesting
+            max_duration: None,
+            book_interval_ms: None,
         }
     }
 }
@@ -264,6 +273,10 @@ struct OrderbookSource {
     pending: HashMap<(String, DateTime<Utc>), OrderBookSnapshotRow>,
     exhausted: bool,
     unpaired_count: usize,
+    /// Minimum interval for downsampling (None = no downsampling).
+    min_interval: Option<chrono::Duration>,
+    /// Last emitted timestamp per event_id (for downsampling).
+    last_emitted: HashMap<String, DateTime<Utc>>,
 }
 
 impl OrderbookSource {
@@ -285,6 +298,15 @@ impl OrderbookSource {
                     };
                     let yes_token = yes_token.clone();
 
+                    // Downsample: skip if too close to last emitted for this event
+                    if let Some(interval) = self.min_interval {
+                        if let Some(last) = self.last_emitted.get(&row.event_id) {
+                            if row.timestamp - *last < interval {
+                                continue;
+                            }
+                        }
+                    }
+
                     let key = (row.event_id.clone(), row.timestamp);
 
                     if let Some(partner) = self.pending.remove(&key) {
@@ -297,7 +319,13 @@ impl OrderbookSource {
                             continue;
                         };
 
-                        return Some(make_orderbook_pair_event(yes_row, no_row));
+                        let event_id = yes_row.event_id.clone();
+                        let ts = yes_row.timestamp;
+                        let event = make_orderbook_pair_event(yes_row, no_row);
+                        if self.min_interval.is_some() {
+                            self.last_emitted.insert(event_id, ts);
+                        }
+                        return Some(event);
                     } else {
                         self.pending.insert(key, row);
                     }
@@ -468,6 +496,12 @@ pub struct CsvReplayDataSource {
     initialized: bool,
     /// Whether replay is complete.
     is_exhausted: bool,
+    /// Event counter for diagnostics.
+    event_count: u64,
+    /// Timestamp of the first event (for max_duration enforcement).
+    first_event_time: Option<DateTime<Utc>>,
+    /// Maximum duration from first event before stopping.
+    max_duration: Option<chrono::Duration>,
 }
 
 /// Either orderbook snapshots or aligned prices (mutually exclusive).
@@ -488,6 +522,7 @@ impl BookSource {
 impl CsvReplayDataSource {
     /// Creates a new CSV replay data source.
     pub fn new(config: CsvReplayConfig) -> Self {
+        let max_duration = config.max_duration;
         Self {
             config,
             window_source: None,
@@ -497,6 +532,9 @@ impl CsvReplayDataSource {
             current_time: None,
             initialized: false,
             is_exhausted: false,
+            event_count: 0,
+            first_event_time: None,
+            max_duration,
         }
     }
 
@@ -522,7 +560,7 @@ impl CsvReplayDataSource {
             self.config.end_time,
         )?;
         let window_count = window_events.len() / 2; // open + close per window
-        debug!("Loaded {} market windows ({} events)", window_count, window_events.len());
+        info!("Loaded {} market windows ({} events)", window_count, window_events.len());
 
         if !window_events.is_empty() {
             self.window_source = Some(WindowSource {
@@ -557,6 +595,9 @@ impl CsvReplayDataSource {
                 .map_err(|e| DataSourceError::Parse(format!("Failed to open {:?}: {}", ob_path, e)))?;
             let buf_reader = BufReader::with_capacity(64 * 1024, file);
             let reader = csv::Reader::from_reader(buf_reader);
+            let min_interval = self.config.book_interval_ms
+                .filter(|&ms| ms > 0)
+                .map(|ms| chrono::Duration::milliseconds(ms as i64));
             self.book_source = Some(BookSource::Orderbook(OrderbookSource {
                 reader: reader.into_deserialize(),
                 event_tokens,
@@ -565,6 +606,8 @@ impl CsvReplayDataSource {
                 pending: HashMap::new(),
                 exhausted: false,
                 unpaired_count: 0,
+                min_interval,
+                last_emitted: HashMap::new(),
             }));
         } else if aligned_path.exists() {
             let file = File::open(&aligned_path)
@@ -611,14 +654,51 @@ impl CsvReplayDataSource {
                 source_idx,
                 event: ev,
             });
+        } else {
+            let source_name = match source_idx {
+                SOURCE_WINDOWS => "windows",
+                SOURCE_SPOT => "spot",
+                SOURCE_BOOK => "book",
+                _ => "unknown",
+            };
+            eprintln!("  [CSV] Source '{}' exhausted (heap size: {})", source_name, self.merge_heap.len());
         }
     }
 
     /// Pop the next event from the merge heap and refill from that source.
     fn pop_next(&mut self) -> Option<MarketEvent> {
-        let entry = self.merge_heap.pop()?;
+        let entry = match self.merge_heap.pop() {
+            Some(e) => e,
+            None => {
+                eprintln!("  [CSV] Merge heap empty — stream finished after {} events", self.event_count);
+                return None;
+            }
+        };
+
+        // Enforce max_duration: record first event time and check elapsed
+        if let Some(max_dur) = self.max_duration {
+            let event_ts = entry.timestamp;
+            if self.first_event_time.is_none() {
+                self.first_event_time = Some(event_ts);
+                info!("Duration limit: first event at {}, will stop after {}s", event_ts, max_dur.num_seconds());
+            }
+            if let Some(first_ts) = self.first_event_time
+                && event_ts - first_ts > max_dur
+            {
+                info!("Duration limit reached ({:.0}s elapsed), stopping replay",
+                    (event_ts - first_ts).num_seconds());
+                self.is_exhausted = true;
+                self.merge_heap.clear();
+                return None;
+            }
+        }
+
         // Refill from the source that just produced this event
         self.prime_source(entry.source_idx);
+        self.event_count += 1;
+        if self.event_count % 500_000 == 0 {
+            eprintln!("  [CSV] {}M events processed, ts={}", self.event_count / 1_000_000, entry.timestamp);
+        }
         Some(entry.event)
     }
 }
@@ -650,6 +730,8 @@ impl DataSource for CsvReplayDataSource {
                 Ok(Some(event))
             }
             None => {
+                eprintln!("  [CSV] Data source exhausted after {} events, last_ts={:?}",
+                    self.event_count, self.current_time);
                 self.is_exhausted = true;
                 Ok(None)
             }
@@ -792,10 +874,16 @@ fn load_market_windows(
 
     let mut event_tokens: EventTokenMap = HashMap::new();
     let mut events: Vec<(DateTime<Utc>, MarketEvent)> = Vec::new();
+    let mut seen_events: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for result in reader.deserialize() {
         let row: MarketWindowRow = result
             .map_err(|e| DataSourceError::Parse(format!("CSV parse error: {}", e)))?;
+
+        // Deduplicate by event_id (CSV may contain duplicates from multiple collection sessions)
+        if !seen_events.insert(row.event_id.clone()) {
+            continue;
+        }
 
         // Filter by asset if specified
         let asset = parse_asset(&row.asset);

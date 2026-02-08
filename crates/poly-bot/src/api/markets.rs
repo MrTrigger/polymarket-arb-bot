@@ -51,39 +51,36 @@ pub enum MarketError {
 }
 
 /// Response from the market info API endpoint.
+/// The CLOB API returns many fields; we only parse what we need.
 #[derive(Debug, Clone, Deserialize)]
 pub struct MarketInfoResponse {
     /// Condition ID (market identifier).
     pub condition_id: String,
-    /// Minimum order size in shares.
-    #[serde(deserialize_with = "deserialize_decimal_string")]
-    pub minimum_order_size: Decimal,
+    /// Minimum order size in shares (can be number, string, or null).
+    #[serde(default, deserialize_with = "deserialize_optional_decimal_string")]
+    pub minimum_order_size: Option<Decimal>,
     /// Minimum tick size (price increment).
     #[serde(default, deserialize_with = "deserialize_optional_decimal_string")]
     pub minimum_tick_size: Option<Decimal>,
 }
 
-/// Helper to deserialize decimal from string.
-fn deserialize_decimal_string<'de, D>(deserializer: D) -> Result<Decimal, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let s: String = serde::Deserialize::deserialize(deserializer)?;
-    s.parse::<Decimal>().map_err(serde::de::Error::custom)
-}
-
-/// Helper to deserialize optional decimal from string.
+/// Helper to deserialize optional decimal from string, number, or null.
 fn deserialize_optional_decimal_string<'de, D>(deserializer: D) -> Result<Option<Decimal>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let opt: Option<String> = serde::Deserialize::deserialize(deserializer)?;
-    match opt {
-        Some(s) if !s.is_empty() => s
-            .parse::<Decimal>()
-            .map(Some)
-            .map_err(serde::de::Error::custom),
-        _ => Ok(None),
+    use serde::de;
+    use serde_json::Value;
+    let v = Value::deserialize(deserializer)?;
+    match v {
+        Value::Null => Ok(None),
+        Value::String(s) if s.is_empty() => Ok(None),
+        Value::String(s) => s.parse::<Decimal>().map(Some).map_err(de::Error::custom),
+        Value::Number(n) => {
+            let s = n.to_string();
+            s.parse::<Decimal>().map(Some).map_err(de::Error::custom)
+        }
+        _ => Err(de::Error::custom("expected string, number, or null")),
     }
 }
 
@@ -99,7 +96,7 @@ pub struct CachedMarketInfo {
 impl From<MarketInfoResponse> for CachedMarketInfo {
     fn from(response: MarketInfoResponse) -> Self {
         Self {
-            min_order_size: response.minimum_order_size,
+            min_order_size: response.minimum_order_size.unwrap_or(DEFAULT_MIN_ORDER_SIZE),
             min_tick_size: response.minimum_tick_size,
         }
     }
@@ -337,7 +334,7 @@ mod tests {
         }"#;
         let response: MarketInfoResponse = serde_json::from_str(json).unwrap();
         assert_eq!(response.condition_id, "0x123");
-        assert_eq!(response.minimum_order_size, dec!(5));
+        assert_eq!(response.minimum_order_size, Some(dec!(5)));
         assert_eq!(response.minimum_tick_size, Some(dec!(0.01)));
     }
 
@@ -349,8 +346,36 @@ mod tests {
         }"#;
         let response: MarketInfoResponse = serde_json::from_str(json).unwrap();
         assert_eq!(response.condition_id, "0x456");
-        assert_eq!(response.minimum_order_size, dec!(1));
+        assert_eq!(response.minimum_order_size, Some(dec!(1)));
         assert_eq!(response.minimum_tick_size, None);
+    }
+
+    #[test]
+    fn test_deserialize_market_info_response_numbers() {
+        // CLOB API returns numbers, not strings
+        let json = r#"{
+            "condition_id": "0x789",
+            "minimum_order_size": 15,
+            "minimum_tick_size": 0.01
+        }"#;
+        let response: MarketInfoResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(response.minimum_order_size, Some(dec!(15)));
+        assert_eq!(response.minimum_tick_size, Some(dec!(0.01)));
+    }
+
+    #[test]
+    fn test_deserialize_market_info_response_null() {
+        // CLOB API can return null for minimum_order_size
+        let json = r#"{
+            "condition_id": "0xabc",
+            "minimum_order_size": null,
+            "minimum_tick_size": null
+        }"#;
+        let response: MarketInfoResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(response.minimum_order_size, None);
+        // CachedMarketInfo should use default
+        let cached = CachedMarketInfo::from(response);
+        assert_eq!(cached.min_order_size, DEFAULT_MIN_ORDER_SIZE);
     }
 
     #[test]

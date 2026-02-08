@@ -30,6 +30,7 @@ use tracing_subscriber::FmtSubscriber;
 use poly_collect::binance::BinanceCapture;
 use poly_collect::clob::{update_active_markets, ActiveMarkets, ClobCapture};
 use poly_collect::config::{CollectConfig, CollectionMode};
+use poly_collect::csv_writer::ManifestInfo;
 use poly_collect::data_writer::DataWriter;
 use poly_collect::discovery::MarketDiscovery;
 use poly_collect::history::HistoricalCollector;
@@ -155,6 +156,7 @@ async fn run_history_mode(
     clickhouse: Option<Arc<ClickHouseClient>>,
 ) -> Result<()> {
     use poly_collect::data_writer::CollectionParams;
+    let collection_start = Utc::now();
 
     // Determine date range from start_date/end_date or days
     let (start_date, end_date) = if let (Some(start), Some(end)) =
@@ -198,10 +200,26 @@ async fn run_history_mode(
         info!("CSV output directory: {:?}", dir);
     }
 
-    let collector = HistoricalCollector::new(writer, config.timeframes.clone())?;
+    let collector = HistoricalCollector::new(writer.clone(), config.timeframes.clone())?;
     let stats = collector
         .collect(&config.assets, start_date, end_date)
         .await?;
+
+    // Finalize: write only windows with L2 data, then manifest
+    if let Err(e) = writer.finalize_market_windows() {
+        warn!("Failed to finalize market windows: {}", e);
+    }
+    let manifest_info = ManifestInfo {
+        collection_start,
+        collection_end: Utc::now(),
+        assets: config.assets.iter().map(|a| a.to_string()).collect(),
+        timeframes: config.timeframes.iter().map(|t| t.as_str().to_string()).collect(),
+    };
+    if let Err(e) = writer.write_manifest(manifest_info) {
+        warn!("Failed to write manifest: {}", e);
+    } else if let Some(dir) = writer.csv_dir() {
+        info!("Manifest written to {:?}/manifest.json", dir);
+    }
 
     info!("Historical collection complete:");
     info!("  Assets completed: {}", stats.assets_completed);
@@ -218,6 +236,8 @@ async fn run_live_mode(
     writer: Arc<DataWriter>,
     clickhouse: Option<Arc<ClickHouseClient>>,
 ) -> Result<()> {
+    let collection_start = Utc::now();
+
     // Log collection duration
     if config.duration.is_indefinite() {
         info!("Collection duration: indefinite (press Ctrl+C to stop)");
@@ -351,6 +371,22 @@ async fn run_live_mode(
         _ = tokio::time::sleep(shutdown_timeout) => {
             warn!("Shutdown timeout exceeded, forcing exit");
         }
+    }
+
+    // Finalize: write only windows with L2 data, then manifest
+    if let Err(e) = writer.finalize_market_windows() {
+        warn!("Failed to finalize market windows: {}", e);
+    }
+    let manifest_info = ManifestInfo {
+        collection_start,
+        collection_end: Utc::now(),
+        assets: config.assets.iter().map(|a| a.to_string()).collect(),
+        timeframes: config.timeframes.iter().map(|t| t.as_str().to_string()).collect(),
+    };
+    if let Err(e) = writer.write_manifest(manifest_info) {
+        warn!("Failed to write manifest: {}", e);
+    } else if let Some(dir) = writer.csv_dir() {
+        info!("Manifest written to {:?}/manifest.json", dir);
     }
 
     // Final stats

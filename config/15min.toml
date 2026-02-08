@@ -10,11 +10,11 @@
 #   cargo run -p poly-bot --release -- --config config/15min.toml --mode live
 
 [general]
-mode = "backtest"
+mode = "live"
 assets = ["BTC", "ETH", "SOL", "XRP"]
 window_duration = "15min"
 console_log_level = "warn"
-file_log_level = "debug"
+file_log_level = "info"
 
 [trading]
 max_market_exposure = 250.0
@@ -44,7 +44,7 @@ circuit_breaker_cooldown_secs = 300
 
 [execution]
 # LIMIT ORDERS PREFERRED - earn rebates instead of paying fees
-execution_mode = "limit"
+execution_mode = "market"
 chase_enabled = true
 chase_step_size = 0.01
 chase_check_interval_ms = 500
@@ -72,6 +72,12 @@ lean_threshold_late_bps = 6
 strong_up_ratio = 0.82
 lean_up_ratio = 0.65
 
+# Optimal values from sweep (20h L2 data, Jan 26-27)
+# Best risk-adjusted: 160.5% return / 23.9% DD / Ret/DD ratio 6.7x
+max_edge_factor = 0.03
+time_conf_floor = 0.20
+dist_conf_per_atr = 0.60
+
 [engines.maker]
 # Market making can work since makers earn rebates
 enabled = false
@@ -81,12 +87,21 @@ min_spread_bps = 100
 [backtest]
 data_dir = "data/live_test"
 speed = 0.0
+sweep_enabled = false
+# book_interval_ms = 1000  # Data already pre-downsampled to 1s
 
 [backtest.trading]
 available_balance = 1000.0
 max_market_exposure = 250.0
 max_total_exposure = 1000.0
 base_order_size = 10.0
+
+[backtest.sweep]
+# Boundary exploration: dist_conf=0.40 was best, check if higher is better
+# edge and time_conf have minimal effect, fix at best values
+edge_factors = [0.03]
+time_conf_floors = [0.20]
+dist_conf_per_atrs = [0.40, 0.50, 0.60, 0.70, 0.80]
 
 [observability]
 capture_decisions = true

@@ -43,10 +43,10 @@ pub enum DiscoveryError {
 struct BinanceKline(Vec<serde_json::Value>);
 
 impl BinanceKline {
-    /// Get the open price from the kline.
-    fn open_price(&self) -> Option<Decimal> {
-        // Index 1 is the open price (as string)
-        self.0.get(1)?.as_str()?.parse().ok()
+    /// Get the close price from the kline.
+    fn close_price(&self) -> Option<Decimal> {
+        // Index 4 is the close price (as string)
+        self.0.get(4)?.as_str()?.parse().ok()
     }
 }
 
@@ -167,9 +167,11 @@ impl MarketDiscovery {
         at_time: DateTime<Utc>,
     ) -> Result<Option<Decimal>, DiscoveryError> {
         let symbol = asset.binance_symbol().to_uppercase();
-        let start_time = at_time.timestamp_millis();
-        // Get the 1-minute candle that contains this timestamp
-        let end_time = start_time + 60_000; // +1 minute
+        // Fetch the most recent COMPLETED 1-minute candle before the requested time.
+        // The current minute's candle isn't available on Binance until it closes,
+        // so we look 1 minute back to get the last closed candle's close price.
+        let end_time = at_time.timestamp_millis();
+        let start_time = end_time - 60_000; // -1 minute
 
         let url = format!(
             "{}/api/v3/klines?symbol={}&interval=1m&startTime={}&endTime={}&limit=1",
@@ -196,9 +198,8 @@ impl MarketDiscovery {
         let klines: Vec<BinanceKline> = response.json().await?;
 
         if let Some(kline) = klines.first() {
-            // Use open price - this is the first trade price in the 1-minute candle
-            // that started at the requested timestamp
-            let price = kline.open_price();
+            // Use close price of the previous candle — most recent completed price
+            let price = kline.close_price();
             if let Some(p) = price {
                 info!(
                     "Binance historical price for {} at {}: ${}",
