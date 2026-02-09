@@ -570,6 +570,9 @@ pub struct BacktestConfig {
     /// after this delay (in simulated time), modeling live execution latency.
     /// Default 0 = instant fills (current behavior).
     pub fill_delay_ms: u64,
+
+    /// Override fees to zero for backtesting fee-free market types.
+    pub zero_fees: bool,
 }
 
 impl Default for BacktestConfig {
@@ -587,6 +590,7 @@ impl Default for BacktestConfig {
             sweep_params: SweepConfig::default(),
             book_interval_ms: None,
             fill_delay_ms: 0,
+            zero_fees: false,
         }
     }
 }
@@ -1592,6 +1596,9 @@ struct BacktestToml {
     book_interval_ms: Option<u64>,
     /// Simulated fill latency in milliseconds (0 = instant).
     fill_delay_ms: u64,
+    /// Override fees to zero (for simulating fee-free market types).
+    #[serde(default)]
+    zero_fees: bool,
 }
 
 impl Default for BacktestToml {
@@ -1609,6 +1616,7 @@ impl Default for BacktestToml {
             sweep: SweepToml::default(),
             book_interval_ms: None,
             fill_delay_ms: 0,
+            zero_fees: false,
         }
     }
 }
@@ -1959,6 +1967,7 @@ impl BotConfig {
                 },
                 book_interval_ms: toml.backtest.book_interval_ms,
                 fill_delay_ms: toml.backtest.fill_delay_ms,
+                zero_fees: toml.backtest.zero_fees,
             },
             live: LiveConfig {
                 auto_claim_interval: toml.live.auto_claim_interval,

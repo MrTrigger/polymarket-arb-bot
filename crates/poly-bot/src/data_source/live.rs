@@ -445,10 +445,18 @@ async fn run_sdk_clob_connection(
                     continue;
                 }
 
-                warn!(
-                    "CLOB SDK connection error: {}, reconnecting in {:?}",
-                    e, reconnect_delay
-                );
+                // Intentional reconnect (new subscriptions) vs real error
+                let is_resubscribe = matches!(&e, DataSourceError::Connection(msg) if msg.contains("Reconnecting"));
+                if is_resubscribe {
+                    info!("CLOB SDK: reconnecting to add new market subscriptions");
+                    reconnect_delay = Duration::from_secs(1);
+                } else {
+                    warn!(
+                        "CLOB SDK connection error: {}, reconnecting in {:?}",
+                        e, reconnect_delay
+                    );
+                    reconnect_delay = (reconnect_delay * 2).min(max_reconnect_delay);
+                }
 
                 tokio::select! {
                     _ = tokio::time::sleep(reconnect_delay) => {}
@@ -457,8 +465,6 @@ async fn run_sdk_clob_connection(
                         return Ok(());
                     }
                 }
-
-                reconnect_delay = (reconnect_delay * 2).min(max_reconnect_delay);
             }
         }
     }

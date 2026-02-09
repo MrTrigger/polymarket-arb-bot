@@ -116,7 +116,8 @@ impl BacktestModeConfig {
             crate::config::ExecutionMode::Market
         );
         // Only 15-minute markets have fees/rebates; 5-min and 1-hour are fee-free
-        executor_config.use_realistic_fees = matches!(
+        // zero_fees override allows testing strategies as if they were on fee-free markets
+        executor_config.use_realistic_fees = !config.backtest.zero_fees && matches!(
             config.window_duration,
             poly_common::WindowDuration::FifteenMin
         );
