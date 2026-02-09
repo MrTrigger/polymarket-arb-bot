@@ -3,29 +3,22 @@
 //! Tracks price volatility in real-time to provide accurate ATR values
 //! for position sizing. Unlike static estimates, this adapts to current
 //! market conditions.
+//!
+//! Uses event timestamps (not wall-clock time) for windowing so that
+//! backtest replay at any speed produces identical ATR values to live.
 
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use std::collections::VecDeque;
-use std::time::{Duration, Instant};
 
 use poly_common::types::CryptoAsset;
 
-/// A single price observation with timestamp.
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-struct PricePoint {
-    price: Decimal,
-    timestamp: Instant,
-}
-
 /// Tracks a rolling window of prices for one asset.
+/// Windows are based on event timestamps, not wall-clock time.
 #[derive(Debug)]
 struct AssetTracker {
-    /// Recent price observations.
-    prices: VecDeque<PricePoint>,
-    /// Window duration for range calculation.
-    window_duration: Duration,
+    /// Window duration in milliseconds for range calculation.
+    window_duration_ms: i64,
     /// Number of windows to average for ATR.
     num_windows: usize,
     /// Completed range values for averaging.
@@ -34,33 +27,30 @@ struct AssetTracker {
     current_high: Option<Decimal>,
     /// Current window low.
     current_low: Option<Decimal>,
-    /// Start of current window.
-    window_start: Option<Instant>,
+    /// Start of current window (event timestamp in ms).
+    window_start_ms: Option<i64>,
     /// Minimum ATR (fallback for low volatility).
     min_atr: Decimal,
 }
 
 impl AssetTracker {
-    fn new(window_duration: Duration, num_windows: usize, min_atr: Decimal) -> Self {
+    fn new(window_duration_ms: i64, num_windows: usize, min_atr: Decimal) -> Self {
         Self {
-            prices: VecDeque::with_capacity(1000),
-            window_duration,
+            window_duration_ms,
             num_windows,
             ranges: VecDeque::with_capacity(num_windows),
             current_high: None,
             current_low: None,
-            window_start: None,
+            window_start_ms: None,
             min_atr,
         }
     }
 
-    /// Record a new price observation.
-    fn record_price(&mut self, price: Decimal) {
-        let now = Instant::now();
-
+    /// Record a new price observation with an event timestamp.
+    fn record_price(&mut self, price: Decimal, timestamp_ms: i64) {
         // Initialize window if needed
-        if self.window_start.is_none() {
-            self.window_start = Some(now);
+        if self.window_start_ms.is_none() {
+            self.window_start_ms = Some(timestamp_ms);
             self.current_high = Some(price);
             self.current_low = Some(price);
         }
@@ -77,9 +67,9 @@ impl AssetTracker {
             self.current_low = Some(price);
         }
 
-        // Check if window is complete
-        if let Some(start) = self.window_start
-            && now.duration_since(start) >= self.window_duration
+        // Check if window is complete (using event time, not wall clock)
+        if let Some(start_ms) = self.window_start_ms
+            && (timestamp_ms - start_ms) >= self.window_duration_ms
         {
             // Complete the window
             if let (Some(high), Some(low)) = (self.current_high, self.current_low) {
@@ -93,20 +83,9 @@ impl AssetTracker {
             }
 
             // Start new window
-            self.window_start = Some(now);
+            self.window_start_ms = Some(timestamp_ms);
             self.current_high = Some(price);
             self.current_low = Some(price);
-        }
-
-        // Store price point (keep last minute for debugging)
-        self.prices.push_back(PricePoint { price, timestamp: now });
-        let cutoff = now - Duration::from_secs(60);
-        while let Some(front) = self.prices.front() {
-            if front.timestamp < cutoff {
-                self.prices.pop_front();
-            } else {
-                break;
-            }
         }
     }
 
@@ -143,9 +122,9 @@ impl AssetTracker {
 #[derive(Debug)]
 pub struct AtrTracker {
     trackers: std::collections::HashMap<CryptoAsset, AssetTracker>,
-    /// Window duration for range calculation (default 1 minute).
+    /// Window duration in milliseconds (default 60_000 = 1 minute).
     #[allow(dead_code)]
-    window_duration: Duration,
+    window_duration_ms: i64,
     /// Number of windows to average (default 5 = 5-minute ATR).
     #[allow(dead_code)]
     num_windows: usize,
@@ -153,41 +132,46 @@ pub struct AtrTracker {
 
 impl Default for AtrTracker {
     fn default() -> Self {
-        Self::new(Duration::from_secs(60), 5)
+        Self::new_ms(60_000, 5)
     }
 }
 
 impl AtrTracker {
-    /// Create a new ATR tracker.
+    /// Create a new ATR tracker (legacy interface with Duration).
     ///
     /// # Arguments
     /// * `window_duration` - Duration of each range window (e.g., 1 minute)
     /// * `num_windows` - Number of windows to average for ATR (e.g., 5 for 5-minute ATR)
-    pub fn new(window_duration: Duration, num_windows: usize) -> Self {
+    pub fn new(window_duration: std::time::Duration, num_windows: usize) -> Self {
+        Self::new_ms(window_duration.as_millis() as i64, num_windows)
+    }
+
+    /// Create a new ATR tracker with millisecond window duration.
+    pub fn new_ms(window_duration_ms: i64, num_windows: usize) -> Self {
         let mut trackers = std::collections::HashMap::new();
 
         // Initialize trackers with minimum ATR values per asset
         // These minimums prevent over-trading in extremely low volatility
         trackers.insert(
             CryptoAsset::Btc,
-            AssetTracker::new(window_duration, num_windows, dec!(20)), // Min $20 ATR for BTC
+            AssetTracker::new(window_duration_ms, num_windows, dec!(20)), // Min $20 ATR for BTC
         );
         trackers.insert(
             CryptoAsset::Eth,
-            AssetTracker::new(window_duration, num_windows, dec!(1)), // Min $1 ATR for ETH
+            AssetTracker::new(window_duration_ms, num_windows, dec!(1)), // Min $1 ATR for ETH
         );
         trackers.insert(
             CryptoAsset::Sol,
-            AssetTracker::new(window_duration, num_windows, dec!(0.20)), // Min $0.20 ATR for SOL
+            AssetTracker::new(window_duration_ms, num_windows, dec!(0.20)), // Min $0.20 ATR for SOL
         );
         trackers.insert(
             CryptoAsset::Xrp,
-            AssetTracker::new(window_duration, num_windows, dec!(0.002)), // Min $0.002 ATR for XRP
+            AssetTracker::new(window_duration_ms, num_windows, dec!(0.002)), // Min $0.002 ATR for XRP
         );
 
         Self {
             trackers,
-            window_duration,
+            window_duration_ms,
             num_windows,
         }
     }
@@ -232,7 +216,8 @@ impl AtrTracker {
                 };
                 tracker.current_high = last_prices.iter().max().copied();
                 tracker.current_low = last_prices.iter().min().copied();
-                tracker.window_start = Some(Instant::now());
+                // Use 0 as window start — will be overwritten on first record_price
+                tracker.window_start_ms = Some(0);
             }
         }
     }
@@ -242,10 +227,10 @@ impl AtrTracker {
         self.trackers.values().all(|t| !t.ranges.is_empty())
     }
 
-    /// Record a price update for an asset.
-    pub fn record_price(&mut self, asset: CryptoAsset, price: Decimal) {
+    /// Record a price update for an asset with an event timestamp.
+    pub fn record_price(&mut self, asset: CryptoAsset, price: Decimal, timestamp_ms: i64) {
         if let Some(tracker) = self.trackers.get_mut(&asset) {
-            tracker.record_price(price);
+            tracker.record_price(price, timestamp_ms);
         }
     }
 
@@ -287,12 +272,12 @@ mod tests {
 
     #[test]
     fn test_atr_tracker_basic() {
-        let mut tracker = AtrTracker::new(Duration::from_millis(100), 3);
+        let mut tracker = AtrTracker::new_ms(100, 3);
 
-        // Record some prices
-        tracker.record_price(CryptoAsset::Btc, dec!(95000));
-        tracker.record_price(CryptoAsset::Btc, dec!(95100));
-        tracker.record_price(CryptoAsset::Btc, dec!(94900));
+        // Record some prices within the same window
+        tracker.record_price(CryptoAsset::Btc, dec!(95000), 0);
+        tracker.record_price(CryptoAsset::Btc, dec!(95100), 50);
+        tracker.record_price(CryptoAsset::Btc, dec!(94900), 80);
 
         // Should return minimum ATR since no windows completed
         let atr = tracker.get_atr(CryptoAsset::Btc);
@@ -301,20 +286,18 @@ mod tests {
 
     #[test]
     fn test_atr_tracker_after_windows() {
-        let mut tracker = AtrTracker::new(Duration::from_millis(10), 2);
+        let mut tracker = AtrTracker::new_ms(100, 2);
 
-        // First window: range $100
-        tracker.record_price(CryptoAsset::Btc, dec!(95000));
-        tracker.record_price(CryptoAsset::Btc, dec!(95100));
-        std::thread::sleep(Duration::from_millis(15));
+        // First window: range $100 (0ms to 100ms)
+        tracker.record_price(CryptoAsset::Btc, dec!(95000), 0);
+        tracker.record_price(CryptoAsset::Btc, dec!(95100), 50);
 
-        // Second window: range $200
-        tracker.record_price(CryptoAsset::Btc, dec!(95000));
-        tracker.record_price(CryptoAsset::Btc, dec!(95200));
-        std::thread::sleep(Duration::from_millis(15));
+        // Second window: closes at 100ms, range $200
+        tracker.record_price(CryptoAsset::Btc, dec!(95000), 100);
+        tracker.record_price(CryptoAsset::Btc, dec!(95200), 150);
 
-        // Third price to trigger window completion
-        tracker.record_price(CryptoAsset::Btc, dec!(95000));
+        // Third tick closes second window
+        tracker.record_price(CryptoAsset::Btc, dec!(95000), 200);
 
         // Should have at least one completed window
         assert!(tracker.trackers.get(&CryptoAsset::Btc).unwrap().completed_windows() >= 1);
@@ -371,5 +354,32 @@ mod tests {
 
         // Should return minimum ATR (not enough data)
         assert_eq!(tracker.get_atr(CryptoAsset::Btc), dec!(20));
+    }
+
+    #[test]
+    fn test_simulated_time_windowing() {
+        // Verify that windowing works with simulated timestamps
+        // (no dependency on wall-clock time)
+        let mut tracker = AtrTracker::new_ms(60_000, 3); // 1-minute windows
+
+        // Simulate 3 minutes of BTC prices with known ranges
+        // Window 1 (0-60s): range = 95100 - 95000 = $100
+        tracker.record_price(CryptoAsset::Btc, dec!(95000), 0);
+        tracker.record_price(CryptoAsset::Btc, dec!(95100), 30_000);
+
+        // Window 2 (60-120s): range = 95300 - 95050 = $250
+        tracker.record_price(CryptoAsset::Btc, dec!(95050), 60_000);
+        tracker.record_price(CryptoAsset::Btc, dec!(95300), 90_000);
+
+        // Window 3 (120-180s): closes window 2
+        tracker.record_price(CryptoAsset::Btc, dec!(95200), 120_000);
+
+        // Should have 2 completed windows (window 1: $100, window 2: $250)
+        let btc = tracker.trackers.get(&CryptoAsset::Btc).unwrap();
+        assert_eq!(btc.completed_windows(), 2, "Should have 2 completed windows");
+
+        // ATR = average of $100 and $250 = $175
+        let atr = tracker.get_atr(CryptoAsset::Btc);
+        assert_eq!(atr, dec!(175), "ATR should be average of window ranges");
     }
 }

@@ -105,7 +105,7 @@ impl BacktestModeConfig {
         let mut executor_config = SimulatedExecutorConfig::backtest();
         executor_config.initial_balance = config.effective_trading_config().available_balance;
         executor_config.fee_rate = Decimal::ZERO; // Not used when use_realistic_fees=true
-        executor_config.latency_ms = config.execution.paper_fill_latency_ms;
+        executor_config.latency_ms = config.backtest.fill_delay_ms;
         executor_config.enforce_balance = true;
         executor_config.max_market_exposure = config.effective_trading_config().max_market_exposure;
         executor_config.max_total_exposure = config.effective_trading_config().max_total_exposure;
@@ -969,6 +969,21 @@ impl BacktestMode {
                 Err(e) => {
                     warn!("Failed to create decision logger at {}: {}", path, e);
                 }
+            }
+        }
+
+        // Always enable trades logging for backtest
+        let trades_log_path = self.config.decision_log_path
+            .as_ref()
+            .map(|p| p.replace("decisions_", "trades_"))
+            .unwrap_or_else(|| "logs/trades_backtest.csv".to_string());
+        match crate::strategy::trades_log::TradesLogger::new(&trades_log_path, "backtest", self.config.initial_balance) {
+            Ok(logger) => {
+                info!("Trades logging enabled: {}", trades_log_path);
+                strategy = strategy.with_trades_logger(logger);
+            }
+            Err(e) => {
+                warn!("Failed to create trades logger at {}: {}", trades_log_path, e);
             }
         }
 

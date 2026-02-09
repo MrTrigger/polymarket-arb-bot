@@ -564,6 +564,12 @@ pub struct BacktestConfig {
     /// Minimum interval between orderbook snapshots per event (ms).
     /// Downsamples L2 data for faster backtesting. E.g. 1000 = 1 snapshot/sec.
     pub book_interval_ms: Option<u64>,
+
+    /// Simulated fill latency in milliseconds.
+    /// When > 0, orders are queued and filled against the orderbook state
+    /// after this delay (in simulated time), modeling live execution latency.
+    /// Default 0 = instant fills (current behavior).
+    pub fill_delay_ms: u64,
 }
 
 impl Default for BacktestConfig {
@@ -580,6 +586,7 @@ impl Default for BacktestConfig {
             decision_log_path: None,
             sweep_params: SweepConfig::default(),
             book_interval_ms: None,
+            fill_delay_ms: 0,
         }
     }
 }
@@ -1583,6 +1590,8 @@ struct BacktestToml {
     sweep: SweepToml,
     /// Minimum interval between orderbook snapshots per event (ms).
     book_interval_ms: Option<u64>,
+    /// Simulated fill latency in milliseconds (0 = instant).
+    fill_delay_ms: u64,
 }
 
 impl Default for BacktestToml {
@@ -1599,6 +1608,7 @@ impl Default for BacktestToml {
             decision_log_path: None,
             sweep: SweepToml::default(),
             book_interval_ms: None,
+            fill_delay_ms: 0,
         }
     }
 }
@@ -1948,6 +1958,7 @@ impl BotConfig {
                     edge_factors: toml.backtest.sweep.edge_factors,
                 },
                 book_interval_ms: toml.backtest.book_interval_ms,
+                fill_delay_ms: toml.backtest.fill_delay_ms,
             },
             live: LiveConfig {
                 auto_claim_interval: toml.live.auto_claim_interval,

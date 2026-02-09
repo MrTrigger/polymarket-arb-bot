@@ -41,6 +41,7 @@ pub mod signal;
 pub mod sizing;
 pub mod toxic;
 pub mod decision_log;
+pub mod trades_log;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -318,6 +319,10 @@ struct TrackedMarket {
     /// Minimum order size in shares (from CLOB API).
     /// For backtest, uses BACKTEST_MIN_ORDER_SIZE (5 shares).
     min_order_size: Decimal,
+    /// Last signal at time of most recent trade (for trades log).
+    last_signal: String,
+    /// Last confidence at time of most recent trade (for trades log).
+    last_confidence: Decimal,
 }
 
 impl TrackedMarket {
@@ -367,6 +372,8 @@ impl TrackedMarket {
             last_order_timestamp: None,
             position_manager: position::PositionManager::new(position_config),
             min_order_size,
+            last_signal: String::new(),
+            last_confidence: Decimal::ZERO,
         }
     }
 
@@ -664,6 +671,8 @@ pub struct StrategyLoop<D: DataSource, E: Executor> {
     order_manager_task: Option<tokio::task::JoinHandle<()>>,
     /// Decision logger for comparing live vs backtest behavior.
     decision_logger: Option<decision_log::DecisionLogger>,
+    /// Trades logger for recording all fills and settlements.
+    trades_logger: Option<trades_log::TradesLogger>,
     /// First event timestamp seen (for backtest reporting).
     first_event_time: Option<DateTime<Utc>>,
     /// Last event timestamp seen (for backtest reporting).
@@ -751,6 +760,7 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             order_update_rx: None,
             order_manager_task: None,
             decision_logger: None,
+            trades_logger: None,
             first_event_time: None,
             last_event_time: None,
             market_client: None,
@@ -784,6 +794,12 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
     /// Writes all trading decisions (skip and execute) to a CSV file.
     pub fn with_decision_logger(mut self, logger: decision_log::DecisionLogger) -> Self {
         self.decision_logger = Some(logger);
+        self
+    }
+
+    /// Enable trades logging for recording all fills and settlements.
+    pub fn with_trades_logger(mut self, logger: trades_log::TradesLogger) -> Self {
+        self.trades_logger = Some(logger);
         self
     }
 
@@ -1051,6 +1067,13 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
         // Update simulated time from event timestamp (for backtest mode)
         self.simulated_time = event.timestamp();
 
+        // Advance executor's simulated clock and process any deferred fills that have matured
+        self.executor.set_simulated_time(self.simulated_time);
+        let deferred_fills = self.executor.process_pending_fills().await;
+        for fill in deferred_fills {
+            self.handle_fill(fill).await?;
+        }
+
         // Track event time range for backtest reporting
         let ts = event.timestamp();
         if self.first_event_time.is_none() {
@@ -1121,8 +1144,8 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
         // Update local cache
         self.spot_prices.insert(event.asset, event.price);
 
-        // Record price for dynamic ATR calculation
-        self.atr_tracker.record_price(event.asset, event.price);
+        // Record price for dynamic ATR calculation (use event timestamp, not wall clock)
+        self.atr_tracker.record_price(event.asset, event.price, event.timestamp.timestamp_millis());
 
         // Update pivot tracker and regime detector with current ATR
         let current_atr = self.atr_tracker.get_atr(event.asset);
@@ -1421,6 +1444,22 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             let cost = event.size * event.price + event.fee;
             market.inventory.record_fill(event.outcome, event.size, cost);
 
+            // Log fill to trades log
+            if let Some(ref logger) = self.trades_logger {
+                let spot = self.spot_prices.get(&market.asset).copied().unwrap_or(Decimal::ZERO);
+                let outcome_str = match event.outcome { Outcome::Yes => "YES", Outcome::No => "NO" };
+                logger.log_fill(
+                    event.timestamp,
+                    &event.event_id, market.asset, outcome_str,
+                    event.size, event.price, event.fee, cost,
+                    market.strike_price, spot,
+                    &market.last_signal, market.last_confidence,
+                    self.executor.available_balance(),
+                    market.inventory.yes_shares, market.inventory.no_shares,
+                    market.inventory.yes_cost_basis + market.inventory.no_cost_basis,
+                );
+            }
+
             // CRITICAL: Update position manager budget to prevent over-trading.
             // Without this, fills via WebSocket don't reduce the budget, allowing
             // unlimited orders until the account is empty.
@@ -1570,6 +1609,11 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             let final_spot = self.spot_prices.get(&market.asset).copied().unwrap_or(Decimal::ZERO);
             let yes_wins = final_spot > market.strike_price;
             let asset = market.asset;
+            let strike_price = market.strike_price;
+            // Capture inventory before settle_market removes the position
+            let yes_shares = market.inventory.yes_shares;
+            let no_shares = market.inventory.no_shares;
+            let cost_basis = market.inventory.yes_cost_basis + market.inventory.no_cost_basis;
 
             let realized_pnl = self.executor.settle_market(&event.event_id, yes_wins).await;
 
@@ -1585,6 +1629,18 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                     final_spot = %final_spot,
                     realized_pnl = %realized_pnl,
                     "Market settled at window close"
+                );
+            }
+
+            // Log settlement to trades log
+            if let Some(ref logger) = self.trades_logger {
+                let payout = if yes_wins { yes_shares } else { no_shares };
+                logger.log_settlement(
+                    Utc::now(), &event.event_id, asset, yes_wins,
+                    strike_price, final_spot,
+                    yes_shares, no_shares, cost_basis,
+                    payout, realized_pnl,
+                    self.executor.available_balance(),
                 );
             }
         }
@@ -1609,8 +1665,9 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
     }
 
     /// Collect expired markets with settlement info.
-    /// Returns Vec of (event_id, yes_token_id, no_token_id, yes_wins, asset).
-    fn collect_expired_markets(&mut self, current_time: DateTime<Utc>) -> Vec<(String, String, String, bool, CryptoAsset)> {
+    /// Returns Vec of (event_id, yes_token_id, no_token_id, yes_wins, asset, strike, final_spot, yes_shares, no_shares, cost_basis).
+    #[allow(clippy::type_complexity)]
+    fn collect_expired_markets(&mut self, current_time: DateTime<Utc>) -> Vec<(String, String, String, bool, CryptoAsset, Decimal, Decimal, Decimal, Decimal, Decimal)> {
         let expired: Vec<_> = self.markets
             .iter()
             .filter(|(_, m)| m.is_expired(current_time))
@@ -1624,12 +1681,17 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                     m.no_token_id.clone(),
                     yes_wins,
                     m.asset,
+                    m.strike_price,
+                    final_spot,
+                    m.inventory.yes_shares,
+                    m.inventory.no_shares,
+                    m.inventory.yes_cost_basis + m.inventory.no_cost_basis,
                 )
             })
             .collect();
 
         // Remove expired markets from tracking
-        for (id, yes_token_id, no_token_id, _, _) in &expired {
+        for (id, yes_token_id, no_token_id, _, _, _, _, _, _, _) in &expired {
             self.markets.remove(id);
             self.token_to_event.remove(yes_token_id);
             self.token_to_event.remove(no_token_id);
@@ -1645,7 +1707,7 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
     async fn settle_expired_markets(&mut self) {
         let expired = self.collect_expired_markets(self.simulated_time);
 
-        for (event_id, _, _, yes_wins, asset) in expired {
+        for (event_id, _, _, yes_wins, asset, strike_price, final_spot, yes_shares, no_shares, cost_basis) in expired {
             let realized_pnl = self.executor.settle_market(&event_id, yes_wins).await;
 
             if realized_pnl != Decimal::ZERO {
@@ -1662,6 +1724,18 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                 );
             } else {
                 debug!("Removed expired market: {} (no position)", event_id);
+            }
+
+            // Log settlement to trades log
+            if let Some(ref logger) = self.trades_logger {
+                let payout = if yes_wins { yes_shares } else { no_shares };
+                logger.log_settlement(
+                    self.simulated_time, &event_id, asset, yes_wins,
+                    strike_price, final_spot,
+                    yes_shares, no_shares, cost_basis,
+                    payout, realized_pnl,
+                    self.executor.available_balance(),
+                );
             }
         }
     }
@@ -1932,15 +2006,13 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                         continue; // Silent skip - order already in flight
                     }
 
-                    // Cooldown check: don't spam orders (wait 2 seconds between attempts)
-                    // Skip cooldown for market orders - they fill immediately so no spam concern
-                    // Uses simulated time (window_end - seconds_remaining) to work in both live and backtest
-                    let is_market_mode = matches!(
-                        self.config.execution.execution_mode,
-                        crate::config::ExecutionMode::Market
-                    );
-                    if !is_market_mode {
-                        const ORDER_COOLDOWN_SECS: i64 = 2;
+                    // Cooldown check: don't spam orders (wait between attempts)
+                    // Uses simulated time (window_end - seconds_remaining) to work in both live and backtest.
+                    // Applied for ALL execution modes - in live, network latency naturally throttles,
+                    // but in backtest the simulated executor fills instantly, so without a cooldown
+                    // the backtest fires 20+ trades per event per phase (unrealistic).
+                    {
+                        const ORDER_COOLDOWN_SECS: i64 = 5;
                         let current_time = market.window_end - chrono::Duration::seconds(market.state.seconds_remaining);
                         if let Some(last_timestamp) = market.last_order_timestamp {
                             let elapsed = (current_time - last_timestamp).num_seconds();
@@ -2343,6 +2415,35 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                 market.inventory.record_fill(Outcome::No, no_filled_size, no_filled_cost);
             }
 
+            // Log fills to trades log
+            if let Some(ref logger) = self.trades_logger {
+                let spot = self.spot_prices.get(&market.asset).copied().unwrap_or(Decimal::ZERO);
+                let timestamp = market.window_end - chrono::Duration::seconds(market.state.seconds_remaining);
+                let balance = self.executor.available_balance();
+                if yes_filled_size > Decimal::ZERO {
+                    let price = if yes_filled_size > Decimal::ZERO { yes_filled_cost / yes_filled_size } else { Decimal::ZERO };
+                    logger.log_fill(
+                        timestamp, &opportunity.event_id, market.asset, "YES",
+                        yes_filled_size, price, Decimal::ZERO, yes_filled_cost,
+                        market.strike_price, spot,
+                        "arb", Decimal::ZERO, balance,
+                        market.inventory.yes_shares, market.inventory.no_shares,
+                        market.inventory.yes_cost_basis + market.inventory.no_cost_basis,
+                    );
+                }
+                if no_filled_size > Decimal::ZERO {
+                    let price = if no_filled_size > Decimal::ZERO { no_filled_cost / no_filled_size } else { Decimal::ZERO };
+                    logger.log_fill(
+                        timestamp, &opportunity.event_id, market.asset, "NO",
+                        no_filled_size, price, Decimal::ZERO, no_filled_cost,
+                        market.strike_price, spot,
+                        "arb", Decimal::ZERO, balance,
+                        market.inventory.yes_shares, market.inventory.no_shares,
+                        market.inventory.yes_cost_basis + market.inventory.no_cost_basis,
+                    );
+                }
+            }
+
             // Update global state inventory for sizing calculations
             let pos = crate::state::InventoryPosition {
                 event_id: opportunity.event_id.clone(),
@@ -2415,6 +2516,9 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             let current_time = market.window_end - chrono::Duration::seconds(market.state.seconds_remaining);
             market.last_order_timestamp = Some(current_time);
             market.reserve_budget(total_size, seconds_remaining);
+            // Store signal/confidence for trades log
+            market.last_signal = format!("{:?}", opportunity.signal);
+            market.last_confidence = opportunity.confidence.total_multiplier();
         }
 
         // Get the tracked market data (only what we need, no stale orderbook clones)
@@ -2964,6 +3068,35 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                 market.inventory.record_fill(Outcome::No, down_filled_size, down_filled_cost);
             }
 
+            // Log fills to trades log
+            if let Some(ref logger) = self.trades_logger {
+                let spot = self.spot_prices.get(&market.asset).copied().unwrap_or(Decimal::ZERO);
+                let timestamp = market.window_end - chrono::Duration::seconds(market.state.seconds_remaining);
+                let balance = self.executor.available_balance();
+                if up_filled_size > Decimal::ZERO {
+                    let price = if up_filled_size > Decimal::ZERO { up_filled_cost / up_filled_size } else { Decimal::ZERO };
+                    logger.log_fill(
+                        timestamp, &event_id, market.asset, "YES",
+                        up_filled_size, price, Decimal::ZERO, up_filled_cost,
+                        market.strike_price, spot,
+                        &market.last_signal, market.last_confidence, balance,
+                        market.inventory.yes_shares, market.inventory.no_shares,
+                        market.inventory.yes_cost_basis + market.inventory.no_cost_basis,
+                    );
+                }
+                if down_filled_size > Decimal::ZERO {
+                    let price = if down_filled_size > Decimal::ZERO { down_filled_cost / down_filled_size } else { Decimal::ZERO };
+                    logger.log_fill(
+                        timestamp, &event_id, market.asset, "NO",
+                        down_filled_size, price, Decimal::ZERO, down_filled_cost,
+                        market.strike_price, spot,
+                        &market.last_signal, market.last_confidence, balance,
+                        market.inventory.yes_shares, market.inventory.no_shares,
+                        market.inventory.yes_cost_basis + market.inventory.no_cost_basis,
+                    );
+                }
+            }
+
             // Update global state inventory for sizing calculations
             let pos = crate::state::InventoryPosition {
                 event_id: event_id.clone(),
@@ -3412,6 +3545,14 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
     /// Shutdown the strategy loop.
     pub async fn shutdown(&mut self) {
         info!("Shutting down strategy loop");
+
+        // Write session summary before shutting down
+        if let Some(ref logger) = self.trades_logger {
+            let start = self.first_event_time.unwrap_or_else(Utc::now);
+            let end = self.last_event_time.unwrap_or_else(Utc::now);
+            logger.write_session_summary(start, end);
+        }
+
         self.data_source.shutdown().await;
         self.executor.shutdown().await;
     }

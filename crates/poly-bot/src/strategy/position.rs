@@ -183,6 +183,7 @@ impl PositionConfig {
 /// This prevents infinite retries when orders consistently fail to fill.
 pub const MAX_FAILED_ATTEMPTS_PER_PHASE: u32 = 3;
 
+
 /// Reason for skipping a trade.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SkipReason {
@@ -489,6 +490,8 @@ impl PositionManager {
         if failed_attempts >= MAX_FAILED_ATTEMPTS_PER_PHASE {
             return TradeDecision::Skip(SkipReason::TooManyFailedAttempts);
         }
+
+
 
         // 5. Calculate size
         let size = self.calculate_size(phase_remaining, total_remaining, confidence);

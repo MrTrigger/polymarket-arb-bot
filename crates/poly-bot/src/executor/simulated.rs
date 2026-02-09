@@ -30,6 +30,7 @@ use tracing::{debug, info, trace, warn};
 
 use poly_common::types::Side;
 
+use crate::data_source::FillEvent;
 use crate::types::{OrderBook, PriceLevel};
 
 use super::position_manager::{LimitCheckResult, PositionManager, RiskConfig};
@@ -399,6 +400,19 @@ impl SimulatedStats {
     }
 }
 
+/// A deferred order waiting for simulated latency to elapse before filling.
+#[derive(Debug, Clone)]
+struct DeferredOrder {
+    /// The original order request.
+    request: OrderRequest,
+    /// Assigned order ID.
+    order_id: String,
+    /// Simulated time at which this order becomes eligible for fill.
+    fill_after: DateTime<Utc>,
+    /// Balance reserved at submission time (size × price) to prevent double-spending.
+    reserved_balance: Decimal,
+}
+
 /// Unified simulated executor for paper trading and backtesting.
 pub struct SimulatedExecutor {
     config: SimulatedExecutorConfig,
@@ -416,6 +430,8 @@ pub struct SimulatedExecutor {
     market_prices: Arc<RwLock<HashMap<String, Decimal>>>,
     /// Execution statistics.
     stats: SimulatedStats,
+    /// Orders deferred by simulated latency, waiting to be filled.
+    deferred_orders: Vec<DeferredOrder>,
 }
 
 impl SimulatedExecutor {
@@ -455,6 +471,7 @@ impl SimulatedExecutor {
             order_books: Arc::new(RwLock::new(HashMap::new())),
             market_prices: Arc::new(RwLock::new(HashMap::new())),
             stats,
+            deferred_orders: Vec::new(),
         }
     }
 
@@ -590,7 +607,42 @@ impl SimulatedExecutor {
             }
         }
 
-        // Apply latency
+        // Deferred fill path: queue order for later fill when using simulated time with latency
+        if matches!(self.config.time_source, TimeSource::Simulated) && self.config.latency_ms > 0 {
+            let reserved = order.max_cost();
+            if order.side == Side::Buy {
+                self.balance -= reserved;
+            }
+            let order_id = self.generate_order_id();
+            let fill_after = current_time
+                + chrono::Duration::milliseconds(self.config.latency_ms as i64);
+
+            debug!(
+                order_id = %order_id,
+                event_id = %order.event_id,
+                fill_after = %fill_after,
+                reserved = %reserved,
+                "Order deferred by {}ms simulated latency",
+                self.config.latency_ms
+            );
+
+            let pending = super::PendingOrder {
+                request_id: order.request_id.clone(),
+                order_id: order_id.clone(),
+                timestamp: current_time,
+            };
+
+            self.deferred_orders.push(DeferredOrder {
+                request: order.clone(),
+                order_id: order_id.clone(),
+                fill_after,
+                reserved_balance: reserved,
+            });
+
+            return Ok(OrderResult::Pending(pending));
+        }
+
+        // Apply latency (real-time delay for paper trading)
         if matches!(self.config.latency_mode, LatencyMode::RealDelay) && self.config.latency_ms > 0
         {
             tokio::time::sleep(tokio::time::Duration::from_millis(self.config.latency_ms)).await;
@@ -930,6 +982,114 @@ impl SimulatedExecutor {
 
         realized_pnl
     }
+
+    /// Process deferred orders whose latency has elapsed.
+    ///
+    /// Drains mature orders from the deferred queue, refunds the balance reservation,
+    /// then attempts to fill against the current orderbook state. Returns FillEvents
+    /// for successfully filled orders (to be routed through handle_fill).
+    async fn process_deferred_fills(&mut self) -> Vec<FillEvent> {
+        if self.deferred_orders.is_empty() {
+            return vec![];
+        }
+
+        let current_time = self.simulated_time;
+
+        // Partition into mature and still-waiting
+        let (mature, remaining): (Vec<_>, Vec<_>) = self
+            .deferred_orders
+            .drain(..)
+            .partition(|d| current_time >= d.fill_after);
+
+        self.deferred_orders = remaining;
+
+        let mut fill_events = Vec::new();
+
+        for deferred in mature {
+            // Refund the reserved balance first
+            if deferred.request.side == Side::Buy {
+                self.balance += deferred.reserved_balance;
+            }
+
+            // Try to fill against current orderbook
+            let order = &deferred.request;
+            let fill_result = match self.config.fill_mode {
+                FillMode::Simple => self.simulate_simple_fill(order, current_time).await,
+                FillMode::OrderBook => self.simulate_orderbook_fill(order, current_time).await,
+            };
+
+            match fill_result {
+                Ok(OrderResult::Filled(fill)) => {
+                    debug!(
+                        order_id = %deferred.order_id,
+                        event_id = %order.event_id,
+                        size = %fill.size,
+                        price = %fill.price,
+                        "Deferred order filled after {}ms latency",
+                        self.config.latency_ms
+                    );
+                    fill_events.push(FillEvent {
+                        event_id: order.event_id.clone(),
+                        token_id: order.token_id.clone(),
+                        outcome: order.outcome,
+                        order_id: deferred.order_id,
+                        side: order.side,
+                        size: fill.size,
+                        price: fill.price,
+                        fee: fill.fee,
+                        timestamp: current_time,
+                    });
+                }
+                Ok(OrderResult::PartialFill(fill)) => {
+                    debug!(
+                        order_id = %deferred.order_id,
+                        event_id = %order.event_id,
+                        filled = %fill.filled_size,
+                        requested = %fill.requested_size,
+                        "Deferred order partially filled after {}ms latency",
+                        self.config.latency_ms
+                    );
+                    fill_events.push(FillEvent {
+                        event_id: order.event_id.clone(),
+                        token_id: order.token_id.clone(),
+                        outcome: order.outcome,
+                        order_id: deferred.order_id,
+                        side: order.side,
+                        size: fill.filled_size,
+                        price: fill.avg_price,
+                        fee: fill.fee,
+                        timestamp: current_time,
+                    });
+                }
+                Ok(OrderResult::Rejected(rejection)) => {
+                    warn!(
+                        order_id = %deferred.order_id,
+                        event_id = %order.event_id,
+                        reason = %rejection.reason,
+                        "Deferred order rejected at fill time (liquidity changed)"
+                    );
+                    // Balance already refunded above, stats already updated by simulate_*_fill
+                }
+                Ok(OrderResult::Pending(_) | OrderResult::Cancelled(_)) => {
+                    // Should not happen from simulate_*_fill, but handle gracefully
+                    warn!(
+                        order_id = %deferred.order_id,
+                        "Unexpected result from deferred fill simulation"
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        order_id = %deferred.order_id,
+                        error = %e,
+                        "Error filling deferred order"
+                    );
+                    // Balance already refunded
+                }
+            }
+        }
+
+        fill_events
+    }
 }
 
 #[async_trait]
@@ -1027,6 +1187,14 @@ impl Executor for SimulatedExecutor {
 
     async fn settle_market(&mut self, event_id: &str, yes_wins: bool) -> Decimal {
         self.settle_position(event_id, yes_wins)
+    }
+
+    fn set_simulated_time(&mut self, time: DateTime<Utc>) {
+        self.set_time(time);
+    }
+
+    async fn process_pending_fills(&mut self) -> Vec<FillEvent> {
+        self.process_deferred_fills().await
     }
 
     async fn update_order_book(

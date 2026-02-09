@@ -113,7 +113,12 @@ auto_claim_interval = 15
 #end_date = "2026-01-27"
 
 # Directory containing CSV data files
-data_dir = "data/live_test"
+data_dir = "analysis/session_2026-02-09T12-19"
+
+# Simulated fill latency in milliseconds.
+# Models live execution delay: orders fill against the orderbook state
+# after this delay in simulated time. 0 = instant fills (default).
+fill_delay_ms = 500
 
 # Decision log path for comparing live vs backtest behavior
 # Logs all skip/execute decisions with full input state to CSV

@@ -378,6 +378,19 @@ impl LiveMode {
             }
         }
 
+        // Always enable trades logging
+        let trades_log_path = std::env::var("TRADES_LOG_PATH")
+            .unwrap_or_else(|_| "logs/trades_live.csv".to_string());
+        match crate::strategy::trades_log::TradesLogger::new(&trades_log_path, "live", self.config.initial_balance) {
+            Ok(logger) => {
+                info!("Trades logging enabled: {}", trades_log_path);
+                strategy = strategy.with_trades_logger(logger);
+            }
+            Err(e) => {
+                warn!("Failed to create trades logger at {}: {}", trades_log_path, e);
+            }
+        }
+
         // Warm up ATR tracker with recent historical prices using shared function
         common::warmup_atr(&mut strategy, &self.config.discovery.assets).await;
 

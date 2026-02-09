@@ -521,6 +521,20 @@ pub trait Executor: Send + Sync {
         Decimal::ZERO
     }
 
+    /// Set the current simulated time (for deferred fill processing).
+    ///
+    /// Only meaningful for backtest executors with deferred fills.
+    /// Default implementation is a no-op.
+    fn set_simulated_time(&mut self, _time: DateTime<Utc>) {}
+
+    /// Process any deferred orders that have matured (simulated_time >= submit_time + delay).
+    ///
+    /// Returns fill events for orders that were filled against the current orderbook state.
+    /// Default implementation returns an empty vec (no deferred fills).
+    async fn process_pending_fills(&mut self) -> Vec<crate::data_source::FillEvent> {
+        vec![]
+    }
+
     /// Shutdown the executor gracefully.
     async fn shutdown(&mut self);
 
