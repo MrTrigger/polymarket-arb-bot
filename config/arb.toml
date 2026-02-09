@@ -1,0 +1,80 @@
+# Polymarket Bot Config - ARBITRAGE ENGINE ONLY
+# ===============================================
+#
+# Arb-only backtest using full 100ms orderbook data.
+# Symlink polymarket_orderbook_snapshots_100ms.csv -> polymarket_orderbook_snapshots.csv
+#
+# Usage:
+#   cargo run -p poly-bot --release -- --config config/arb.toml --mode backtest
+
+[general]
+mode = "backtest"
+assets = ["BTC", "ETH", "SOL", "XRP"]
+window_duration = "15min"
+console_log_level = "warn"
+file_log_level = "info"
+
+[trading]
+max_market_exposure = 250.0
+max_total_exposure = 1000.0
+base_order_size = 10.0
+available_balance = 1000.0
+
+early_threshold_secs = 300
+mid_threshold_secs = 120
+min_time_remaining_secs = 30
+
+# Low margins — zero fees mode
+min_margin_early_pct = 1.0
+min_margin_mid_pct = 0.5
+min_margin_late_pct = 0.25
+
+[risk]
+max_daily_loss = 200.0
+emergency_close_threshold = 0.15
+risk_mode = "directional"
+max_consecutive_failures = 3
+circuit_breaker_cooldown_secs = 300
+
+[execution]
+execution_mode = "market"
+chase_enabled = true
+chase_step_size = 0.01
+chase_check_interval_ms = 500
+max_chase_time_ms = 5000
+
+[engines]
+priority = ["arbitrage"]
+
+[engines.arbitrage]
+enabled = true
+# Lower thresholds since zero_fees — no fee drag to overcome
+min_margin_early_bps = 100    # 1.0%
+min_margin_mid_bps = 50       # 0.5%
+min_margin_late_bps = 25      # 0.25%
+
+[engines.directional]
+enabled = false
+
+[engines.maker]
+enabled = false
+
+[backtest]
+data_dir = "data/live_test"
+speed = 0.0
+# duration = "3h"  # disabled — run full dataset
+zero_fees = true
+
+[backtest.trading]
+available_balance = 1000.0
+max_market_exposure = 250.0
+max_total_exposure = 1000.0
+base_order_size = 10.0
+
+[observability]
+capture_decisions = true
+capture_counterfactuals = true
+detect_anomalies = true
+
+[dashboard]
+enabled = false
