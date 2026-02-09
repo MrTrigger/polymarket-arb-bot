@@ -56,6 +56,21 @@ impl OutputMode {
             OutputMode::ClickHouse => None,
         }
     }
+
+    /// Returns a new OutputMode with a timestamped subfolder for live collection.
+    /// e.g. `data/` -> `data/live_2026-02-09T14-30-00/`
+    pub fn with_live_subfolder(&self) -> Self {
+        let subfolder = format!("live_{}", Utc::now().format("%Y-%m-%dT%H-%M-%S"));
+        match self {
+            OutputMode::Csv { output_dir } => OutputMode::Csv {
+                output_dir: output_dir.join(&subfolder),
+            },
+            OutputMode::Both { output_dir } => OutputMode::Both {
+                output_dir: output_dir.join(&subfolder),
+            },
+            OutputMode::ClickHouse => OutputMode::ClickHouse,
+        }
+    }
 }
 
 use crate::binance::BinanceConfig;

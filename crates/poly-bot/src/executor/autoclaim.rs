@@ -248,18 +248,26 @@ impl AutoClaimManager {
 
         // Try BOTH indexSets separately (user may hold YES, NO, or both from hedging)
         // indexSet 1 = YES outcome, indexSet 2 = NO outcome
+        // Delay between YES and NO to avoid Polygon RPC rate limits
         let mut any_success = false;
         let mut last_tx_hash = String::new();
         let mut last_block = 0u64;
+        const INTER_OUTCOME_DELAY: Duration = Duration::from_secs(12);
 
-        for index_set in [1u64, 2u64] {
-            let outcome_name = if index_set == 1 { "YES" } else { "NO" };
+        for (i, index_set) in [1u64, 2u64].iter().enumerate() {
+            let outcome_name = if *index_set == 1 { "YES" } else { "NO" };
+
+            // Delay before second outcome to avoid rate limiting
+            if i > 0 {
+                debug!("Waiting {}s before {} redemption to avoid rate limiting", INTER_OUTCOME_DELAY.as_secs(), outcome_name);
+                sleep(INTER_OUTCOME_DELAY).await;
+            }
 
             let redeem_call = ConditionalTokens::redeemPositionsCall {
                 collateralToken: self.usdc_address,
                 parentCollectionId: B256::ZERO,
                 conditionId: condition_id,
-                indexSets: vec![U256::from(index_set)],
+                indexSets: vec![U256::from(*index_set)],
             };
             let redeem_calldata = redeem_call.abi_encode();
 
@@ -306,9 +314,12 @@ impl AutoClaimManager {
                                 "Transaction reverted (no {} tokens held)",
                                 outcome_name
                             );
+                            // Reverted tx is fine - means no tokens on this side
+                            // Still count as "handled" so we don't keep retrying
+                            any_success = true;
                         }
                         Err(e) => {
-                            debug!(
+                            warn!(
                                 condition_id = %condition_id_str,
                                 outcome = outcome_name,
                                 error = %e,
@@ -319,7 +330,7 @@ impl AutoClaimManager {
                     }
                 }
                 Err(e) => {
-                    debug!(
+                    warn!(
                         condition_id = %condition_id_str,
                         outcome = outcome_name,
                         error = %e,
@@ -360,18 +371,23 @@ impl AutoClaimManager {
             }
         };
 
-        // Filter to only winning positions (cur_price > 0)
-        // Losing positions have cur_price = 0 and redeeming them wastes gas
-        let positions: Vec<_> = all_positions
-            .into_iter()
-            .filter(|p| p.cur_price > Decimal::ZERO)
-            .collect();
-
-        let total_redeemable = positions.len();
-        if positions.is_empty() {
-            debug!("No winning positions to redeem");
+        if all_positions.is_empty() {
+            info!("Auto-claim check: no redeemable positions found");
             return Vec::new();
         }
+
+        // Redeem all positions - both winning (cur_price > 0) and losing (cur_price = 0).
+        // Losing positions hold tokens that should be redeemed to clean up state.
+        // The CTF contract handles both cases; Polygon gas is negligible.
+        let positions = all_positions;
+        let total_redeemable = positions.len();
+        let winning: Vec<_> = positions.iter().filter(|p| p.cur_price > Decimal::ZERO).collect();
+        info!(
+            total = total_redeemable,
+            winning = winning.len(),
+            losing = total_redeemable - winning.len(),
+            "Auto-claim check: found redeemable positions"
+        );
 
         let estimated_time_secs = if positions.len() > 1 {
             (positions.len() - 1) as u64 * 12 // 12s delay between each

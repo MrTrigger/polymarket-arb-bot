@@ -117,7 +117,7 @@ data_dir = "data/live_test"
 
 # Decision log path for comparing live vs backtest behavior
 # Logs all skip/execute decisions with full input state to CSV
-#decision_log_path = "decisions_backtest.csv"
+decision_log_path = "logs/decisions_backtest.csv"
 
 # Backtest-specific trading overrides
 # Use different params for backtesting vs live

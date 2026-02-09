@@ -140,8 +140,9 @@ async fn main() -> Result<()> {
     match config.mode {
         CollectionMode::History => run_history_mode(&config, clickhouse).await,
         CollectionMode::Live => {
-            // Create DataWriter for live mode (no collection params)
-            let writer = Arc::new(DataWriter::new(&config.output, clickhouse.clone())?);
+            // Create DataWriter for live mode with timestamped subfolder
+            let output = config.output.with_live_subfolder();
+            let writer = Arc::new(DataWriter::new(&output, clickhouse.clone())?);
             if let Some(dir) = writer.csv_dir() {
                 info!("CSV output directory: {:?}", dir);
             }

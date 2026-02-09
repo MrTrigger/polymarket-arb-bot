@@ -630,9 +630,12 @@ fn spawn_autoclaim_task(
         // Run immediately on startup, then every interval
         let mut interval_timer = tokio::time::interval(interval);
 
+        let mut cycle_count = 0u64;
         loop {
             tokio::select! {
                 _ = interval_timer.tick() => {
+                    cycle_count += 1;
+                    info!(cycle = cycle_count, "Auto-claim: checking for redeemable positions...");
                     // Query API for redeemable positions and claim them
                     let results = autoclaim.claim_all_redeemable().await;
 

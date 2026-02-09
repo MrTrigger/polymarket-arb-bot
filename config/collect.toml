@@ -34,7 +34,7 @@ days = 1                          # Alternative: collect last N days
 
 [output]
 mode = "both"                     # clickhouse, csv, or both
-csv_dir = "data/live_test"        # Directory for CSV output
+csv_dir = "data"                  # Base directory for CSV output (live mode adds timestamped subfolder)
 
 # ============================================================================
 # DEFAULTS (rarely need to change)
