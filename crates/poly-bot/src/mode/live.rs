@@ -114,7 +114,8 @@ impl LiveModeConfig {
             data_source: LiveDataSourceConfig::default(),
             executor: LiveExecutorConfig::from_execution_config(&config.execution),
             strategy: StrategyConfig::from_trading_config(&config.trading, (config.window_duration.minutes() * 60) as i64)
-                .with_execution(config.execution.clone()),
+                .with_execution(config.execution.clone())
+                .with_oracle(&config.oracle),
             observability: config.observability.clone(),
             engines: config.engines.clone(),
             discovery: discovery_config,

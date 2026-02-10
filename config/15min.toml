@@ -14,7 +14,7 @@ mode = "live"
 assets = ["BTC", "ETH", "SOL", "XRP"]
 window_duration = "15min"
 console_log_level = "warn"
-file_log_level = "debug"
+file_log_level = "info"
 
 [trading]
 max_market_exposure = 250.0
@@ -31,9 +31,9 @@ mid_threshold_secs = 120
 min_time_remaining_secs = 30
 
 # HIGHER MARGINS - MUST BEAT ~2-3% TAKER FEES
-min_margin_early_pct = 4.0    # 4.0% for early phase
-min_margin_mid_pct = 3.0      # 3.0% for mid phase
-min_margin_late_pct = 2.0     # 2.0% for late phase (still above fees)
+min_margin_early_pct = 4.0 # 4.0% for early phase
+min_margin_mid_pct = 3.0   # 3.0% for mid phase
+min_margin_late_pct = 2.0  # 2.0% for late phase (still above fees)
 
 [risk]
 max_daily_loss = 200.0
@@ -56,9 +56,9 @@ priority = ["directional", "arbitrage", "maker"]
 [engines.arbitrage]
 # Usually not viable due to fees eating margins
 enabled = false
-min_margin_early_bps = 400    # 4.0% - need high edge
-min_margin_mid_bps = 300      # 3.0%
-min_margin_late_bps = 200     # 2.0%
+min_margin_early_bps = 400 # 4.0% - need high edge
+min_margin_mid_bps = 300   # 3.0%
+min_margin_late_bps = 200  # 2.0%
 
 [engines.directional]
 enabled = true
@@ -72,9 +72,9 @@ lean_threshold_late_bps = 6
 
 # Optimal values from sweep (20h L2 data, Jan 26-27)
 # Best risk-adjusted: 160.5% return / 23.9% DD / Ret/DD ratio 6.7x
-max_edge_factor = 0.03
+max_edge_factor = 0.04
 time_conf_floor = 0.20
-dist_conf_per_atr = 0.60
+dist_conf_per_atr = 0.50
 
 [engines.maker]
 # Market making can work since makers earn rebates
@@ -101,6 +101,12 @@ base_order_size = 10.0
 edge_factors = [0.01, 0.03, 0.05]
 time_conf_floors = [0.20]
 dist_conf_per_atrs = [0.40, 0.60, 0.80]
+
+[oracle]
+chainlink_stale_threshold_secs = 30
+binance_lead_enabled = true
+lead_confirm_boost = 0.15
+lead_oppose_cut = 0.25
 
 [observability]
 capture_decisions = true

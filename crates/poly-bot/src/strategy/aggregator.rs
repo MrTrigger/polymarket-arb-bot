@@ -368,6 +368,7 @@ mod tests {
             combined_cost: dec!(0.98),
             yes_imbalance: dec!(0),
             no_imbalance: dec!(0),
+            binance_lead: None,
             detected_at_ms: 0,
         }
     }

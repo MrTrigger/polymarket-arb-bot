@@ -81,6 +81,9 @@ pub enum MarketEvent {
     /// Market window expired.
     WindowClose(WindowCloseEvent),
 
+    /// Chainlink oracle price update from Polymarket RTDS.
+    ChainlinkPrice(ChainlinkPriceEvent),
+
     /// Heartbeat for connection liveness.
     Heartbeat(DateTime<Utc>),
 }
@@ -96,6 +99,7 @@ impl MarketEvent {
             MarketEvent::Fill(e) => e.timestamp,
             MarketEvent::WindowOpen(e) => e.timestamp,
             MarketEvent::WindowClose(e) => e.timestamp,
+            MarketEvent::ChainlinkPrice(e) => e.timestamp,
             MarketEvent::Heartbeat(ts) => *ts,
         }
     }
@@ -126,6 +130,9 @@ impl fmt::Display for MarketEvent {
                 write!(f, "WindowOpen({} {} strike={})", e.event_id, e.asset, e.strike_price)
             }
             MarketEvent::WindowClose(e) => write!(f, "WindowClose({})", e.event_id),
+            MarketEvent::ChainlinkPrice(e) => {
+                write!(f, "ChainlinkPrice({} @ {})", e.asset, e.price)
+            }
             MarketEvent::Heartbeat(ts) => write!(f, "Heartbeat({})", ts),
         }
     }
@@ -140,6 +147,17 @@ pub struct SpotPriceEvent {
     pub price: Decimal,
     /// Trade quantity (for volume tracking).
     pub quantity: Decimal,
+    /// Event timestamp.
+    pub timestamp: DateTime<Utc>,
+}
+
+/// Chainlink oracle price update from Polymarket RTDS WebSocket.
+#[derive(Debug, Clone)]
+pub struct ChainlinkPriceEvent {
+    /// The cryptocurrency asset.
+    pub asset: CryptoAsset,
+    /// Current Chainlink oracle price in USD.
+    pub price: Decimal,
     /// Event timestamp.
     pub timestamp: DateTime<Utc>,
 }

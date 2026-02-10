@@ -20,8 +20,8 @@ use tracing::{debug, info, warn};
 use poly_common::types::CryptoAsset;
 
 use super::{
-    BookSnapshotEvent, BookSnapshotPairEvent, DataSource, DataSourceError, MarketEvent,
-    SpotPriceEvent, WindowCloseEvent, WindowOpenEvent,
+    BookSnapshotEvent, BookSnapshotPairEvent, ChainlinkPriceEvent, DataSource, DataSourceError,
+    MarketEvent, SpotPriceEvent, WindowCloseEvent, WindowOpenEvent,
 };
 use crate::types::PriceLevel;
 
@@ -106,6 +106,14 @@ struct PriceHistoryRow {
     price: Decimal,
 }
 
+/// CSV row for Chainlink oracle prices.
+#[derive(Debug, Clone, Deserialize)]
+struct ChainlinkPriceRow {
+    timestamp_ms: i64,
+    asset: String,
+    price: String,
+}
+
 /// CSV row for aligned price pairs (new format with arb sanity check).
 #[derive(Debug, Clone, Deserialize)]
 struct AlignedPriceRow {
@@ -157,6 +165,7 @@ fn event_priority(event: &MarketEvent) -> u8 {
     match event {
         MarketEvent::WindowOpen(_) => 0,
         MarketEvent::SpotPrice(_) => 1,
+        MarketEvent::ChainlinkPrice(_) => 1,
         MarketEvent::BookSnapshot(_) | MarketEvent::BookSnapshotPair(_) => 1,
         MarketEvent::BookDelta(_) => 1,
         MarketEvent::Fill(_) => 1,
@@ -348,6 +357,61 @@ impl OrderbookSource {
 
 }
 
+/// Chainlink oracle prices: streamed row-by-row from CSV (optional).
+struct ChainlinkPriceSource {
+    reader: csv::DeserializeRecordsIntoIter<BufReader<File>, ChainlinkPriceRow>,
+    config_assets: Vec<CryptoAsset>,
+    start_time: Option<DateTime<Utc>>,
+    end_time: Option<DateTime<Utc>>,
+    exhausted: bool,
+}
+
+impl ChainlinkPriceSource {
+    fn next_event(&mut self) -> Option<MarketEvent> {
+        if self.exhausted {
+            return None;
+        }
+        loop {
+            match self.reader.next() {
+                Some(Ok(row)) => {
+                    let asset = match parse_asset(&row.asset) {
+                        Some(a) => a,
+                        None => continue,
+                    };
+                    if !self.config_assets.is_empty() && !self.config_assets.contains(&asset) {
+                        continue;
+                    }
+                    let timestamp = match chrono::DateTime::from_timestamp_millis(row.timestamp_ms) {
+                        Some(ts) => ts,
+                        None => continue,
+                    };
+                    if let Some(start) = self.start_time
+                        && timestamp < start { continue; }
+                    if let Some(end) = self.end_time
+                        && timestamp > end { continue; }
+                    let price = match row.price.parse::<Decimal>() {
+                        Ok(p) => p,
+                        Err(_) => continue,
+                    };
+                    return Some(MarketEvent::ChainlinkPrice(ChainlinkPriceEvent {
+                        asset,
+                        price,
+                        timestamp,
+                    }));
+                }
+                Some(Err(e)) => {
+                    warn!("Chainlink price CSV parse error (skipping row): {}", e);
+                    continue;
+                }
+                None => {
+                    self.exhausted = true;
+                    return None;
+                }
+            }
+        }
+    }
+}
+
 /// Aligned prices: streamed row-by-row (already paired YES/NO in CSV).
 struct AlignedPriceSource {
     reader: csv::DeserializeRecordsIntoIter<BufReader<File>, AlignedPriceRow>,
@@ -477,6 +541,7 @@ fn make_aligned_pair_event(row: AlignedPriceRow) -> MarketEvent {
 const SOURCE_WINDOWS: usize = 0;
 const SOURCE_SPOT: usize = 1;
 const SOURCE_BOOK: usize = 2; // orderbook snapshots OR aligned prices
+const SOURCE_CHAINLINK: usize = 3; // optional Chainlink oracle prices
 
 /// CSV-based replay data source.
 ///
@@ -484,11 +549,12 @@ const SOURCE_BOOK: usize = 2; // orderbook snapshots OR aligned prices
 /// of dataset size.
 pub struct CsvReplayDataSource {
     config: CsvReplayConfig,
-    /// Streaming sources (up to 3: windows, spot prices, book data).
+    /// Streaming sources (up to 4: windows, spot prices, book data, chainlink prices).
     window_source: Option<WindowSource>,
     spot_source: Option<SpotPriceSource>,
     book_source: Option<BookSource>,
-    /// Tiny merge heap (at most 3 entries, one per source).
+    chainlink_source: Option<ChainlinkPriceSource>,
+    /// Tiny merge heap (at most 4 entries, one per source).
     merge_heap: BinaryHeap<MergeEntry>,
     /// Current replay time.
     current_time: Option<DateTime<Utc>>,
@@ -528,7 +594,8 @@ impl CsvReplayDataSource {
             window_source: None,
             spot_source: None,
             book_source: None,
-            merge_heap: BinaryHeap::with_capacity(4),
+            chainlink_source: None,
+            merge_heap: BinaryHeap::with_capacity(5),
             current_time: None,
             initialized: false,
             is_exhausted: false,
@@ -625,10 +692,30 @@ impl CsvReplayDataSource {
             debug!("No book data files found (orderbook snapshots or aligned prices)");
         }
 
-        // 4. Prime the merge heap: get first event from each source
+        // 4. Open Chainlink prices CSV reader (optional, streaming)
+        let chainlink_path = data_dir.join("chainlink_prices.csv");
+        if chainlink_path.exists() {
+            let file = File::open(&chainlink_path)
+                .map_err(|e| DataSourceError::Parse(format!("Failed to open {:?}: {}", chainlink_path, e)))?;
+            let buf_reader = BufReader::with_capacity(64 * 1024, file);
+            let reader = csv::Reader::from_reader(buf_reader);
+            self.chainlink_source = Some(ChainlinkPriceSource {
+                reader: reader.into_deserialize(),
+                config_assets: self.config.assets.clone(),
+                start_time: self.config.start_time,
+                end_time: self.config.end_time,
+                exhausted: false,
+            });
+            info!("Chainlink prices CSV found, will replay oracle prices");
+        } else {
+            debug!("No chainlink_prices.csv found (Binance-only mode)");
+        }
+
+        // 5. Prime the merge heap: get first event from each source
         self.prime_source(SOURCE_WINDOWS);
         self.prime_source(SOURCE_SPOT);
         self.prime_source(SOURCE_BOOK);
+        self.prime_source(SOURCE_CHAINLINK);
 
         self.initialized = true;
         info!("Streaming CSV replay initialized (merge heap size: {})", self.merge_heap.len());
@@ -642,6 +729,7 @@ impl CsvReplayDataSource {
             SOURCE_WINDOWS => self.window_source.as_mut().and_then(|s| s.next_event()),
             SOURCE_SPOT => self.spot_source.as_mut().and_then(|s| s.next_event()),
             SOURCE_BOOK => self.book_source.as_mut().and_then(|s| s.next_event()),
+            SOURCE_CHAINLINK => self.chainlink_source.as_mut().and_then(|s| s.next_event()),
             _ => None,
         };
 
@@ -659,6 +747,7 @@ impl CsvReplayDataSource {
                 SOURCE_WINDOWS => "windows",
                 SOURCE_SPOT => "spot",
                 SOURCE_BOOK => "book",
+                SOURCE_CHAINLINK => "chainlink",
                 _ => "unknown",
             };
             eprintln!("  [CSV] Source '{}' exhausted (heap size: {})", source_name, self.merge_heap.len());
@@ -759,6 +848,7 @@ impl DataSource for CsvReplayDataSource {
         self.window_source = None;
         self.spot_source = None;
         self.book_source = None;
+        self.chainlink_source = None;
     }
 }
 

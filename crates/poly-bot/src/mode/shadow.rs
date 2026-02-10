@@ -80,7 +80,8 @@ impl ShadowModeConfig {
             data_source: LiveDataSourceConfig::default(),
             executor: executor_config,
             strategy: StrategyConfig::from_trading_config(&config.trading, (config.window_duration.minutes() * 60) as i64)
-                .with_execution(config.execution.clone()),
+                .with_execution(config.execution.clone())
+                .with_oracle(&config.oracle),
             observability: config.observability.clone(),
             virtual_balance: Decimal::new(10000, 0),
             shutdown_timeout_secs: 30,
@@ -183,12 +184,12 @@ impl ShadowMode {
         let (capture, obs_tasks) = self.setup_observability().await?;
 
         // Create strategy loop
-        // Set is_backtest=true to disable price chasing (simulated executor fills immediately)
+        // is_backtest=true disables price chasing (simulated executor fills immediately)
         let mut strategy = StrategyLoop::new(
             data_source,
             executor,
             self.state.clone(),
-            self.config.strategy.clone().with_backtest(true),
+            self.config.strategy.clone().with_backtest(true).with_live_oracle(true),
         );
 
         // Add observability sender if capture is enabled

@@ -34,6 +34,7 @@ use poly_collect::csv_writer::ManifestInfo;
 use poly_collect::data_writer::DataWriter;
 use poly_collect::discovery::MarketDiscovery;
 use poly_collect::history::HistoricalCollector;
+use poly_collect::rtds::{RtdsCapture, RtdsConfig};
 
 /// CLI arguments for poly-collect.
 #[derive(Parser, Debug)]
@@ -288,6 +289,17 @@ async fn run_live_mode(
     );
     info!("CLOB capture task started");
 
+    // Spawn RTDS Chainlink capture task
+    let rtds_handle = spawn_rtds_task(
+        Arc::clone(&writer),
+        RtdsConfig {
+            assets: config.assets.clone(),
+            ..RtdsConfig::default()
+        },
+        shutdown_tx.subscribe(),
+    );
+    info!("RTDS Chainlink capture task started");
+
     // Spawn health logging task
     let health_handle = spawn_health_task(
         Arc::clone(&stats),
@@ -365,6 +377,7 @@ async fn run_live_mode(
             if let Some(h) = discovery_handle { let _ = h.await; }
             let _ = binance_handle.await;
             let _ = clob_handle.await;
+            let _ = rtds_handle.await;
             let _ = health_handle.await;
         } => {
             info!("All tasks completed");
@@ -484,6 +497,19 @@ fn spawn_clob_task(
         let clob = ClobCapture::new(config, writer, active_markets);
         if let Err(e) = clob.run(shutdown).await {
             error!("CLOB capture error: {}", e);
+        }
+    })
+}
+
+/// Spawn the RTDS Chainlink capture task.
+fn spawn_rtds_task(
+    writer: Arc<DataWriter>,
+    config: RtdsConfig,
+    shutdown: broadcast::Receiver<()>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        if let Err(e) = RtdsCapture::run(writer, config, shutdown).await {
+            error!("RTDS Chainlink capture error: {}", e);
         }
     })
 }

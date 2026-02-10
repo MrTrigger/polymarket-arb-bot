@@ -806,6 +806,12 @@ pub struct MarketState {
     pub strike_price: Decimal,
     /// Seconds remaining in the window.
     pub seconds_remaining: i64,
+    /// Current Chainlink oracle price (from Polymarket RTDS).
+    pub chainlink_price: Option<Decimal>,
+    /// Chainlink strike price at window open (ground truth for settlement).
+    pub chainlink_strike: Option<Decimal>,
+    /// Binance spot price at window open (reference baseline for lead calculation).
+    pub binance_at_open: Option<Decimal>,
 }
 
 impl MarketState {
@@ -826,6 +832,9 @@ impl MarketState {
             spot_price: None,
             strike_price,
             seconds_remaining,
+            chainlink_price: None,
+            chainlink_strike: None,
+            binance_at_open: None,
         }
     }
 

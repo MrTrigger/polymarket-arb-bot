@@ -122,6 +122,18 @@ impl LiveDataSource {
             }
         });
 
+        // Spawn Polymarket RTDS Chainlink price connection
+        let rtds_shutdown = shutdown_tx.subscribe();
+        let rtds_tx = event_tx.clone();
+        let rtds_assets = config.assets.clone();
+        tokio::spawn(async move {
+            if let Err(e) =
+                run_rtds_chainlink_connection(rtds_assets, rtds_tx, rtds_shutdown).await
+            {
+                error!("RTDS Chainlink connection error: {}", e);
+            }
+        });
+
         // Keep a sender for external event injection (must clone before moving to heartbeat)
         let external_event_tx = event_tx.clone();
 
@@ -629,6 +641,190 @@ async fn build_token_event_map(active_markets: &ActiveMarketsState) -> HashMap<S
     map
 }
 
+// ============================================================================
+// Polymarket RTDS WebSocket Connection (Chainlink Prices)
+// ============================================================================
+
+/// Polymarket RTDS WebSocket URL for real-time data streams.
+const RTDS_WS_URL: &str = "wss://ws-live-data.polymarket.com";
+
+/// RTDS message payload for Chainlink price updates.
+#[derive(Debug, Deserialize)]
+struct RtdsMessage {
+    #[serde(default)]
+    topic: String,
+    #[serde(default)]
+    payload: Option<RtdsPayload>,
+}
+
+/// Payload within an RTDS message.
+#[derive(Debug, Deserialize)]
+struct RtdsPayload {
+    symbol: String,
+    /// Float value (e.g. 67979.63546244064).
+    value: f64,
+    timestamp: i64,
+}
+
+/// Run RTDS Chainlink WebSocket connection with reconnection logic.
+async fn run_rtds_chainlink_connection(
+    assets: Vec<CryptoAsset>,
+    tx: mpsc::Sender<MarketEvent>,
+    mut shutdown: broadcast::Receiver<()>,
+) -> Result<(), DataSourceError> {
+    let mut reconnect_delay = Duration::from_secs(1);
+    let max_reconnect_delay = Duration::from_secs(60);
+
+    loop {
+        if shutdown.try_recv().is_ok() {
+            info!("RTDS Chainlink connection: shutdown signal received");
+            return Ok(());
+        }
+
+        match run_rtds_chainlink_session(&assets, &tx, &mut shutdown).await {
+            Ok(()) => {
+                info!("RTDS Chainlink connection: clean shutdown");
+                return Ok(());
+            }
+            Err(e) => {
+                warn!(
+                    "RTDS Chainlink connection error: {}, reconnecting in {:?}",
+                    e, reconnect_delay
+                );
+
+                tokio::select! {
+                    _ = tokio::time::sleep(reconnect_delay) => {}
+                    _ = shutdown.recv() => {
+                        info!("RTDS Chainlink connection: shutdown during reconnect");
+                        return Ok(());
+                    }
+                }
+
+                reconnect_delay = (reconnect_delay * 2).min(max_reconnect_delay);
+            }
+        }
+    }
+}
+
+/// Run a single RTDS Chainlink WebSocket session.
+async fn run_rtds_chainlink_session(
+    assets: &[CryptoAsset],
+    tx: &mpsc::Sender<MarketEvent>,
+    shutdown: &mut broadcast::Receiver<()>,
+) -> Result<(), DataSourceError> {
+    info!("Connecting to Polymarket RTDS at {}", RTDS_WS_URL);
+
+    let connect_result =
+        tokio::time::timeout(Duration::from_secs(10), connect_async(RTDS_WS_URL)).await;
+
+    let (ws_stream, _) = match connect_result {
+        Ok(Ok((stream, response))) => (stream, response),
+        Ok(Err(e)) => return Err(DataSourceError::Connection(e.to_string())),
+        Err(_) => return Err(DataSourceError::Timeout),
+    };
+
+    info!("Connected to Polymarket RTDS WebSocket");
+
+    let (mut write, mut read) = ws_stream.split();
+
+    // Send initial ping (required by RTDS protocol before subscribing)
+    write
+        .send(Message::Text("ping".to_string()))
+        .await
+        .map_err(|e| DataSourceError::WebSocket(e.to_string()))?;
+
+    // Subscribe to all Chainlink price updates (no per-symbol filter needed)
+    let subscribe_msg = serde_json::json!({
+        "action": "subscribe",
+        "subscriptions": [{
+            "topic": "crypto_prices_chainlink",
+            "type": "update"
+        }],
+    });
+
+    write
+        .send(Message::Text(subscribe_msg.to_string()))
+        .await
+        .map_err(|e| DataSourceError::WebSocket(e.to_string()))?;
+
+    let symbols: Vec<&str> = assets.iter().map(|a| a.chainlink_symbol()).collect();
+    info!("Subscribed to RTDS crypto_prices_chainlink for {:?}", symbols);
+
+    // Build symbol -> asset map
+    let symbol_map: HashMap<String, CryptoAsset> = assets
+        .iter()
+        .map(|a| (a.chainlink_symbol().to_string(), *a))
+        .collect();
+
+    let mut ping_timer = interval(Duration::from_secs(5));
+    ping_timer.tick().await; // skip immediate first tick
+
+    loop {
+        tokio::select! {
+            msg = read.next() => {
+                match msg {
+                    Some(Ok(Message::Text(text))) => {
+                        if let Some(event) = parse_rtds_chainlink_message(&text, &symbol_map)
+                            && tx.send(event).await.is_err() {
+                            return Err(DataSourceError::StreamEnded);
+                        }
+                    }
+                    Some(Ok(Message::Ping(data))) => {
+                        write.send(Message::Pong(data)).await
+                            .map_err(|e| DataSourceError::WebSocket(e.to_string()))?;
+                    }
+                    Some(Ok(Message::Close(_))) => {
+                        return Err(DataSourceError::StreamEnded);
+                    }
+                    Some(Err(e)) => {
+                        return Err(DataSourceError::WebSocket(e.to_string()));
+                    }
+                    None => {
+                        return Err(DataSourceError::StreamEnded);
+                    }
+                    _ => {}
+                }
+            }
+            _ = ping_timer.tick() => {
+                write.send(Message::Text("ping".to_string())).await
+                    .map_err(|e| DataSourceError::WebSocket(e.to_string()))?;
+            }
+            _ = shutdown.recv() => {
+                info!("RTDS Chainlink session: shutdown signal received");
+                return Ok(());
+            }
+        }
+    }
+}
+
+/// Parse an RTDS Chainlink price message into a MarketEvent.
+fn parse_rtds_chainlink_message(
+    text: &str,
+    symbol_map: &HashMap<String, CryptoAsset>,
+) -> Option<MarketEvent> {
+    let msg: RtdsMessage = serde_json::from_str(text).ok()?;
+
+    if msg.topic != "crypto_prices_chainlink" {
+        return None;
+    }
+
+    let payload = msg.payload?;
+    let asset = symbol_map.get(&payload.symbol)?;
+    let price = Decimal::from_f64_retain(payload.value)?;
+    let timestamp = Utc
+        .timestamp_millis_opt(payload.timestamp)
+        .single()
+        .unwrap_or_else(Utc::now);
+
+    Some(MarketEvent::ChainlinkPrice(
+        super::ChainlinkPriceEvent {
+            asset: *asset,
+            price,
+            timestamp,
+        },
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -676,5 +872,33 @@ mod tests {
 
         assert_eq!(market.asset, CryptoAsset::Btc);
         assert_eq!(market.strike_price, dec!(100000));
+    }
+
+    #[test]
+    fn test_parse_rtds_chainlink_message() {
+        let symbol_map: HashMap<String, CryptoAsset> = vec![
+            ("btc/usd".to_string(), CryptoAsset::Btc),
+            ("eth/usd".to_string(), CryptoAsset::Eth),
+        ]
+        .into_iter()
+        .collect();
+
+        let msg = r#"{"topic":"crypto_prices_chainlink","type":"update","payload":{"symbol":"btc/usd","value":97500.25,"timestamp":1704067200000}}"#;
+        let event = parse_rtds_chainlink_message(msg, &symbol_map);
+        assert!(event.is_some());
+        if let Some(MarketEvent::ChainlinkPrice(e)) = event {
+            assert_eq!(e.asset, CryptoAsset::Btc);
+            assert_eq!(e.price, dec!(97500.25));
+        } else {
+            panic!("Expected ChainlinkPrice event");
+        }
+    }
+
+    #[test]
+    fn test_parse_rtds_unknown_topic() {
+        let symbol_map: HashMap<String, CryptoAsset> = HashMap::new();
+        let msg = r#"{"topic":"crypto_prices","type":"update","payload":{"symbol":"btcusdt","value":97500,"timestamp":1704067200000}}"#;
+        let event = parse_rtds_chainlink_message(msg, &symbol_map);
+        assert!(event.is_none());
     }
 }

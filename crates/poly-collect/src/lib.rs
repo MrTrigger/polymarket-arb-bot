@@ -14,3 +14,4 @@ pub mod csv_writer;
 pub mod data_writer;
 pub mod discovery;
 pub mod history;
+pub mod rtds;

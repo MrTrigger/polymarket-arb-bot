@@ -125,7 +125,8 @@ impl PaperModeConfig {
             data_source: LiveDataSourceConfig::default(),
             executor: executor_config,
             strategy: StrategyConfig::from_trading_config(&config.trading, (config.window_duration.minutes() * 60) as i64)
-                .with_execution(config.execution.clone()),
+                .with_execution(config.execution.clone())
+                .with_oracle(&config.oracle),
             observability: config.observability.clone(),
             engines: config.engines.clone(),
             discovery: discovery_config,
@@ -311,12 +312,13 @@ impl PaperMode {
         }
 
         // Create strategy loop with engines config
-        // Set is_backtest=true to disable price chasing (simulated executor fills immediately)
+        // is_backtest=true disables price chasing (simulated executor fills immediately)
+        // live_oracle stays true so we fetch strike/settlement from Polymarket's page
         let mut strategy = StrategyLoop::with_engines(
             data_source,
             executor,
             self.state.clone(),
-            self.config.strategy.clone().with_backtest(true),
+            self.config.strategy.clone().with_backtest(true).with_live_oracle(true),
             self.config.engines.clone(),
         );
 

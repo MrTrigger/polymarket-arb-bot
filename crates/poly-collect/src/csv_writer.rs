@@ -23,6 +23,7 @@ const POLYMARKET_DELTAS_FILE: &str = "polymarket_orderbook_deltas.csv";
 const POLYMARKET_WINDOWS_FILE: &str = "polymarket_market_windows.csv";
 const POLYMARKET_PRICE_HISTORY_FILE: &str = "polymarket_price_history.csv";
 const POLYMARKET_ALIGNED_PRICES_FILE: &str = "polymarket_aligned_prices.csv";
+const CHAINLINK_PRICES_FILE: &str = "chainlink_prices.csv";
 
 /// Information for the manifest file.
 pub struct ManifestInfo {
@@ -51,6 +52,7 @@ struct ManifestRowCounts {
     market_windows: u64,
     price_history: u64,
     aligned_prices: u64,
+    chainlink_prices: u64,
 }
 
 /// CSV writer for collected data.
@@ -62,6 +64,7 @@ pub struct CsvWriter {
     deltas: Mutex<Option<csv::Writer<File>>>,
     price_history: Mutex<Option<csv::Writer<File>>>,
     aligned_prices: Mutex<Option<csv::Writer<File>>>,
+    chainlink_prices: Mutex<Option<csv::Writer<File>>>,
     /// Market windows are buffered in memory and only written on finalize,
     /// filtered to events that actually have L2 orderbook data.
     pending_windows: Mutex<HashMap<String, MarketWindow>>,
@@ -74,6 +77,7 @@ pub struct CsvWriter {
     window_count: AtomicU64,
     price_history_count: AtomicU64,
     aligned_price_count: AtomicU64,
+    chainlink_price_count: AtomicU64,
 }
 
 impl CsvWriter {
@@ -90,6 +94,7 @@ impl CsvWriter {
             deltas: Mutex::new(None),
             price_history: Mutex::new(None),
             aligned_prices: Mutex::new(None),
+            chainlink_prices: Mutex::new(None),
             pending_windows: Mutex::new(HashMap::new()),
             seen_orderbook_events: Mutex::new(HashSet::new()),
             spot_price_count: AtomicU64::new(0),
@@ -98,6 +103,7 @@ impl CsvWriter {
             window_count: AtomicU64::new(0),
             price_history_count: AtomicU64::new(0),
             aligned_price_count: AtomicU64::new(0),
+            chainlink_price_count: AtomicU64::new(0),
         })
     }
 
@@ -279,6 +285,27 @@ impl CsvWriter {
         Ok(())
     }
 
+    /// Writes Chainlink oracle prices to CSV.
+    pub fn write_chainlink_prices(&self, prices: &[crate::rtds::ChainlinkPriceRecord]) -> Result<()> {
+        if prices.is_empty() {
+            return Ok(());
+        }
+
+        let path = self.output_dir.join(CHAINLINK_PRICES_FILE);
+        Self::get_or_create_writer(&self.chainlink_prices, &path)?;
+
+        let mut guard = self.chainlink_prices.lock().unwrap();
+        let writer = guard.as_mut().unwrap();
+
+        for price in prices {
+            writer.serialize(price)?;
+        }
+        writer.flush()?;
+        self.chainlink_price_count.fetch_add(prices.len() as u64, Ordering::Relaxed);
+
+        Ok(())
+    }
+
     /// Flushes all active writers (does NOT finalize market windows).
     pub fn flush_all(&self) -> Result<()> {
         if let Some(ref mut writer) = *self.spot_prices.lock().unwrap() {
@@ -294,6 +321,9 @@ impl CsvWriter {
             writer.flush()?;
         }
         if let Some(ref mut writer) = *self.aligned_prices.lock().unwrap() {
+            writer.flush()?;
+        }
+        if let Some(ref mut writer) = *self.chainlink_prices.lock().unwrap() {
             writer.flush()?;
         }
         Ok(())
@@ -358,6 +388,7 @@ impl CsvWriter {
                 market_windows: self.window_count.load(Ordering::Relaxed),
                 price_history: self.price_history_count.load(Ordering::Relaxed),
                 aligned_prices: self.aligned_price_count.load(Ordering::Relaxed),
+                chainlink_prices: self.chainlink_price_count.load(Ordering::Relaxed),
             },
         };
 

@@ -69,6 +69,9 @@ pub struct BotConfig {
 
     /// Phase-based strategy configuration.
     pub phases: PhaseConfig,
+
+    /// Oracle (Chainlink) configuration.
+    pub oracle: OracleConfig,
 }
 
 /// Trading mode determines data source and executor.
@@ -614,6 +617,30 @@ impl Default for LiveConfig {
     }
 }
 
+/// Oracle (Chainlink) configuration.
+#[derive(Debug, Clone)]
+pub struct OracleConfig {
+    /// Chainlink price staleness threshold (seconds). If no update within this window, fall back to Binance.
+    pub chainlink_stale_threshold_secs: u64,
+    /// Enable Binance lead confidence adjustment.
+    pub binance_lead_enabled: bool,
+    /// Confidence boost when Binance lead confirms signal direction (e.g. 0.15 = +15%).
+    pub lead_confirm_boost: Decimal,
+    /// Confidence cut when Binance lead opposes signal direction (e.g. 0.25 = -25%).
+    pub lead_oppose_cut: Decimal,
+}
+
+impl Default for OracleConfig {
+    fn default() -> Self {
+        Self {
+            chainlink_stale_threshold_secs: 30,
+            binance_lead_enabled: true,
+            lead_confirm_boost: Decimal::new(15, 2), // 0.15
+            lead_oppose_cut: Decimal::new(25, 2),    // 0.25
+        }
+    }
+}
+
 /// Phase-based budget allocation configuration.
 ///
 /// Controls budget allocation per market phase.
@@ -949,6 +976,7 @@ impl Default for BotConfig {
             live: LiveConfig::default(),
             engines: EnginesConfig::default(),
             phases: PhaseConfig::default(),
+            oracle: OracleConfig::default(),
         }
     }
 }
@@ -1247,6 +1275,8 @@ struct TomlConfig {
     engines: EnginesToml,
     #[serde(default)]
     phases: PhasesToml,
+    #[serde(default)]
+    oracle: OracleToml,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1586,6 +1616,28 @@ impl Default for PhasesToml {
             build_budget: 0.25,
             core_budget: 0.30,
             final_budget: 0.30,
+        }
+    }
+}
+
+// --- Oracle TOML structure ---
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+struct OracleToml {
+    chainlink_stale_threshold_secs: u64,
+    binance_lead_enabled: bool,
+    lead_confirm_boost: f64,
+    lead_oppose_cut: f64,
+}
+
+impl Default for OracleToml {
+    fn default() -> Self {
+        Self {
+            chainlink_stale_threshold_secs: 30,
+            binance_lead_enabled: true,
+            lead_confirm_boost: 0.15,
+            lead_oppose_cut: 0.25,
         }
     }
 }
@@ -1942,6 +1994,12 @@ impl BotConfig {
                 build_budget: f64_to_decimal(toml.phases.build_budget),
                 core_budget: f64_to_decimal(toml.phases.core_budget),
                 final_budget: f64_to_decimal(toml.phases.final_budget),
+            },
+            oracle: OracleConfig {
+                chainlink_stale_threshold_secs: toml.oracle.chainlink_stale_threshold_secs,
+                binance_lead_enabled: toml.oracle.binance_lead_enabled,
+                lead_confirm_boost: f64_to_decimal(toml.oracle.lead_confirm_boost),
+                lead_oppose_cut: f64_to_decimal(toml.oracle.lead_oppose_cut),
             },
         })
     }

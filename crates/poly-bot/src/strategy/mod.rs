@@ -41,9 +41,10 @@ pub mod signal;
 pub mod sizing;
 pub mod toxic;
 pub mod decision_log;
+pub mod strike;
 pub mod trades_log;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -52,13 +53,60 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::mpsc;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use poly_common::types::{CryptoAsset, Outcome, Side};
 use crate::executor::chase::ChaseConfig;
 use crate::order_manager::{
     AsyncOrderManager, AsyncOrderManagerConfig, OrderIntent, OrderManagerTask, OrderUpdateEvent,
 };
+
+// ============================================================================
+// Price Buffer — recent prices for exact T=0 lookups at window open
+// ============================================================================
+
+/// Ring buffer of recent (timestamp_ms, price) pairs per asset.
+/// Used to look up the exact price at window open time (T=0) instead of
+/// using whatever the current price happens to be when we process the event.
+///
+/// Capacity: 120 entries ≈ 2 minutes at 1/sec update rate.
+struct PriceBuffer {
+    entries: HashMap<CryptoAsset, VecDeque<(i64, Decimal)>>,
+}
+
+impl PriceBuffer {
+    const CAPACITY: usize = 120;
+
+    fn new() -> Self {
+        Self { entries: HashMap::new() }
+    }
+
+    /// Record a price update.
+    fn record(&mut self, asset: CryptoAsset, timestamp_ms: i64, price: Decimal) {
+        let buf = self.entries.entry(asset).or_insert_with(VecDeque::new);
+        buf.push_back((timestamp_ms, price));
+        while buf.len() > Self::CAPACITY {
+            buf.pop_front();
+        }
+    }
+
+    /// Max acceptable distance from target timestamp (2 seconds).
+    /// Beyond this, the price is too stale to be considered "at T=0".
+    const MAX_DELTA_MS: i64 = 2000;
+
+    /// Look up the price closest to `target_ms`.
+    /// Returns None if buffer is empty or closest entry is >2s from target.
+    fn lookup(&self, asset: CryptoAsset, target_ms: i64) -> Option<Decimal> {
+        let buf = self.entries.get(&asset)?;
+        let (ts, price) = buf.iter()
+            .min_by_key(|(ts, _)| (ts - target_ms).unsigned_abs())?;
+        if (ts - target_ms).unsigned_abs() <= Self::MAX_DELTA_MS as u64 {
+            Some(*price)
+        } else {
+            None
+        }
+    }
+}
 
 // ============================================================================
 // Active Maker Order Tracking
@@ -298,6 +346,8 @@ struct TrackedMarket {
     no_token_id: String,
     /// Strike price.
     strike_price: Decimal,
+    /// Window start time (for constructing Polymarket page URL at settlement).
+    window_start: DateTime<Utc>,
     /// Window end time.
     window_end: DateTime<Utc>,
     /// Current market state.
@@ -329,6 +379,10 @@ struct TrackedMarket {
     hedge_tiers_triggered: [bool; 3],
     /// Direction of the main position (true=UP/YES, false=DOWN/NO). Set on first fill.
     position_direction: Option<bool>,
+    /// Chainlink strike price at window open (ground truth for Polymarket resolution).
+    chainlink_strike: Option<Decimal>,
+    /// Binance spot price at window open (reference for lead calculation).
+    binance_at_open: Option<Decimal>,
 }
 
 impl TrackedMarket {
@@ -369,6 +423,7 @@ impl TrackedMarket {
             yes_token_id: event.yes_token_id.clone(),
             no_token_id: event.no_token_id.clone(),
             strike_price: event.strike_price,
+            window_start: event.window_start,
             window_end: event.window_end,
             state,
             inventory: Inventory::new(event.event_id.clone()),
@@ -383,6 +438,8 @@ impl TrackedMarket {
             peak_confidence: Decimal::ZERO,
             hedge_tiers_triggered: [false; 3],
             position_direction: None,
+            chainlink_strike: None,
+            binance_at_open: None,
         }
     }
 
@@ -527,6 +584,19 @@ pub struct StrategyConfig {
 
     /// Whether running in backtest mode (disables price chasing).
     pub is_backtest: bool,
+
+    /// Whether we can fetch live data from Polymarket's web pages.
+    /// True for live and paper modes, false for backtest.
+    pub live_oracle: bool,
+
+    /// Chainlink price staleness threshold in seconds.
+    pub oracle_stale_threshold_secs: u64,
+    /// Enable Binance lead confidence adjustment.
+    pub binance_lead_enabled: bool,
+    /// Confidence boost when Binance lead confirms signal direction.
+    pub lead_confirm_boost: Decimal,
+    /// Confidence cut when Binance lead opposes signal direction.
+    pub lead_oppose_cut: Decimal,
 }
 
 impl Default for StrategyConfig {
@@ -546,6 +616,11 @@ impl Default for StrategyConfig {
             max_edge_factor: dec!(0.20),     // 20% EV required at window start (decays to 0)
             execution: crate::config::ExecutionConfig::default(),
             is_backtest: false,
+            live_oracle: true,
+            oracle_stale_threshold_secs: 30,
+            binance_lead_enabled: true,
+            lead_confirm_boost: dec!(0.15),
+            lead_oppose_cut: dec!(0.25),
         }
     }
 }
@@ -575,12 +650,26 @@ impl StrategyConfig {
             max_edge_factor: dec!(0.20),
             execution: crate::config::ExecutionConfig::default(),
             is_backtest: false,
+            live_oracle: true,
+            oracle_stale_threshold_secs: 30,
+            binance_lead_enabled: true,
+            lead_confirm_boost: dec!(0.15),
+            lead_oppose_cut: dec!(0.25),
         }
     }
 
-    /// Set backtest mode (disables price chasing).
+    /// Set backtest mode (disables price chasing, disables live oracle by default).
     pub fn with_backtest(mut self, is_backtest: bool) -> Self {
         self.is_backtest = is_backtest;
+        if is_backtest {
+            self.live_oracle = false;
+        }
+        self
+    }
+
+    /// Set whether to fetch strike/settlement prices from Polymarket's page.
+    pub fn with_live_oracle(mut self, live_oracle: bool) -> Self {
+        self.live_oracle = live_oracle;
         self
     }
 
@@ -590,9 +679,28 @@ impl StrategyConfig {
         self
     }
 
+    /// Returns the slug for Polymarket page URLs (e.g., "15m").
+    pub fn duration_slug(&self) -> &'static str {
+        match self.window_duration_secs {
+            300 => "5m",
+            900 => "15m",
+            3600 => "1h",
+            _ => "15m",
+        }
+    }
+
     /// Set the execution configuration.
     pub fn with_execution(mut self, execution: crate::config::ExecutionConfig) -> Self {
         self.execution = execution;
+        self
+    }
+
+    /// Apply oracle configuration.
+    pub fn with_oracle(mut self, oracle: &crate::config::OracleConfig) -> Self {
+        self.oracle_stale_threshold_secs = oracle.chainlink_stale_threshold_secs;
+        self.binance_lead_enabled = oracle.binance_lead_enabled;
+        self.lead_confirm_boost = oracle.lead_confirm_boost;
+        self.lead_oppose_cut = oracle.lead_oppose_cut;
         self
     }
 }
@@ -637,6 +745,15 @@ pub struct StrategyLoop<D: DataSource, E: Executor> {
     token_to_event: HashMap<String, String>,
     /// Latest spot prices by asset.
     spot_prices: HashMap<CryptoAsset, Decimal>,
+    /// Latest Chainlink oracle prices by asset.
+    chainlink_prices: HashMap<CryptoAsset, Decimal>,
+    /// Last Chainlink price update timestamp by asset.
+    chainlink_last_update: HashMap<CryptoAsset, DateTime<Utc>>,
+    /// Recent Chainlink prices for exact T=0 lookups at window open.
+    chainlink_buffer: PriceBuffer,
+    /// Recent Binance spot prices for exact T=0 lookups at window open.
+    binance_buffer: PriceBuffer,
+    /// Windows waiting for Chainlink price before opening.
     /// Decision counter for unique IDs.
     decision_counter: u64,
     /// Observability channel sender (optional).
@@ -676,6 +793,8 @@ pub struct StrategyLoop<D: DataSource, E: Executor> {
     last_event_time: Option<DateTime<Utc>>,
     /// Market client for fetching min_order_size from CLOB API (live only).
     market_client: Option<crate::api::MarketClient>,
+    /// HTTP client for fetching strike prices from Polymarket pages.
+    http_client: reqwest::Client,
 }
 
 impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
@@ -734,6 +853,10 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             markets: HashMap::new(),
             token_to_event: HashMap::new(),
             spot_prices: HashMap::new(),
+            chainlink_prices: HashMap::new(),
+            chainlink_last_update: HashMap::new(),
+            chainlink_buffer: PriceBuffer::new(),
+            binance_buffer: PriceBuffer::new(),
             decision_counter: 0,
             obs_sender: None,
             multi_obs_sender: None,
@@ -759,6 +882,10 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             first_event_time: None,
             last_event_time: None,
             market_client: None,
+            http_client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
         }
     }
 
@@ -1107,6 +1234,8 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                 vec![] // Fills don't trigger new opportunity checks
             }
             MarketEvent::WindowOpen(e) => {
+                // Strike comes from Gamma API — open immediately, no deferral needed.
+                // Chainlink is used for settlement (at window end) and signal detection.
                 let event_id = e.event_id.clone();
                 self.handle_window_open(e).await;
                 vec![event_id]
@@ -1114,6 +1243,17 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             MarketEvent::WindowClose(e) => {
                 self.handle_window_close(e).await;
                 vec![] // Market is closed, no opportunities
+            }
+            MarketEvent::ChainlinkPrice(e) => {
+                let asset = e.asset;
+                self.handle_chainlink_price(e);
+
+                // Return affected tracked markets for opportunity checks
+                let affected: Vec<String> = self.markets.iter()
+                    .filter(|(_, m)| m.asset == asset)
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                affected
             }
             MarketEvent::Heartbeat(_) => {
                 // Heartbeat - update time remaining and settle expired markets
@@ -1139,6 +1279,9 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
         // Update local cache
         self.spot_prices.insert(event.asset, event.price);
 
+        // Record in buffer for exact T=0 lookups at window open
+        self.binance_buffer.record(event.asset, event.timestamp.timestamp_millis(), event.price);
+
         // Record price for dynamic ATR calculation (use event timestamp, not wall clock)
         self.atr_tracker.record_price(event.asset, event.price, event.timestamp.timestamp_millis());
 
@@ -1160,25 +1303,14 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             if market.asset == event.asset {
                 market.state.spot_price = Some(event.price);
 
-                // For Up/Down markets, if strike is still 0, set it from first spot price.
-                // NOTE: With the new discovery flow, this should NOT happen - markets
-                // should only be added once they have a valid strike from historical data.
-                // If this triggers, it means discovery failed to fetch historical price.
+                // strike=0 should never happen — handle_window_open rejects it
                 if market.state.strike_price.is_zero() {
-                    warn!(
-                        "FALLBACK: Setting strike for {} from current spot={} (discovery failed to fetch historical price)",
-                        market.event_id, event.price
-                    );
-                    market.state.strike_price = event.price;
-                    market.strike_price = event.price; // Also update the TrackedMarket field
-
-                    // Also update ActiveWindow in GlobalState for dashboard display
-                    if let Some(mut window) = self.state.market_data.active_windows.get_mut(&market.event_id) {
-                        window.strike_price = event.price;
-                    }
+                    error!("BUG: market {} has strike=0 but was not rejected at window open",
+                        market.event_id);
+                    continue;
                 }
 
-                // Sync confidence data for dashboard display (if strike is set)
+                // Sync confidence data for dashboard display
                 if !market.strike_price.is_zero() {
                     let distance_dollars = (event.price - market.strike_price).abs();
                     let seconds_remaining = market.state.seconds_remaining;
@@ -1225,6 +1357,25 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                     );
                     self.state.market_data.update_confidence(&market.event_id, snapshot);
                 }
+            }
+        }
+    }
+
+    /// Handle a Chainlink oracle price update from Polymarket RTDS.
+    fn handle_chainlink_price(&mut self, event: crate::data_source::ChainlinkPriceEvent) {
+        trace!("🔗 Chainlink price: {} @ {}", event.asset, event.price);
+
+        // Update local cache
+        self.chainlink_prices.insert(event.asset, event.price);
+        self.chainlink_last_update.insert(event.asset, event.timestamp);
+
+        // Record in buffer for exact T=0 lookups at window open
+        self.chainlink_buffer.record(event.asset, event.timestamp.timestamp_millis(), event.price);
+
+        // Update all markets for this asset
+        for market in self.markets.values_mut() {
+            if market.asset == event.asset {
+                market.state.chainlink_price = Some(event.price);
             }
         }
     }
@@ -1526,26 +1677,53 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
     }
 
     /// Handle new market window.
+    ///
+    /// Strike priority:
+    /// 1. Chainlink RTDS price (what Polymarket actually uses as strike)
+    /// 2. Binance historical price from discovery (approximate, ~0.2% off)
+    ///
+    /// 15M market titles are "Bitcoin Up or Down - February 10, 12:00PM-12:15PM ET"
+    /// with no dollar amount, so parse_strike_price() always returns 0.
+    /// Discovery fills in strike from Binance when the window becomes active.
+    /// We override with Chainlink here since that's the actual oracle.
     async fn handle_window_open(&mut self, mut event: WindowOpenEvent) {
-        // For up/down markets, the strike IS the spot price at window open.
-        // Always use current spot price — the CSV strike_price field is unreliable
-        // (e.g. "26" parsed from date in title instead of actual price).
-        if let Some(&spot) = self.spot_prices.get(&event.asset) {
-            // Live spot available — use it as strike (most accurate)
-            event.strike_price = spot;
-            info!("Window open: {} {} strike={} (from live spot)",
-                event.event_id, event.asset, event.strike_price);
-        } else if !event.strike_price.is_zero() {
-            // No live spot yet, but discovery set strike from Binance klines — keep it
-            info!("Window open: {} {} strike={} (from discovery kline)",
-                event.event_id, event.asset, event.strike_price);
+        let window_start_ms = event.window_start.timestamp_millis();
+
+        // Look up prices at exactly T=0 (window start) from ring buffers.
+        // Returns None if we don't have data near T=0 (e.g., bot just started).
+        let chainlink_at_t0 = self.chainlink_buffer.lookup(event.asset, window_start_ms);
+        let binance_at_t0 = self.binance_buffer.lookup(event.asset, window_start_ms);
+
+        // Strike source priority:
+        // 1. Chainlink RTDS at T=0 (identical to Polymarket's openPrice — confirmed empirically)
+        // 2. Fetch from Polymarket page (exact "price to beat", but flaky SSR cache)
+        // 3. Backtest: replay data
+        if self.config.live_oracle {
+            if let Some(cl_strike) = chainlink_at_t0 {
+                event.strike_price = cl_strike;
+                // Verify against page if possible (background check, non-blocking for now)
+                info!("Window open: {} {} strike={} (chainlink T=0)",
+                    event.event_id, event.asset, event.strike_price);
+            } else if let Some(pm_strike) = strike::fetch_polymarket_strike(
+                &self.http_client, event.asset, event.window_start, self.config.duration_slug()
+            ).await {
+                event.strike_price = pm_strike;
+                info!("Window open: {} {} strike={} (polymarket page fallback)",
+                    event.event_id, event.asset, event.strike_price);
+            } else {
+                warn!("Rejecting window open {} {}: no strike source available",
+                    event.event_id, event.asset);
+                return;
+            }
         } else {
-            // No spot and no kline — set to zero, will be set from first tick
-            debug!(
-                "Window open: {} {} no spot yet, strike=0 (will set from first tick)",
-                event.event_id, event.asset
-            );
-            event.strike_price = Decimal::ZERO;
+            // Backtest: use strike from replay data
+            if event.strike_price.is_zero() {
+                warn!("Rejecting window open {} {}: strike is zero in replay data",
+                    event.event_id, event.asset);
+                return;
+            }
+            info!("Window open: {} {} strike={} (replay)",
+                event.event_id, event.asset, event.strike_price);
         }
 
         // Calculate budget per market from sizing config
@@ -1574,6 +1752,15 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             TrackedMarket::new(&event, market_budget, &self.config, min_order_size)
         };
 
+        // Record Chainlink and Binance snapshots at T=0 for lead calculation.
+        // chainlink_strike = Chainlink price at window open (ground truth for settlement)
+        // binance_at_open = Binance price at window open (baseline for lead = binance_delta - chainlink_delta)
+        let mut market = market;
+        market.chainlink_strike = chainlink_at_t0;
+        market.state.chainlink_strike = chainlink_at_t0;
+        market.binance_at_open = binance_at_t0;
+        market.state.binance_at_open = binance_at_t0;
+
         // Update token mapping
         self.token_to_event.insert(event.yes_token_id.clone(), event.event_id.clone());
         self.token_to_event.insert(event.no_token_id.clone(), event.event_id.clone());
@@ -1600,25 +1787,26 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
 
         // Settle positions before removing market
         if let Some(market) = self.markets.get(&event.event_id) {
-            // Determine outcome: YES wins if final spot > strike
-            let final_spot = self.spot_prices.get(&market.asset).copied().unwrap_or(Decimal::ZERO);
-            let yes_wins = final_spot > market.strike_price;
             let asset = market.asset;
             let strike_price = market.strike_price;
-            // Capture inventory before settle_market removes the position
             let yes_shares = market.inventory.yes_shares;
             let no_shares = market.inventory.no_shares;
             let cost_basis = market.inventory.yes_cost_basis + market.inventory.no_cost_basis;
 
-            // Compute P&L from strategy's own inventory (executor may not track positions)
+            // Settlement: use Chainlink RTDS price (same oracle Polymarket uses).
+            // Page closePrice is never populated in time (~2+ min delay), so we use
+            // the latest Chainlink price which is sampled from the same Data Streams feed.
+            let final_spot = self.chainlink_prices.get(&asset).copied()
+                .or_else(|| self.spot_prices.get(&asset).copied())
+                .unwrap_or(Decimal::ZERO);
+            let yes_wins = final_spot >= strike_price;
+
             let payout = if yes_wins { yes_shares } else { no_shares };
             let realized_pnl = payout - cost_basis;
 
-            // Still notify the executor (e.g. simulated executor updates its balance)
             let _ = self.executor.settle_market(&event.event_id, yes_wins).await;
 
             if cost_basis != Decimal::ZERO {
-                // Update global state with realized PnL (convert to cents)
                 let pnl_cents = (realized_pnl * Decimal::new(100, 0)).to_i64().unwrap_or(0);
                 self.state.metrics.add_pnl_cents(pnl_cents);
 
@@ -1634,7 +1822,6 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                 );
             }
 
-            // Log settlement to trades log
             if let Some(ref logger) = self.trades_logger {
                 logger.log_settlement(
                     Utc::now(), &event.event_id, asset, yes_wins,
@@ -1665,38 +1852,29 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
         }
     }
 
-    /// Collect expired markets with settlement info.
-    /// Returns Vec of (event_id, yes_token_id, no_token_id, yes_wins, asset, strike, final_spot, yes_shares, no_shares, cost_basis).
+    /// Collect expired market data for settlement.
+    /// Returns raw data; settlement decision is made in `settle_expired_markets`.
     #[allow(clippy::type_complexity)]
-    fn collect_expired_markets(&mut self, current_time: DateTime<Utc>) -> Vec<(String, String, String, bool, CryptoAsset, Decimal, Decimal, Decimal, Decimal, Decimal)> {
+    fn collect_expired_markets(&mut self, current_time: DateTime<Utc>) -> Vec<(String, CryptoAsset, Decimal, Decimal, Decimal, Decimal)> {
         let expired: Vec<_> = self.markets
             .iter()
             .filter(|(_, m)| m.is_expired(current_time))
-            .map(|(id, m)| {
-                // For Up/Down markets: YES wins if final_spot > strike
-                let final_spot = self.spot_prices.get(&m.asset).copied().unwrap_or(Decimal::ZERO);
-                let yes_wins = final_spot > m.strike_price;
-                (
-                    id.clone(),
-                    m.yes_token_id.clone(),
-                    m.no_token_id.clone(),
-                    yes_wins,
-                    m.asset,
-                    m.strike_price,
-                    final_spot,
-                    m.inventory.yes_shares,
-                    m.inventory.no_shares,
-                    m.inventory.yes_cost_basis + m.inventory.no_cost_basis,
-                )
-            })
+            .map(|(id, m)| (
+                id.clone(),
+                m.asset,
+                m.strike_price,
+                m.inventory.yes_shares,
+                m.inventory.no_shares,
+                m.inventory.yes_cost_basis + m.inventory.no_cost_basis,
+            ))
             .collect();
 
         // Remove expired markets from tracking
-        for (id, yes_token_id, no_token_id, _, _, _, _, _, _, _) in &expired {
-            self.markets.remove(id);
-            self.token_to_event.remove(yes_token_id);
-            self.token_to_event.remove(no_token_id);
-            // Also remove from global state (dashboard display and inventory)
+        for (id, _, _, _, _, _) in &expired {
+            if let Some(m) = self.markets.remove(id) {
+                self.token_to_event.remove(&m.yes_token_id);
+                self.token_to_event.remove(&m.no_token_id);
+            }
             self.state.market_data.active_windows.remove(id);
             self.state.market_data.remove_inventory(id);
         }
@@ -1708,16 +1886,19 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
     async fn settle_expired_markets(&mut self) {
         let expired = self.collect_expired_markets(self.simulated_time);
 
-        for (event_id, _, _, yes_wins, asset, strike_price, final_spot, yes_shares, no_shares, cost_basis) in expired {
-            // Compute P&L from strategy's own inventory (executor may not track positions)
+        for (event_id, asset, strike_price, yes_shares, no_shares, cost_basis) in expired {
+            // Settlement: use Chainlink RTDS price (same oracle Polymarket uses).
+            let final_spot = self.chainlink_prices.get(&asset).copied()
+                .or_else(|| self.spot_prices.get(&asset).copied())
+                .unwrap_or(Decimal::ZERO);
+            let yes_wins = final_spot >= strike_price;
+
             let payout = if yes_wins { yes_shares } else { no_shares };
             let realized_pnl = payout - cost_basis;
 
-            // Still notify the executor (e.g. simulated executor updates its balance)
             let _ = self.executor.settle_market(&event_id, yes_wins).await;
 
             if cost_basis != Decimal::ZERO {
-                // Update global state with realized PnL (convert to cents)
                 let pnl_cents = (realized_pnl * Decimal::new(100, 0)).to_i64().unwrap_or(0);
                 self.state.metrics.add_pnl_cents(pnl_cents);
 
@@ -1734,7 +1915,6 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                 debug!("Removed expired market: {} (no position)", event_id);
             }
 
-            // Log settlement to trades log
             if let Some(ref logger) = self.trades_logger {
                 logger.log_settlement(
                     self.simulated_time, &event_id, asset, yes_wins,
@@ -1799,6 +1979,13 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             if let Some(&spot) = self.spot_prices.get(&market.state.asset) {
                 market.state.spot_price = Some(spot);
             }
+
+            // Update Chainlink price in market state if we have it
+            if let Some(&cl_price) = self.chainlink_prices.get(&market.state.asset) {
+                market.state.chainlink_price = Some(cl_price);
+            }
+            // Propagate Chainlink strike from TrackedMarket to MarketState
+            market.state.chainlink_strike = market.chainlink_strike;
 
             let market_state = &market.state;
             let asset = market.asset;
@@ -2068,6 +2255,31 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                             pivot_conf.multiplier, base_conf, pm_conf
                         );
                     }
+
+                    // Binance lead confidence adjustment
+                    // When Binance has moved further than Chainlink in the signal direction,
+                    // Chainlink will likely catch up → boost confidence
+                    let pm_conf = if self.config.binance_lead_enabled {
+                        if let Some(lead) = opp.binance_lead {
+                            let signal_is_up = matches!(opp.signal, signal::Signal::StrongUp | signal::Signal::LeanUp);
+                            let lead_confirms = (signal_is_up && lead > Decimal::ZERO) || (!signal_is_up && lead < Decimal::ZERO);
+                            if lead_confirms {
+                                let boosted = pm_conf * (Decimal::ONE + self.config.lead_confirm_boost);
+                                trace!("🔗 Binance lead={:.4} confirms {} → boost conf {:.3} → {:.3}",
+                                    lead, opp.signal, pm_conf, boosted);
+                                boosted.min(Decimal::ONE)
+                            } else {
+                                let cut = pm_conf * (Decimal::ONE - self.config.lead_oppose_cut);
+                                trace!("🔗 Binance lead={:.4} opposes {} → cut conf {:.3} → {:.3}",
+                                    lead, opp.signal, pm_conf, cut);
+                                cut.max(Decimal::ZERO)
+                            }
+                        } else {
+                            pm_conf
+                        }
+                    } else {
+                        pm_conf
+                    };
 
                     // Calculate time and distance confidence components for detailed logging (trace level)
                     // These now use the parameterized formulas from PositionManager
@@ -3663,6 +3875,14 @@ mod tests {
         async fn shutdown(&mut self) {}
     }
 
+    fn create_chainlink_price_event(asset: CryptoAsset, price: Decimal) -> MarketEvent {
+        MarketEvent::ChainlinkPrice(crate::data_source::ChainlinkPriceEvent {
+            asset,
+            price,
+            timestamp: Utc::now(),
+        })
+    }
+
     fn create_window_open_event(event_id: &str, asset: CryptoAsset) -> MarketEvent {
         MarketEvent::WindowOpen(WindowOpenEvent {
             event_id: event_id.to_string(),
@@ -3701,6 +3921,7 @@ mod tests {
     #[tokio::test]
     async fn test_window_open_tracking() {
         let events = vec![
+            create_chainlink_price_event(CryptoAsset::Btc, dec!(100000)),
             create_window_open_event("event1", CryptoAsset::Btc),
         ];
 
@@ -3744,6 +3965,7 @@ mod tests {
     async fn test_arb_detection_and_execution() {
         // Setup: open window, then provide books with arb opportunity
         let events = vec![
+            create_chainlink_price_event(CryptoAsset::Btc, dec!(100000)),
             create_window_open_event("event1", CryptoAsset::Btc),
             // YES ask at 0.45 (100 shares)
             create_book_snapshot_event("event1-yes", vec![(dec!(0.45), dec!(100))]),
@@ -3771,6 +3993,7 @@ mod tests {
     #[tokio::test]
     async fn test_trading_disabled_skips_opportunities() {
         let events = vec![
+            create_chainlink_price_event(CryptoAsset::Btc, dec!(100000)),
             create_window_open_event("event1", CryptoAsset::Btc),
             create_book_snapshot_event("event1-yes", vec![(dec!(0.45), dec!(100))]),
             create_book_snapshot_event("event1-no", vec![(dec!(0.52), dec!(100))]),
@@ -4039,6 +4262,7 @@ mod tests {
     #[tokio::test]
     async fn test_active_maker_order_count() {
         let events = vec![
+            create_chainlink_price_event(CryptoAsset::Btc, dec!(100000)),
             create_window_open_event("event1", CryptoAsset::Btc),
         ];
 

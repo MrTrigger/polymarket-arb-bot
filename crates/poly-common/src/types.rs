@@ -39,6 +39,16 @@ impl CryptoAsset {
         }
     }
 
+    /// Returns the Chainlink data stream symbol (e.g., "btc/usd").
+    pub fn chainlink_symbol(&self) -> &'static str {
+        match self {
+            CryptoAsset::Btc => "btc/usd",
+            CryptoAsset::Eth => "eth/usd",
+            CryptoAsset::Sol => "sol/usd",
+            CryptoAsset::Xrp => "xrp/usd",
+        }
+    }
+
     /// Estimated 15-minute ATR (Average True Range) in USD.
     ///
     /// These are rough estimates based on typical volatility.
@@ -122,6 +132,16 @@ impl WindowDuration {
             WindowDuration::FiveMin => Some("5M"),
             WindowDuration::FifteenMin => Some("15M"),
             WindowDuration::OneHour => None, // 1h markets don't have a dedicated tag
+        }
+    }
+
+    /// Returns the slug duration component used in Polymarket event URLs.
+    /// E.g., "15m" for `btc-updown-15m-1770742800`.
+    pub fn slug_duration(&self) -> &'static str {
+        match self {
+            WindowDuration::FiveMin => "5m",
+            WindowDuration::FifteenMin => "15m",
+            WindowDuration::OneHour => "1h",
         }
     }
 

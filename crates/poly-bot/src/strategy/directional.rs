@@ -87,6 +87,9 @@ pub struct DirectionalOpportunity {
     pub no_imbalance: Decimal,
     /// Detection timestamp (milliseconds).
     pub detected_at_ms: i64,
+    /// Binance lead over Chainlink: positive = Binance further ahead in signal direction.
+    /// When Binance has moved further than Chainlink, Chainlink will likely catch up.
+    pub binance_lead: Option<Decimal>,
 }
 
 impl DirectionalOpportunity {
@@ -225,18 +228,22 @@ impl DirectionalDetector {
             // Still allow if there's a strong signal (directional edge compensates)
         }
 
+        // Use Chainlink as ground truth for signal detection when available
+        let signal_price = state.chainlink_price.unwrap_or(spot_price);
+        let signal_strike = state.chainlink_strike.unwrap_or(state.strike_price);
+
         // Calculate signal
         let minutes_remaining = Decimal::from(state.seconds_remaining) / dec!(60);
-        let signal = get_signal(spot_price, state.strike_price, minutes_remaining);
+        let signal = get_signal(signal_price, signal_strike, minutes_remaining);
 
         // Skip if neutral - no directional edge
         if !signal.is_directional() {
             return Err(DirectionalSkipReason::NeutralSignal);
         }
 
-        // Calculate distance
-        let distance = calculate_distance(spot_price, state.strike_price);
-        let distance_dollars = (spot_price - state.strike_price).abs();
+        // Calculate distance using Chainlink (ground truth)
+        let distance = calculate_distance(signal_price, signal_strike);
+        let distance_dollars = (signal_price - signal_strike).abs();
 
         // Calculate order book metrics
         let yes_imbalance = calculate_imbalance(&state.yes_book);
@@ -267,6 +274,21 @@ impl DirectionalDetector {
 
         let confidence = ConfidenceCalculator::calculate(&factors);
 
+        // Calculate Binance lead over Chainlink using each feed's OWN baseline.
+        // This avoids systematic offset between feeds (Binance ~$30 higher than Chainlink).
+        // binance_delta = movement from Binance's own open price
+        // chainlink_delta = movement from Chainlink's own strike price
+        // lead = binance_delta - chainlink_delta → positive means Binance moved further
+        let binance_lead = if let (Some(cl), Some(cl_strike), Some(bn_open)) =
+            (state.chainlink_price, state.chainlink_strike, state.binance_at_open)
+        {
+            let binance_delta = calculate_distance(spot_price, bn_open);
+            let chainlink_delta = calculate_distance(cl, cl_strike);
+            Some(binance_delta - chainlink_delta)
+        } else {
+            None
+        };
+
         Ok(DirectionalOpportunity {
             event_id: state.event_id.clone(),
             yes_token_id: state.yes_book.token_id.clone(),
@@ -283,6 +305,7 @@ impl DirectionalDetector {
             yes_imbalance,
             no_imbalance,
             detected_at_ms: chrono::Utc::now().timestamp_millis(),
+            binance_lead,
         })
     }
 
@@ -400,6 +423,7 @@ mod tests {
             yes_imbalance: dec!(0.1),
             no_imbalance: dec!(-0.1),
             detected_at_ms: 0,
+            binance_lead: None,
         };
 
         assert_eq!(opp.expected_profit(), dec!(0.02));
@@ -423,6 +447,7 @@ mod tests {
             yes_imbalance: dec!(0),
             no_imbalance: dec!(0),
             detected_at_ms: 0,
+            binance_lead: None,
         };
 
         assert!(strong_up.is_strong());
@@ -777,6 +802,7 @@ mod tests {
             yes_imbalance: dec!(0.1),
             no_imbalance: dec!(-0.1),
             detected_at_ms: 12345,
+            binance_lead: None,
         };
 
         let json = serde_json::to_string(&opp).unwrap();

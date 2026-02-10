@@ -60,6 +60,7 @@ fn create_directional_opportunity() -> DirectionalOpportunity {
         combined_cost: dec!(0.98),
         yes_imbalance: dec!(0.2),
         no_imbalance: dec!(0.0),
+        binance_lead: None,
         detected_at_ms: chrono::Utc::now().timestamp_millis(),
     }
 }

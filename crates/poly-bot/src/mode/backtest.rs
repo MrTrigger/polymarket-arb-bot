@@ -142,7 +142,8 @@ impl BacktestModeConfig {
         };
 
         let mut strategy = StrategyConfig::from_trading_config(config.effective_trading_config(), (config.window_duration.minutes() * 60) as i64)
-            .with_execution(config.execution.clone());
+            .with_execution(config.execution.clone())
+            .with_oracle(&config.oracle);
 
         // Apply directional engine overrides from TOML (if set)
         let dir = &config.engines.directional;
