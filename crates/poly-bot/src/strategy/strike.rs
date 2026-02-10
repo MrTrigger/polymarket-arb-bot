@@ -70,16 +70,17 @@ async fn fetch_page_prices(
 
 /// Fetch the strike price (openPrice) from Polymarket's event page.
 ///
-/// Retries once after 1s if openPrice is missing (SSR cache may not be populated yet).
+/// Retries up to 4 times with 2s delay if openPrice is missing (SSR cache inconsistency,
+/// especially for lower-traffic assets like XRP).
 pub async fn fetch_polymarket_strike(
     http: &reqwest::Client,
     asset: CryptoAsset,
     window_start: DateTime<Utc>,
     window_duration: &str,
 ) -> Option<Decimal> {
-    for attempt in 0..2 {
+    for attempt in 0..5 {
         if attempt > 0 {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
         if let Some(prices) = fetch_page_prices(http, asset, window_start, window_duration).await {
             if let Some(open) = prices.open_price {
@@ -88,7 +89,7 @@ pub async fn fetch_polymarket_strike(
             info!("openPrice not populated for {:?} (attempt {})", asset, attempt + 1);
         }
     }
-    warn!("openPrice not available after 2 attempts for {:?}", asset);
+    warn!("openPrice not available after 5 attempts for {:?}", asset);
     None
 }
 

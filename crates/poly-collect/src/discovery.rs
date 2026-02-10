@@ -50,7 +50,7 @@ pub enum DiscoveryError {
 /// Market discovery client for finding 15-minute crypto markets.
 pub struct MarketDiscovery {
     http: Client,
-    db: Arc<ClickHouseClient>,
+    db: Option<Arc<ClickHouseClient>>,
     /// Assets to track.
     assets: Vec<CryptoAsset>,
     /// Known market event IDs to avoid re-processing.
@@ -63,7 +63,7 @@ pub struct MarketDiscovery {
 
 impl MarketDiscovery {
     /// Create a new market discovery client.
-    pub fn new(db: Arc<ClickHouseClient>, assets: Vec<CryptoAsset>) -> Self {
+    pub fn new(db: Option<Arc<ClickHouseClient>>, assets: Vec<CryptoAsset>) -> Self {
         let http = Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
@@ -480,13 +480,14 @@ impl MarketDiscovery {
         Decimal::ZERO
     }
 
-    /// Store discovered markets to ClickHouse.
+    /// Store discovered markets to ClickHouse (if available).
     async fn store_markets(&self, markets: &[MarketWindow]) -> Result<(), DiscoveryError> {
-        self.db
-            .insert_market_windows(markets)
-            .await
-            .map_err(DiscoveryError::ClickHouse)?;
-        info!("Stored {} new markets to ClickHouse", markets.len());
+        if let Some(db) = &self.db {
+            db.insert_market_windows(markets)
+                .await
+                .map_err(DiscoveryError::ClickHouse)?;
+            info!("Stored {} new markets to ClickHouse", markets.len());
+        }
         Ok(())
     }
 
@@ -546,7 +547,7 @@ mod tests {
         ];
         MarketDiscovery {
             http: Client::new(),
-            db: Arc::new(ClickHouseClient::with_defaults()),
+            db: None,
             assets: assets.clone(),
             known_markets: HashSet::new(),
             discovered_windows: Vec::new(),

@@ -2477,7 +2477,7 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                         );
                     }
 
-                    let action = self.execute_directional(opp, total_size).await?;
+                    let action = self.execute_directional(opp, total_size, pm_confidence).await?;
 
                     // Record decision with engine source
                     self.record_multi_decision(
@@ -2988,6 +2988,7 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
         &mut self,
         opportunity: &DirectionalOpportunity,
         total_size: Decimal,
+        bounded_confidence: Decimal,
     ) -> Result<TradeAction, StrategyError> {
         let event_id = opportunity.event_id.clone();
 
@@ -3254,8 +3255,10 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             market.inventory.record_fill(outcome, filled_size, filled_cost);
 
             // Set position direction and peak confidence for reactive hedge tracking
+            // Use bounded confidence (same scale as check_reactive_hedge receives)
+            // to avoid false "drop" when raw multiplier > 1.0 but bounded pm_conf < 1.0
             market.position_direction = Some(is_up);
-            market.peak_confidence = market.peak_confidence.max(opportunity.confidence.total_multiplier());
+            market.peak_confidence = market.peak_confidence.max(bounded_confidence);
 
             // Log fill to trades log
             if let Some(ref logger) = self.trades_logger {

@@ -256,21 +256,16 @@ async fn run_live_mode(
     // Health statistics
     let stats = Arc::new(HealthStats::default());
 
-    // Spawn discovery task (needs ClickHouse for market window storage)
-    let discovery_handle = if let Some(db) = clickhouse.clone() {
-        Some(spawn_discovery_task(
-            db,
-            Arc::clone(&writer),
-            config.assets.clone(),
-            Arc::clone(&active_markets),
-            Arc::clone(&stats),
-            config.discovery_interval,
-            shutdown_tx.subscribe(),
-        ))
-    } else {
-        warn!("Discovery disabled (requires ClickHouse)");
-        None
-    };
+    // Spawn discovery task (works with or without ClickHouse — CSV output always available)
+    let discovery_handle = spawn_discovery_task(
+        clickhouse.clone(),
+        Arc::clone(&writer),
+        config.assets.clone(),
+        Arc::clone(&active_markets),
+        Arc::clone(&stats),
+        config.discovery_interval,
+        shutdown_tx.subscribe(),
+    );
 
     // Spawn Binance capture task
     let binance_handle = spawn_binance_task(
@@ -374,7 +369,7 @@ async fn run_live_mode(
 
     tokio::select! {
         _ = async {
-            if let Some(h) = discovery_handle { let _ = h.await; }
+            let _ = discovery_handle.await;
             let _ = binance_handle.await;
             let _ = clob_handle.await;
             let _ = rtds_handle.await;
@@ -412,7 +407,7 @@ async fn run_live_mode(
 
 /// Spawn the discovery task.
 fn spawn_discovery_task(
-    db: Arc<ClickHouseClient>,
+    db: Option<Arc<ClickHouseClient>>,
     writer: Arc<DataWriter>,
     assets: Vec<CryptoAsset>,
     active_markets: ActiveMarkets,
