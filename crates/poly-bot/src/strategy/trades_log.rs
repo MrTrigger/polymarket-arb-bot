@@ -34,8 +34,6 @@ const COL_TYPE: usize = 2;
 const COL_EVENT_ID: usize = 3;
 const COL_ASSET: usize = 4;
 const COL_COST: usize = 9;
-const COL_BALANCE: usize = 14;
-const COL_PAYOUT: usize = 19;
 const COL_PNL: usize = 20;
 
 const CSV_HEADER: &str = "timestamp,mode,type,event_id,asset,outcome,shares,price,fee,cost,strike_price,spot_price,signal,confidence,balance,yes_wins,yes_shares_after,no_shares_after,cost_basis_after,payout,realized_pnl\n";
@@ -235,7 +233,8 @@ impl TradesLogger {
         let mut assets_traded: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut events_traded: std::collections::HashSet<String> = std::collections::HashSet::new();
         // Track balance at each settlement for drawdown/sharpe
-        let mut balance_series: Vec<f64> = vec![self.initial_balance.to_f64().unwrap_or(1000.0)];
+        let initial_bal = self.initial_balance.to_f64().unwrap_or(1000.0);
+        let mut balance_series: Vec<f64> = vec![initial_bal];
         let mut pnl_series: Vec<f64> = Vec::new();
 
         for line in content.lines().skip(1) {
@@ -268,14 +267,11 @@ impl TradesLogger {
                             gross_loss += pnl.abs();
                         }
                     }
-                    if let Ok(bal) = cols[COL_BALANCE].parse::<f64>() {
-                        balance_series.push(bal);
-                    } else if let Ok(payout) = cols[COL_PAYOUT].parse::<Decimal>() {
-                        // Fallback: compute from running pnl
-                        let last = *balance_series.last().unwrap_or(&1000.0);
+                    // Compute running balance from P&L (executor may not track balance)
+                    {
+                        let last = *balance_series.last().unwrap_or(&initial_bal);
                         let pnl_val = cols[COL_PNL].parse::<f64>().unwrap_or(0.0);
                         balance_series.push(last + pnl_val);
-                        let _ = payout; // suppress unused
                     }
                 }
                 _ => {}

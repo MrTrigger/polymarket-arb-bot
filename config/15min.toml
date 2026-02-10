@@ -85,9 +85,10 @@ min_seconds_remaining = 120
 min_spread_bps = 100
 
 [backtest]
-data_dir = "data/live_test"
+data_dir = "analysis/session_2026-02-09T12-19"
 speed = 0.0
-sweep_enabled = false
+sweep_enabled = true
+fill_delay_ms = 500
 # book_interval_ms = 1000  # Data already pre-downsampled to 1s
 
 [backtest.trading]
@@ -97,11 +98,11 @@ max_total_exposure = 1000.0
 base_order_size = 10.0
 
 [backtest.sweep]
-# Boundary exploration: dist_conf=0.40 was best, check if higher is better
-# edge and time_conf have minimal effect, fix at best values
-edge_factors = [0.03]
+# Re-sweep with 500ms fill delay to find optimal params under realistic latency
+# Fix time_conf at best known value, sweep edge and dist_conf
+edge_factors = [0.01, 0.03, 0.05]
 time_conf_floors = [0.20]
-dist_conf_per_atrs = [0.40, 0.50, 0.60, 0.70, 0.80]
+dist_conf_per_atrs = [0.40, 0.60, 0.80]
 
 [observability]
 capture_decisions = true

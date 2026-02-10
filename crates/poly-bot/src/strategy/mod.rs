@@ -1615,9 +1615,14 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             let no_shares = market.inventory.no_shares;
             let cost_basis = market.inventory.yes_cost_basis + market.inventory.no_cost_basis;
 
-            let realized_pnl = self.executor.settle_market(&event.event_id, yes_wins).await;
+            // Compute P&L from strategy's own inventory (executor may not track positions)
+            let payout = if yes_wins { yes_shares } else { no_shares };
+            let realized_pnl = payout - cost_basis;
 
-            if realized_pnl != Decimal::ZERO {
+            // Still notify the executor (e.g. simulated executor updates its balance)
+            let _ = self.executor.settle_market(&event.event_id, yes_wins).await;
+
+            if cost_basis != Decimal::ZERO {
                 // Update global state with realized PnL (convert to cents)
                 let pnl_cents = (realized_pnl * Decimal::new(100, 0)).to_i64().unwrap_or(0);
                 self.state.metrics.add_pnl_cents(pnl_cents);
@@ -1627,6 +1632,8 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                     asset = ?asset,
                     yes_wins = %yes_wins,
                     final_spot = %final_spot,
+                    payout = %payout,
+                    cost_basis = %cost_basis,
                     realized_pnl = %realized_pnl,
                     "Market settled at window close"
                 );
@@ -1634,7 +1641,6 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
 
             // Log settlement to trades log
             if let Some(ref logger) = self.trades_logger {
-                let payout = if yes_wins { yes_shares } else { no_shares };
                 logger.log_settlement(
                     Utc::now(), &event.event_id, asset, yes_wins,
                     strike_price, final_spot,
@@ -1708,9 +1714,14 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
         let expired = self.collect_expired_markets(self.simulated_time);
 
         for (event_id, _, _, yes_wins, asset, strike_price, final_spot, yes_shares, no_shares, cost_basis) in expired {
-            let realized_pnl = self.executor.settle_market(&event_id, yes_wins).await;
+            // Compute P&L from strategy's own inventory (executor may not track positions)
+            let payout = if yes_wins { yes_shares } else { no_shares };
+            let realized_pnl = payout - cost_basis;
 
-            if realized_pnl != Decimal::ZERO {
+            // Still notify the executor (e.g. simulated executor updates its balance)
+            let _ = self.executor.settle_market(&event_id, yes_wins).await;
+
+            if cost_basis != Decimal::ZERO {
                 // Update global state with realized PnL (convert to cents)
                 let pnl_cents = (realized_pnl * Decimal::new(100, 0)).to_i64().unwrap_or(0);
                 self.state.metrics.add_pnl_cents(pnl_cents);
@@ -1719,6 +1730,8 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                     event_id = %event_id,
                     asset = ?asset,
                     yes_wins = %yes_wins,
+                    payout = %payout,
+                    cost_basis = %cost_basis,
                     realized_pnl = %realized_pnl,
                     "Market settled"
                 );
@@ -1728,7 +1741,6 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
 
             // Log settlement to trades log
             if let Some(ref logger) = self.trades_logger {
-                let payout = if yes_wins { yes_shares } else { no_shares };
                 logger.log_settlement(
                     self.simulated_time, &event_id, asset, yes_wins,
                     strike_price, final_spot,
@@ -2116,8 +2128,12 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                                     pm_conf, ev, min_edge, phase, favorable_price
                                 );
                             }
-                            // Only record decision for meaningful skips, not low confidence
-                            if !matches!(reason, position::SkipReason::LowConfidence) {
+                            // Only record decision for meaningful skips, not repetitive steady-state ones
+                            if !matches!(reason,
+                                position::SkipReason::LowConfidence
+                                | position::SkipReason::PhaseBudgetExhausted
+                                | position::SkipReason::TotalBudgetExhausted
+                            ) {
                                 self.record_multi_decision(
                                     &event_id,
                                     asset,
@@ -2652,24 +2668,25 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             Decimal::ZERO
         };
 
-        // If main leg is below minimum, scale both legs proportionally to maintain ratio
-        // This ensures we meet minimum order size without distorting the hedge ratio
-        let (up_shares_final, down_shares_final) = if up_ratio > down_ratio {
-            // UP is the main leg
-            if up_shares_raw > Decimal::ZERO && up_shares_raw < min_order_size {
-                let scale_factor = min_order_size / up_shares_raw;
-                (min_order_size, (down_shares_raw * scale_factor).floor())
-            } else {
-                (up_shares_raw, down_shares_raw)
+        // Ensure BOTH legs meet min_order_size by scaling proportionally.
+        // Without this, the minor (hedge) leg gets silently dropped at order placement,
+        // leaving the position 100% directional.
+        let (up_shares_final, down_shares_final) = {
+            let (mut up, mut down) = (up_shares_raw, down_shares_raw);
+
+            // Scale up if the minor leg is below minimum — scale both to preserve ratio
+            if up > Decimal::ZERO && up < min_order_size {
+                let scale = min_order_size / up;
+                up = min_order_size;
+                down = (down * scale).floor();
             }
-        } else {
-            // DOWN is the main leg
-            if down_shares_raw > Decimal::ZERO && down_shares_raw < min_order_size {
-                let scale_factor = min_order_size / down_shares_raw;
-                ((up_shares_raw * scale_factor).floor(), min_order_size)
-            } else {
-                (up_shares_raw, down_shares_raw)
+            if down > Decimal::ZERO && down < min_order_size {
+                let scale = min_order_size / down;
+                down = min_order_size;
+                up = (up * scale).floor();
             }
+
+            (up, down)
         };
 
         info!(
