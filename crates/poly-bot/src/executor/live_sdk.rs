@@ -367,7 +367,10 @@ impl Executor for LiveSdkExecutor {
                     || error_msg.contains("post-only")
                     || error_msg.contains("post only")
                     || error_msg.contains("not enough balance")
-                    || error_msg.contains("allowance");
+                    || error_msg.contains("allowance")
+                    || error_msg.contains("no orders found to match")
+                    || error_msg.contains("min size")
+                    || error_msg.contains("invalid amount");
 
                 if is_rejection {
                     return Ok(OrderResult::Rejected(OrderRejection {
@@ -413,6 +416,99 @@ impl Executor for LiveSdkExecutor {
         {
             let mut pending = self.pending.write().await;
             pending.push(pending_order.clone());
+        }
+
+        // For market (FAK) orders, poll immediately for fill status.
+        // FAK orders resolve instantly on Polymarket — they either match or are killed.
+        if is_market_order {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+            if let Some(result) = self.order_status(&order_id).await {
+                // Clean up pending tracking for resolved orders
+                let is_resolved = matches!(
+                    &result,
+                    OrderResult::Filled(_) | OrderResult::PartialFill(_) | OrderResult::Cancelled(_)
+                );
+                if is_resolved {
+                    let mut pending = self.pending.write().await;
+                    pending.retain(|p| p.order_id != order_id);
+                }
+
+                match result {
+                    OrderResult::Filled(fill) => {
+                        info!(
+                            request_id = %request.request_id,
+                            order_id = %order_id,
+                            size = %fill.size,
+                            price = %fill.price,
+                            "Market order filled"
+                        );
+                        return Ok(OrderResult::Filled(fill));
+                    }
+                    OrderResult::PartialFill(pf) => {
+                        info!(
+                            request_id = %request.request_id,
+                            order_id = %order_id,
+                            filled = %pf.filled_size,
+                            requested = %pf.requested_size,
+                            "Market order partially filled (FAK)"
+                        );
+                        // Return as Filled with the partial amount
+                        return Ok(OrderResult::Filled(OrderFill {
+                            request_id: pf.request_id,
+                            order_id: pf.order_id,
+                            size: pf.filled_size,
+                            price: pf.avg_price,
+                            fee: pf.fee,
+                            timestamp: pf.timestamp,
+                        }));
+                    }
+                    OrderResult::Cancelled(cancel) => {
+                        if cancel.filled_size > Decimal::ZERO {
+                            info!(
+                                request_id = %request.request_id,
+                                order_id = %order_id,
+                                filled = %cancel.filled_size,
+                                "Market order partially filled then cancelled"
+                            );
+                            return Ok(OrderResult::Filled(OrderFill {
+                                request_id: cancel.request_id,
+                                order_id: cancel.order_id,
+                                size: cancel.filled_size,
+                                price: Decimal::ZERO, // price unknown from cancel response
+                                fee: Decimal::ZERO,
+                                timestamp: cancel.timestamp,
+                            }));
+                        }
+                        info!(
+                            request_id = %request.request_id,
+                            order_id = %order_id,
+                            "Market order unmatched (no liquidity)"
+                        );
+                        return Ok(OrderResult::Rejected(OrderRejection {
+                            request_id: request.request_id.clone(),
+                            reason: "FAK order unmatched - no liquidity".to_string(),
+                            timestamp: Utc::now(),
+                        }));
+                    }
+                    _ => {
+                        // Still pending after 100ms - unusual for FAK, retry once
+                        warn!(
+                            request_id = %request.request_id,
+                            order_id = %order_id,
+                            "Market order still pending after 100ms, retrying poll"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                        if let Some(retry_result) = self.order_status(&order_id).await {
+                            if let OrderResult::Filled(fill) = retry_result {
+                                let mut pending = self.pending.write().await;
+                                pending.retain(|p| p.order_id != order_id);
+                                return Ok(OrderResult::Filled(fill));
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         Ok(OrderResult::Pending(pending_order))
