@@ -9,11 +9,6 @@
 # ============================================================================
 
 [tuning]
-# Allocation ratios for directional signals (0.0 to 1.0)
-# Higher = more aggressive on signal direction
-strong_up_ratio = 0.80    # Strong UP: 80% YES, 20% NO (sweep optimal)
-lean_up_ratio = 0.55      # Lean UP: 65% YES, 35% NO (sweep optimal)
-
 # Confidence calculation params
 # time_conf = time_conf_floor + (1 - time_conf_floor) * (1 - time_ratio)
 # dist_conf = clamp(dist_conf_floor + dist_conf_per_atr * atr_multiple, floor, 1.0)
@@ -34,9 +29,6 @@ max_edge_factor = 0.15    # 30% EV required at window start, decays to 0 (sweep 
 # Base order size sweep (key parameter for trade frequency vs size tradeoff)
 #base_order_sizes = [5, 10, 15]
 
-# Always swept
-#strong_ratios = [0.75, 0.80, 0.85]
-#lean_ratios = [0.45, 0.50, 0.55]
 
 # Edge factor sweep (quality filter)
 edge_factors = [0.15, 0.20, 0.25]

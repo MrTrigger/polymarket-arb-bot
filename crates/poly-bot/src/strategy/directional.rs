@@ -2,24 +2,16 @@
 //!
 //! This module implements directional trading based on price signals:
 //! - Uses Signal system to determine market bias
-//! - Calculates UP/DOWN allocation ratios based on signal strength
 //! - Computes confidence for position sizing
+//! - Goes 100% directional on entry (no default hedge)
+//! - Reactive hedging is handled separately in `check_reactive_hedge()`
 //!
 //! ## Strategy Overview
 //!
 //! When spot price diverges from strike, a directional opportunity exists:
-//! - StrongUp signal: Favor UP heavily (78% UP / 22% DOWN)
-//! - LeanUp signal: Favor UP slightly (60% UP / 40% DOWN)
-//! - Neutral signal: Skip trading (no edge)
-//! - LeanDown signal: Favor DOWN slightly (40% UP / 60% DOWN)
-//! - StrongDown signal: Favor DOWN heavily (22% UP / 78% DOWN)
-//!
-//! ## Hedging
-//!
-//! Unlike pure directional bets, we always buy both sides:
-//! - Guaranteed $1.00 payout at settlement
-//! - Asymmetric allocation captures directional edge
-//! - Reduces variance while maintaining expected value
+//! - StrongUp/LeanUp: Buy YES shares only
+//! - StrongDown/LeanDown: Buy NO shares only
+//! - Neutral: Skip trading (no edge)
 
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -73,10 +65,6 @@ pub struct DirectionalOpportunity {
     pub no_token_id: String,
     /// Detected signal.
     pub signal: Signal,
-    /// UP allocation ratio (0.0 to 1.0).
-    pub up_ratio: Decimal,
-    /// DOWN allocation ratio (0.0 to 1.0).
-    pub down_ratio: Decimal,
     /// Confidence breakdown for sizing.
     pub confidence: Confidence,
     /// Spot price used for detection.
@@ -149,10 +137,6 @@ pub struct DirectionalConfig {
     pub max_spread_ratio: Decimal,
     /// Minimum depth required on favorable side (in dollars).
     pub min_favorable_depth: Decimal,
-    /// UP allocation ratio for StrongUp signal (0.0-1.0).
-    pub strong_up_ratio: Decimal,
-    /// UP allocation ratio for LeanUp signal (0.0-1.0).
-    pub lean_up_ratio: Decimal,
 }
 
 impl Default for DirectionalConfig {
@@ -162,8 +146,6 @@ impl Default for DirectionalConfig {
             max_combined_cost: dec!(0.995), // At least 0.5% margin
             max_spread_ratio: dec!(0.10), // Max 10% spread
             min_favorable_depth: dec!(100), // At least $100 depth
-            strong_up_ratio: dec!(0.82), // 82% UP for StrongUp
-            lean_up_ratio: dec!(0.65), // 65% UP for LeanUp
         }
     }
 }
@@ -285,17 +267,11 @@ impl DirectionalDetector {
 
         let confidence = ConfidenceCalculator::calculate(&factors);
 
-        // Use config ratios based on signal type
-        let up_ratio = self.up_ratio_for_signal(signal);
-        let down_ratio = Decimal::ONE - up_ratio;
-
         Ok(DirectionalOpportunity {
             event_id: state.event_id.clone(),
             yes_token_id: state.yes_book.token_id.clone(),
             no_token_id: state.no_book.token_id.clone(),
             signal,
-            up_ratio,
-            down_ratio,
             confidence,
             spot_price,
             strike_price: state.strike_price,
@@ -308,18 +284,6 @@ impl DirectionalDetector {
             no_imbalance,
             detected_at_ms: chrono::Utc::now().timestamp_millis(),
         })
-    }
-
-    /// Get the UP ratio for a given signal using config values.
-    #[inline]
-    fn up_ratio_for_signal(&self, signal: Signal) -> Decimal {
-        match signal {
-            Signal::StrongUp => self.config.strong_up_ratio,
-            Signal::LeanUp => self.config.lean_up_ratio,
-            Signal::Neutral => dec!(0.50),
-            Signal::LeanDown => Decimal::ONE - self.config.lean_up_ratio,
-            Signal::StrongDown => Decimal::ONE - self.config.strong_up_ratio,
-        }
     }
 
     /// Quick check if directional opportunity might exist.
@@ -425,8 +389,6 @@ mod tests {
             yes_token_id: "yes".to_string(),
             no_token_id: "no".to_string(),
             signal: Signal::StrongUp,
-            up_ratio: dec!(0.78),
-            down_ratio: dec!(0.22),
             confidence: Confidence::neutral(),
             spot_price: dec!(100500),
             strike_price: dec!(100000),
@@ -450,8 +412,6 @@ mod tests {
             yes_token_id: "yes".to_string(),
             no_token_id: "no".to_string(),
             signal: Signal::StrongUp,
-            up_ratio: dec!(0.78),
-            down_ratio: dec!(0.22),
             confidence: Confidence::neutral(),
             spot_price: dec!(100500),
             strike_price: dec!(100000),
@@ -469,8 +429,6 @@ mod tests {
 
         let lean_up = DirectionalOpportunity {
             signal: Signal::LeanUp,
-            up_ratio: dec!(0.60),
-            down_ratio: dec!(0.40),
             ..strong_up.clone()
         };
 
@@ -554,7 +512,7 @@ mod tests {
     fn test_detect_neutral_signal() {
         let detector = DirectionalDetector::new();
         let mut state = create_test_market_state(Some(dec!(100000)), dec!(100000), 300);
-        add_book_levels(&mut state, dec!(0.45), dec!(0.48), dec!(0.45), dec!(0.48));
+        add_book_levels(&mut state, dec!(0.48), dec!(0.50), dec!(0.48), dec!(0.50));
 
         let result = detector.detect(&state);
         assert_eq!(result.unwrap_err(), DirectionalSkipReason::NeutralSignal);
@@ -584,18 +542,14 @@ mod tests {
     fn test_detect_strong_up_signal() {
         let detector = DirectionalDetector::new();
         // 0.25% above strike at 5 minutes -> StrongUp
-        // 5 minutes is in 3-10 min bracket: strong=0.021%, lean=0.011%
-        // 0.25% > 0.021% -> StrongUp with optimized 82/18 ratio
         let mut state = create_test_market_state(Some(dec!(100250)), dec!(100000), 300);
-        add_book_levels(&mut state, dec!(0.45), dec!(0.48), dec!(0.45), dec!(0.48));
+        add_book_levels(&mut state, dec!(0.48), dec!(0.50), dec!(0.48), dec!(0.50));
 
         let result = detector.detect(&state);
         assert!(result.is_ok());
 
         let opp = result.unwrap();
         assert_eq!(opp.signal, Signal::StrongUp);
-        assert_eq!(opp.up_ratio, dec!(0.82));  // Optimized
-        assert_eq!(opp.down_ratio, dec!(0.18));
     }
 
     #[test]
@@ -604,33 +558,27 @@ mod tests {
         // 5 minutes is in 3-10 min bracket: strong=0.021%, lean=0.011%
         // 0.015% is between lean (0.011%) and strong (0.021%) -> LeanUp
         let mut state = create_test_market_state(Some(dec!(100015)), dec!(100000), 300);
-        add_book_levels(&mut state, dec!(0.45), dec!(0.48), dec!(0.45), dec!(0.48));
+        add_book_levels(&mut state, dec!(0.48), dec!(0.50), dec!(0.48), dec!(0.50));
 
         let result = detector.detect(&state);
         assert!(result.is_ok());
 
         let opp = result.unwrap();
         assert_eq!(opp.signal, Signal::LeanUp);
-        assert_eq!(opp.up_ratio, dec!(0.65));  // Optimized
-        assert_eq!(opp.down_ratio, dec!(0.35));
     }
 
     #[test]
     fn test_detect_strong_down_signal() {
         let detector = DirectionalDetector::new();
         // 0.25% below strike at 5 minutes -> StrongDown
-        // 5 minutes is in 3-10 min bracket: strong=0.021%, lean=0.011%
-        // 0.25% > 0.021% -> StrongDown with optimized 18/82 ratio
         let mut state = create_test_market_state(Some(dec!(99750)), dec!(100000), 300);
-        add_book_levels(&mut state, dec!(0.45), dec!(0.48), dec!(0.45), dec!(0.48));
+        add_book_levels(&mut state, dec!(0.48), dec!(0.50), dec!(0.48), dec!(0.50));
 
         let result = detector.detect(&state);
         assert!(result.is_ok());
 
         let opp = result.unwrap();
         assert_eq!(opp.signal, Signal::StrongDown);
-        assert_eq!(opp.up_ratio, dec!(0.18));  // Optimized
-        assert_eq!(opp.down_ratio, dec!(0.82));
     }
 
     #[test]
@@ -639,49 +587,37 @@ mod tests {
         // 5 minutes is in 3-10 min bracket: strong=0.021%, lean=0.011%
         // 0.015% is between lean (0.011%) and strong (0.021%) -> LeanDown
         let mut state = create_test_market_state(Some(dec!(99985)), dec!(100000), 300);
-        add_book_levels(&mut state, dec!(0.45), dec!(0.48), dec!(0.45), dec!(0.48));
+        add_book_levels(&mut state, dec!(0.48), dec!(0.50), dec!(0.48), dec!(0.50));
 
         let result = detector.detect(&state);
         assert!(result.is_ok());
 
         let opp = result.unwrap();
         assert_eq!(opp.signal, Signal::LeanDown);
-        assert_eq!(opp.up_ratio, dec!(0.35));  // Optimized
-        assert_eq!(opp.down_ratio, dec!(0.65));
     }
 
     // =========================================================================
-    // Signal Ratio Tests (Optimized)
+    // Signal Detection Tests (no ratios — single-leg directional)
     // =========================================================================
 
     #[test]
-    fn test_strong_up_returns_spec_ratio() {
+    fn test_strong_up_detected() {
         let detector = DirectionalDetector::new();
-        // 0.3% above strike at 5 minutes -> StrongUp
-        // Optimized: Strong signals use 82/18 ratio
         let mut state = create_test_market_state(Some(dec!(100300)), dec!(100000), 300);
-        add_book_levels(&mut state, dec!(0.45), dec!(0.48), dec!(0.45), dec!(0.48));
+        add_book_levels(&mut state, dec!(0.48), dec!(0.50), dec!(0.48), dec!(0.50));
 
         let opp = detector.detect(&state).unwrap();
         assert_eq!(opp.signal, Signal::StrongUp);
-        assert_eq!(opp.up_ratio, dec!(0.82));  // Optimized
-        assert_eq!(opp.down_ratio, dec!(0.18));
-        assert_eq!(opp.up_ratio + opp.down_ratio, Decimal::ONE);
     }
 
     #[test]
-    fn test_strong_down_returns_spec_ratio() {
+    fn test_strong_down_detected() {
         let detector = DirectionalDetector::new();
-        // 0.3% below strike at 5 minutes -> StrongDown
-        // Optimized: Strong signals use 18/82 ratio
         let mut state = create_test_market_state(Some(dec!(99700)), dec!(100000), 300);
-        add_book_levels(&mut state, dec!(0.45), dec!(0.48), dec!(0.45), dec!(0.48));
+        add_book_levels(&mut state, dec!(0.48), dec!(0.50), dec!(0.48), dec!(0.50));
 
         let opp = detector.detect(&state).unwrap();
         assert_eq!(opp.signal, Signal::StrongDown);
-        assert_eq!(opp.up_ratio, dec!(0.18));  // Optimized
-        assert_eq!(opp.down_ratio, dec!(0.82));
-        assert_eq!(opp.up_ratio + opp.down_ratio, Decimal::ONE);
     }
 
     // =========================================================================
@@ -706,7 +642,7 @@ mod tests {
     fn test_has_potential_insufficient_time() {
         let detector = DirectionalDetector::new();
         let mut state = create_test_market_state(Some(dec!(100000)), dec!(100000), 30);
-        add_book_levels(&mut state, dec!(0.45), dec!(0.48), dec!(0.45), dec!(0.48));
+        add_book_levels(&mut state, dec!(0.48), dec!(0.50), dec!(0.48), dec!(0.50));
         assert!(!detector.has_potential(&state));
     }
 
@@ -714,7 +650,7 @@ mod tests {
     fn test_has_potential_valid() {
         let detector = DirectionalDetector::new();
         let mut state = create_test_market_state(Some(dec!(100000)), dec!(100000), 300);
-        add_book_levels(&mut state, dec!(0.45), dec!(0.48), dec!(0.45), dec!(0.48));
+        add_book_levels(&mut state, dec!(0.48), dec!(0.50), dec!(0.48), dec!(0.50));
         assert!(detector.has_potential(&state));
     }
 
@@ -779,7 +715,7 @@ mod tests {
     fn test_opportunity_has_confidence() {
         let detector = DirectionalDetector::new();
         let mut state = create_test_market_state(Some(dec!(100250)), dec!(100000), 300);
-        add_book_levels(&mut state, dec!(0.45), dec!(0.48), dec!(0.45), dec!(0.48));
+        add_book_levels(&mut state, dec!(0.48), dec!(0.50), dec!(0.48), dec!(0.50));
 
         let opp = detector.detect(&state).unwrap();
 
@@ -802,14 +738,14 @@ mod tests {
         // Strong signal: 0.1% distance at 5 min (3-10 min bracket: strong=0.015%, lean=0.01%)
         // 0.1% > 0.015% -> StrongUp
         let mut strong_state = create_test_market_state(Some(dec!(100100)), dec!(100000), 300);
-        add_book_levels(&mut strong_state, dec!(0.45), dec!(0.48), dec!(0.45), dec!(0.48));
+        add_book_levels(&mut strong_state, dec!(0.48), dec!(0.50), dec!(0.48), dec!(0.50));
         let strong_opp = detector.detect(&strong_state).unwrap();
         assert_eq!(strong_opp.signal, Signal::StrongUp);
 
         // Lean signal: 0.012% distance at 5 min (3-10 min bracket: strong=0.015%, lean=0.01%)
         // 0.01% < 0.012% < 0.015% -> LeanUp
         let mut lean_state = create_test_market_state(Some(dec!(100012)), dec!(100000), 300);
-        add_book_levels(&mut lean_state, dec!(0.45), dec!(0.48), dec!(0.45), dec!(0.48));
+        add_book_levels(&mut lean_state, dec!(0.48), dec!(0.50), dec!(0.48), dec!(0.50));
         let lean_opp = detector.detect(&lean_state).unwrap();
         assert_eq!(lean_opp.signal, Signal::LeanUp);
 
@@ -830,8 +766,6 @@ mod tests {
             yes_token_id: "yes".to_string(),
             no_token_id: "no".to_string(),
             signal: Signal::StrongUp,
-            up_ratio: dec!(0.78),
-            down_ratio: dec!(0.22),
             confidence: Confidence::neutral(),
             spot_price: dec!(100500),
             strike_price: dec!(100000),
@@ -847,12 +781,10 @@ mod tests {
 
         let json = serde_json::to_string(&opp).unwrap();
         assert!(json.contains("StrongUp"));
-        assert!(json.contains("0.78"));
         assert!(json.contains("test"));
 
         let parsed: DirectionalOpportunity = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.signal, Signal::StrongUp);
-        assert_eq!(parsed.up_ratio, dec!(0.78));
     }
 
     #[test]
@@ -884,7 +816,7 @@ mod tests {
 
         for (spot, expected_signal) in test_cases {
             let mut state = create_test_market_state(Some(spot), dec!(100000), 300);
-            add_book_levels(&mut state, dec!(0.45), dec!(0.48), dec!(0.45), dec!(0.48));
+            add_book_levels(&mut state, dec!(0.48), dec!(0.50), dec!(0.48), dec!(0.50));
 
             let result = detector.detect(&state);
             assert!(result.is_ok(), "Failed for spot={}", spot);
@@ -907,12 +839,12 @@ mod tests {
 
         // At 35 min (>30 min): strong=0.03%, lean=0.02%, 0.008% -> Neutral (skip)
         let mut state_early = create_test_market_state(Some(spot), strike, 2100);
-        add_book_levels(&mut state_early, dec!(0.45), dec!(0.48), dec!(0.45), dec!(0.48));
+        add_book_levels(&mut state_early, dec!(0.48), dec!(0.50), dec!(0.48), dec!(0.50));
         assert!(detector.detect(&state_early).is_err(), "Expected skip at 35 min with 0.008% distance");
 
         // At 2 min (<3 min): strong=0.009%, lean=0.006%, 0.008% -> LeanUp
         let mut state_late = create_test_market_state(Some(spot), strike, 120);
-        add_book_levels(&mut state_late, dec!(0.45), dec!(0.48), dec!(0.45), dec!(0.48));
+        add_book_levels(&mut state_late, dec!(0.48), dec!(0.50), dec!(0.48), dec!(0.50));
         let late_result = detector.detect(&state_late);
         assert!(late_result.is_ok(), "Expected LeanUp at 2 min with 0.008% distance");
         assert_eq!(late_result.unwrap().signal, Signal::LeanUp);
@@ -922,7 +854,7 @@ mod tests {
 
         // At 2 min: strong=0.009%, lean=0.006%, 0.02% -> StrongUp
         let mut state_very_late = create_test_market_state(Some(spot2), strike, 120);
-        add_book_levels(&mut state_very_late, dec!(0.45), dec!(0.48), dec!(0.45), dec!(0.48));
+        add_book_levels(&mut state_very_late, dec!(0.48), dec!(0.50), dec!(0.48), dec!(0.50));
         let very_late_result = detector.detect(&state_very_late);
         assert!(very_late_result.is_ok());
         assert_eq!(very_late_result.unwrap().signal, Signal::StrongUp);

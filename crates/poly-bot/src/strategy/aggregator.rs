@@ -358,8 +358,6 @@ mod tests {
             yes_token_id: "yes-token".to_string(),
             no_token_id: "no-token".to_string(),
             signal: Signal::StrongUp,
-            up_ratio: dec!(0.78),
-            down_ratio: dec!(0.22),
             confidence: Confidence::neutral(),
             spot_price: dec!(100500),
             strike_price: dec!(100000),

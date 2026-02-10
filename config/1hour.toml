@@ -65,8 +65,6 @@ min_favorable_depth = 50.0
 # ATR thresholds scaled for 1-hour volatility
 strong_threshold_late_bps = 15
 lean_threshold_late_bps = 10
-strong_up_ratio = 0.82
-lean_up_ratio = 0.65
 
 [engines.maker]
 enabled = false

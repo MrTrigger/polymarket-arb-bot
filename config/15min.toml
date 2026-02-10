@@ -69,8 +69,6 @@ min_favorable_depth = 50.0
 
 strong_threshold_late_bps = 9
 lean_threshold_late_bps = 6
-strong_up_ratio = 0.82
-lean_up_ratio = 0.65
 
 # Optimal values from sweep (20h L2 data, Jan 26-27)
 # Best risk-adjusted: 160.5% return / 23.9% DD / Ret/DD ratio 6.7x

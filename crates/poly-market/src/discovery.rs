@@ -400,17 +400,17 @@ impl MarketDiscovery {
             if let Some(mut market) = self.parse_crypto_market(&event)? {
                 // For "Up or Down" markets with no strike in title:
                 // Only fetch if the market is already active (window has started)
-                if market.strike_price.is_zero() && market.is_active() {
-                    if let Ok(Some(price)) = self
+                if market.strike_price.is_zero()
+                    && market.is_active()
+                    && let Ok(Some(price)) = self
                         .fetch_historical_spot_price(market.asset, market.window_start)
                         .await
-                    {
-                        debug!(
-                            "Setting strike price for {} from Binance at {}: ${}",
-                            market.event_id, market.window_start, price
-                        );
-                        market.strike_price = price;
-                    }
+                {
+                    debug!(
+                        "Setting strike price for {} from Binance at {}: ${}",
+                        market.event_id, market.window_start, price
+                    );
+                    market.strike_price = price;
                 }
 
                 // Track in known markets

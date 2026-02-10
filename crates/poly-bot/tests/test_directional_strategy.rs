@@ -211,8 +211,6 @@ fn test_detector_detects_strong_up_opportunity() {
 
     let opp = result.unwrap();
     assert_eq!(opp.signal, Signal::StrongUp);
-    assert_eq!(opp.up_ratio, dec!(0.82));  // Optimized
-    assert_eq!(opp.down_ratio, dec!(0.18));
 }
 
 #[test]
@@ -228,8 +226,6 @@ fn test_detector_detects_strong_down_opportunity() {
 
     let opp = result.unwrap();
     assert_eq!(opp.signal, Signal::StrongDown);
-    assert_eq!(opp.up_ratio, dec!(0.18));  // Optimized
-    assert_eq!(opp.down_ratio, dec!(0.82));
 }
 
 #[test]
@@ -568,5 +564,4 @@ fn test_directional_opportunity_serialization() {
     // Should deserialize back
     let deserialized: DirectionalOpportunity = serde_json::from_str(&serialized).unwrap();
     assert_eq!(deserialized.signal, opp.signal);
-    assert_eq!(deserialized.up_ratio, opp.up_ratio);
 }

@@ -119,8 +119,6 @@ pub struct DecisionLogConfig {
     pub available_balance: Decimal,
     pub max_edge_factor: Decimal,
     pub window_duration_secs: i64,
-    pub strong_up_ratio: Decimal,
-    pub lean_up_ratio: Decimal,
 }
 
 /// Logger that writes decisions to CSV.
@@ -177,8 +175,6 @@ impl DecisionLogger {
         writeln!(file, "# available_balance: {}", config.available_balance)?;
         writeln!(file, "# max_edge_factor: {}", config.max_edge_factor)?;
         writeln!(file, "# window_duration_secs: {}", config.window_duration_secs)?;
-        writeln!(file, "# strong_up_ratio: {}", config.strong_up_ratio)?;
-        writeln!(file, "# lean_up_ratio: {}", config.lean_up_ratio)?;
         writeln!(file, "#")
     }
 
@@ -195,6 +191,63 @@ impl DecisionLogger {
         if let Ok(mut file) = self.file.lock() {
             let _ = file.write_all(row.as_bytes());
         }
+    }
+
+    /// Log a reactive hedge decision (trigger, skip, or fill).
+    #[allow(clippy::too_many_arguments)]
+    pub fn log_hedge(
+        &self,
+        timestamp: DateTime<Utc>,
+        event_id: &str,
+        asset: CryptoAsset,
+        spot_price: Decimal,
+        strike_price: Decimal,
+        seconds_remaining: i64,
+        signal: Signal,
+        confidence: Decimal,
+        peak_confidence: Decimal,
+        tier: usize,
+        drop_pct: Decimal,
+        signal_flipped: bool,
+        hedge_side: &str,
+        hedge_price: Decimal,
+        max_price: Decimal,
+        hedge_shares: Decimal,
+        action: &str, // "HEDGE_FILL", "HEDGE_SKIP_PRICE", "HEDGE_SKIP_NOFILL", "HEDGE_FAIL"
+    ) {
+        let record = DecisionRecord {
+            timestamp,
+            mode: self.mode.clone(),
+            event_id: event_id.to_string(),
+            asset,
+            spot_price,
+            strike_price,
+            distance: drop_pct,
+            distance_dollars: Decimal::ZERO,
+            atr: peak_confidence,
+            atr_multiple: Decimal::ZERO,
+            seconds_remaining,
+            phase: format!("hedge_t{}", tier),
+            signal,
+            yes_price: if hedge_side == "YES" { hedge_price } else { Decimal::ZERO },
+            no_price: if hedge_side == "NO" { hedge_price } else { Decimal::ZERO },
+            base_confidence: confidence,
+            pivot_multiplier: Decimal::ZERO,
+            confidence,
+            ev: Decimal::ZERO,
+            min_edge: max_price,
+            favorable_price: hedge_price,
+            action: action.to_string(),
+            skip_reason: if signal_flipped {
+                Some("signal_flip".to_string())
+            } else {
+                Some(format!("drop_{:.0}pct", drop_pct * Decimal::ONE_HUNDRED))
+            },
+            trade_size: Some(hedge_shares),
+            up_ratio: None,
+        };
+
+        self.log(record);
     }
 
     /// Log a skip decision.

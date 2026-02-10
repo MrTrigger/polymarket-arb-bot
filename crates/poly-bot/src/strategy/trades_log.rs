@@ -33,7 +33,9 @@ impl std::fmt::Display for TradeRecordType {
 const COL_TYPE: usize = 2;
 const COL_EVENT_ID: usize = 3;
 const COL_ASSET: usize = 4;
+const COL_FEE: usize = 8;
 const COL_COST: usize = 9;
+const COL_BALANCE: usize = 14;
 const COL_PNL: usize = 20;
 
 const CSV_HEADER: &str = "timestamp,mode,type,event_id,asset,outcome,shares,price,fee,cost,strike_price,spot_price,signal,confidence,balance,yes_wins,yes_shares_after,no_shares_after,cost_basis_after,payout,realized_pnl\n";
@@ -225,6 +227,7 @@ impl TradesLogger {
         let mut total_fills = 0u32;
         let mut total_settlements = 0u32;
         let mut total_cost = Decimal::ZERO;
+        let mut total_fees = Decimal::ZERO;
         let mut total_pnl = Decimal::ZERO;
         let mut wins = 0u32;
         let mut losses = 0u32;
@@ -245,6 +248,12 @@ impl TradesLogger {
             let event_id = cols[COL_EVENT_ID];
             let asset = cols[COL_ASSET];
 
+            // Track balance from the CSV balance column for accurate equity curve.
+            // This captures both fill-level dips (buying shares) and settlement payouts.
+            if let Ok(bal) = cols[COL_BALANCE].parse::<f64>() {
+                balance_series.push(bal);
+            }
+
             match record_type {
                 "FILL" => {
                     total_fills += 1;
@@ -252,6 +261,9 @@ impl TradesLogger {
                     assets_traded.insert(asset.to_string());
                     if let Ok(cost) = cols[COL_COST].parse::<Decimal>() {
                         total_cost += cost;
+                    }
+                    if let Ok(fee) = cols[COL_FEE].parse::<Decimal>() {
+                        total_fees += fee;
                     }
                 }
                 "SETTLE" => {
@@ -266,12 +278,6 @@ impl TradesLogger {
                             losses += 1;
                             gross_loss += pnl.abs();
                         }
-                    }
-                    // Compute running balance from P&L (executor may not track balance)
-                    {
-                        let last = *balance_series.last().unwrap_or(&initial_bal);
-                        let pnl_val = cols[COL_PNL].parse::<f64>().unwrap_or(0.0);
-                        balance_series.push(last + pnl_val);
                     }
                 }
                 _ => {}
@@ -302,6 +308,8 @@ impl TradesLogger {
         let (max_dd_pct, max_dd_str) = compute_max_drawdown(&balance_series);
         let calmar = if max_dd_pct > 0.0 && initial > 0.0 {
             Some((final_balance - initial) / initial / (max_dd_pct / 100.0))
+        } else if final_balance > initial {
+            Some(f64::INFINITY)
         } else {
             None
         };
@@ -329,6 +337,7 @@ Win Rate:          {} ({} wins / {} losses)
 Profit Factor:     {}
 Gross Profit:      ${:.2}
 Gross Loss:        ${:.2}
+Total Fees:        ${:.2}
 ",
             self.mode,
             start_time.format("%Y-%m-%d %H:%M:%S UTC"),
@@ -342,6 +351,7 @@ Gross Loss:        ${:.2}
             profit_factor,
             gross_profit,
             gross_loss,
+            total_fees,
         );
 
         // Add Sharpe
@@ -400,19 +410,23 @@ Gross Loss:        ${:.2}
 }
 
 /// Compute annualized Sharpe ratio from a series of per-trade PnL values.
+/// Returns `f64::INFINITY` when mean > 0 and all trades have identical PnL.
 fn compute_sharpe(pnl: &[f64]) -> Option<f64> {
     if pnl.len() < 2 { return None; }
     let n = pnl.len() as f64;
     let mean = pnl.iter().sum::<f64>() / n;
     let variance = pnl.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0);
     let std_dev = variance.sqrt();
-    if std_dev < 1e-12 { return None; }
+    if std_dev < 1e-12 {
+        return if mean > 0.0 { Some(f64::INFINITY) } else { None };
+    }
     // Annualize: assume ~96 trades/day (4 assets * 24 windows)
     let trades_per_year: f64 = 96.0 * 365.0;
     Some((mean / std_dev) * (trades_per_year.min(n)).sqrt())
 }
 
 /// Compute Sortino ratio (only penalizes downside).
+/// Returns `f64::INFINITY` when mean > 0 and there are no losing trades.
 fn compute_sortino(pnl: &[f64]) -> Option<f64> {
     if pnl.len() < 2 { return None; }
     let n = pnl.len() as f64;
@@ -422,7 +436,9 @@ fn compute_sortino(pnl: &[f64]) -> Option<f64> {
         .map(|x| x.powi(2))
         .sum::<f64>() / n;
     let downside_dev = downside_variance.sqrt();
-    if downside_dev < 1e-12 { return None; }
+    if downside_dev < 1e-12 {
+        return if mean > 0.0 { Some(f64::INFINITY) } else { None };
+    }
     let trades_per_year: f64 = 96.0 * 365.0;
     Some((mean / downside_dev) * (trades_per_year.min(n)).sqrt())
 }

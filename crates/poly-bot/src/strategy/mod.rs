@@ -323,6 +323,12 @@ struct TrackedMarket {
     last_signal: String,
     /// Last confidence at time of most recent trade (for trades log).
     last_confidence: Decimal,
+    /// Peak confidence seen since first fill (for reactive hedge tiers).
+    peak_confidence: Decimal,
+    /// Which hedge tiers have been triggered (indexed 0-2).
+    hedge_tiers_triggered: [bool; 3],
+    /// Direction of the main position (true=UP/YES, false=DOWN/NO). Set on first fill.
+    position_direction: Option<bool>,
 }
 
 impl TrackedMarket {
@@ -374,6 +380,9 @@ impl TrackedMarket {
             min_order_size,
             last_signal: String::new(),
             last_confidence: Decimal::ZERO,
+            peak_confidence: Decimal::ZERO,
+            hedge_tiers_triggered: [false; 3],
+            position_direction: None,
         }
     }
 
@@ -513,12 +522,6 @@ pub struct StrategyConfig {
     /// Trade if: EV = (confidence - price) >= min_edge
     pub max_edge_factor: Decimal,
 
-    // Allocation ratios for directional trading (configurable via sweep)
-    /// Strong UP signal allocation ratio (0.0-1.0).
-    pub strong_up_ratio: Decimal,
-    /// Lean UP signal allocation ratio (0.0-1.0).
-    pub lean_up_ratio: Decimal,
-
     /// Execution configuration (order mode, chase settings).
     pub execution: crate::config::ExecutionConfig,
 
@@ -541,9 +544,6 @@ impl Default for StrategyConfig {
             dist_conf_per_atr: dec!(0.30),   // +30% per ATR of movement (sweep optimal)
             // Edge requirement (quality filter)
             max_edge_factor: dec!(0.20),     // 20% EV required at window start (decays to 0)
-            // Allocation ratios (optimized via param sweep)
-            strong_up_ratio: dec!(0.82),
-            lean_up_ratio: dec!(0.65),
             execution: crate::config::ExecutionConfig::default(),
             is_backtest: false,
         }
@@ -573,9 +573,6 @@ impl StrategyConfig {
             dist_conf_per_atr: dec!(0.30),
             // Edge requirement (quality filter)
             max_edge_factor: dec!(0.20),
-            // Allocation ratios (optimized via param sweep)
-            strong_up_ratio: dec!(0.82),
-            lean_up_ratio: dec!(0.65),
             execution: crate::config::ExecutionConfig::default(),
             is_backtest: false,
         }
@@ -709,8 +706,6 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             max_combined_cost: engines_config.directional.max_combined_cost,
             max_spread_ratio: Decimal::from(engines_config.directional.max_spread_bps) / dec!(10000),
             min_favorable_depth: engines_config.directional.min_favorable_depth,
-            strong_up_ratio: config.strong_up_ratio,
-            lean_up_ratio: config.lean_up_ratio,
         };
         let directional_detector = DirectionalDetector::with_config(directional_config);
         let maker_detector = MakerDetector::new();
@@ -1834,10 +1829,10 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                         let mins = Decimal::from(market_state.seconds_remaining) / dec!(60);
                         let thresholds = get_thresholds(mins);
                         trace!(
-                            "🎯 Signal {} {}: {:?} dist={:.4}% | thresholds: lean={:.4}% strong={:.4}% | ratio=UP:{}/DOWN:{} | yes_ask={} no_ask={}",
+                            "🎯 Signal {} {}: {:?} dist={:.4}% | thresholds: lean={:.4}% strong={:.4}% | yes_ask={} no_ask={}",
                             event_id, asset, opp.signal, opp.distance * dec!(100),
                             thresholds.lean * dec!(100), thresholds.strong * dec!(100),
-                            opp.up_ratio, opp.down_ratio, opp.yes_ask, opp.no_ask
+                            opp.yes_ask, opp.no_ask
                         );
                         Some(opp)
                     }
@@ -2108,6 +2103,21 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                     );
                     self.state.market_data.update_confidence(&event_id, snapshot);
 
+                    // Check reactive hedges for markets we already hold a position in.
+                    // Extract position_direction before calling check_reactive_hedge
+                    // to avoid borrow conflict (market borrows self.markets immutably).
+                    let has_position = market.position_direction.is_some();
+
+                    // End the immutable borrow on `market` so we can call &mut self method
+                    let _ = market;
+
+                    if has_position {
+                        self.check_reactive_hedge(&event_id, pm_conf, &opp.signal).await?;
+                    }
+
+                    // Re-borrow market for should_trade
+                    let market = self.markets.get(&event_id).unwrap();
+
                     // Check if we should trade based on EV threshold and budget
                     let trade_decision = market.should_trade(
                         distance_dollars,
@@ -2200,16 +2210,11 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                         total_size
                     };
 
-                    // Verify size is meaningful - account for the split ratio
-                    // The dominant leg (larger ratio) must reach minimum order size of $1.00
-                    let dominant_ratio = opp.up_ratio.max(opp.down_ratio);
-                    let dominant_leg_size = total_size * dominant_ratio;
-                    if dominant_leg_size < Decimal::ONE {
-                        // Need at least $1.00 / dominant_ratio to place an order
-                        let min_needed = Decimal::ONE / dominant_ratio;
+                    // Verify size is meaningful — single leg, must reach $1.00
+                    if total_size < Decimal::ONE {
                         debug!(
-                            "Directional size too small for {}: ${:.2} (dominant leg ${:.2} < $1, need ${:.2} total)",
-                            event_id, total_size, dominant_leg_size, min_needed
+                            "Directional size too small for {}: ${:.2} < $1",
+                            event_id, total_size
                         );
                         self.record_multi_decision(
                             &event_id,
@@ -2225,12 +2230,17 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                         continue;
                     }
 
-                    // Execute directional trade
-                    info!("🚀 EXECUTE {} {}: signal={:?} size=${:.2} phase={} conf={:.2} up_ratio={} down_ratio={}",
-                        event_id, asset, opp.signal, total_size, phase, pm_confidence, opp.up_ratio, opp.down_ratio);
+                    // Execute directional trade (single leg, no default hedge)
+                    info!("🚀 EXECUTE {} {}: signal={:?} size=${:.2} phase={} conf={:.2}",
+                        event_id, asset, opp.signal, total_size, phase, pm_confidence);
 
                     // Decision log for live vs backtest comparison
                     if let Some(ref logger) = self.decision_logger {
+                        let log_up_ratio = if matches!(opp.signal, signal::Signal::StrongUp | signal::Signal::LeanUp) {
+                            Decimal::ONE
+                        } else {
+                            Decimal::ZERO
+                        };
                         logger.log_execute(
                             self.simulated_time,
                             &event_id,
@@ -2251,7 +2261,7 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                             min_edge,
                             favorable_price,
                             total_size,
-                            opp.up_ratio,
+                            log_up_ratio,
                         );
                     }
 
@@ -2370,8 +2380,10 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
         // Track fills for inventory update
         let mut yes_filled_size = Decimal::ZERO;
         let mut yes_filled_cost = Decimal::ZERO;
+        let mut yes_filled_fee = Decimal::ZERO;
         let mut no_filled_size = Decimal::ZERO;
         let mut no_filled_cost = Decimal::ZERO;
+        let mut no_filled_fee = Decimal::ZERO;
 
         // Submit YES order
         let yes_result = self.executor.place_order(yes_order).await;
@@ -2379,6 +2391,7 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             Ok(result) if result.is_filled() => {
                 yes_filled_size = result.filled_size();
                 yes_filled_cost = result.filled_cost();
+                yes_filled_fee = result.filled_fee();
                 debug!("YES order filled: {} shares, cost={}", yes_filled_size, yes_filled_cost);
             }
             Ok(result) => {
@@ -2404,6 +2417,7 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             Ok(result) if result.is_filled() => {
                 no_filled_size = result.filled_size();
                 no_filled_cost = result.filled_cost();
+                no_filled_fee = result.filled_fee();
                 debug!("NO order filled: {} shares, cost={}", no_filled_size, no_filled_cost);
             }
             Ok(result) => {
@@ -2440,7 +2454,7 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                     let price = if yes_filled_size > Decimal::ZERO { yes_filled_cost / yes_filled_size } else { Decimal::ZERO };
                     logger.log_fill(
                         timestamp, &opportunity.event_id, market.asset, "YES",
-                        yes_filled_size, price, Decimal::ZERO, yes_filled_cost,
+                        yes_filled_size, price, yes_filled_fee, yes_filled_cost,
                         market.strike_price, spot,
                         "arb", Decimal::ZERO, balance,
                         market.inventory.yes_shares, market.inventory.no_shares,
@@ -2451,7 +2465,7 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
                     let price = if no_filled_size > Decimal::ZERO { no_filled_cost / no_filled_size } else { Decimal::ZERO };
                     logger.log_fill(
                         timestamp, &opportunity.event_id, market.asset, "NO",
-                        no_filled_size, price, Decimal::ZERO, no_filled_cost,
+                        no_filled_size, price, no_filled_fee, no_filled_cost,
                         market.strike_price, spot,
                         "arb", Decimal::ZERO, balance,
                         market.inventory.yes_shares, market.inventory.no_shares,
@@ -2500,14 +2514,260 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
         Ok(TradeAction::Execute)
     }
 
-    /// Execute a directional trade based on signal.
+    /// Check whether reactive hedge tiers should fire for a market we already hold.
     ///
-    /// ratios from the directional opportunity.
+    /// Tracks peak confidence per market. When confidence drops from peak, triggers
+    /// graduated hedge tiers, each gated by a max hedge price:
+    /// - Tier 0: 30% drop from peak → hedge 10% of directional shares, max 25¢
+    /// - Tier 1: 50% drop from peak → hedge 15% of directional shares, max 35¢
+    /// - Tier 2: Signal flips direction → hedge 25% of directional shares, max 45¢
+    ///
+    /// Each tier fires at most once per market.
+    async fn check_reactive_hedge(
+        &mut self,
+        event_id: &str,
+        current_confidence: Decimal,
+        signal: &signal::Signal,
+    ) -> Result<(), StrategyError> {
+        // Hedge tier configuration (hardcoded for now)
+        const NUM_TIERS: usize = 3;
+        let tier_drop_pcts: [Decimal; NUM_TIERS] = [dec!(0.30), dec!(0.50), dec!(1.0)]; // 1.0 = signal flip
+        let tier_size_pcts: [Decimal; NUM_TIERS] = [dec!(0.10), dec!(0.15), dec!(0.25)];
+        let tier_max_prices: [Decimal; NUM_TIERS] = [dec!(0.25), dec!(0.35), dec!(0.45)];
+
+        // Get market state — need position_direction to determine hedge side
+        let (position_direction, peak_confidence, directional_shares,
+             hedge_token_id, hedge_outcome, hedge_side_label, min_order_size,
+             tiers_triggered, event_id_owned, asset,
+             strike_price, seconds_remaining) = {
+            let market = match self.markets.get_mut(event_id) {
+                Some(m) => m,
+                None => return Ok(()),
+            };
+
+            // No position yet — nothing to hedge
+            let pos_dir = match market.position_direction {
+                Some(d) => d,
+                None => return Ok(()),
+            };
+
+            // Update peak confidence
+            market.peak_confidence = market.peak_confidence.max(current_confidence);
+
+            // Determine which side has shares and which is the hedge side
+            let (dir_shares, hedge_token, hedge_out, hedge_label) = if pos_dir {
+                // Position is UP/YES — hedge with NO
+                (market.inventory.yes_shares, market.no_token_id.clone(), Outcome::No, "NO")
+            } else {
+                // Position is DOWN/NO — hedge with YES
+                (market.inventory.no_shares, market.yes_token_id.clone(), Outcome::Yes, "YES")
+            };
+
+            // No shares to hedge against
+            if dir_shares <= Decimal::ZERO {
+                return Ok(());
+            }
+
+            (pos_dir, market.peak_confidence, dir_shares,
+             hedge_token, hedge_out, hedge_label, market.min_order_size,
+             market.hedge_tiers_triggered, market.event_id.clone(), market.asset,
+             market.strike_price, market.state.seconds_remaining)
+        };
+
+        // Calculate confidence drop percentage
+        let drop_pct = if peak_confidence > Decimal::ZERO {
+            (peak_confidence - current_confidence) / peak_confidence
+        } else {
+            Decimal::ZERO
+        };
+
+        // Check if signal has flipped relative to position direction
+        let signal_is_up = matches!(signal, signal::Signal::StrongUp | signal::Signal::LeanUp);
+        let signal_flipped = position_direction != signal_is_up && signal.is_directional();
+
+        // Check each untriggered tier
+        for tier in 0..NUM_TIERS {
+            if tiers_triggered[tier] {
+                continue;
+            }
+
+            // Tier 2 triggers on signal flip, tiers 0-1 trigger on confidence drop
+            let should_trigger = if tier == 2 {
+                signal_flipped
+            } else {
+                drop_pct >= tier_drop_pcts[tier]
+            };
+
+            if !should_trigger {
+                continue;
+            }
+
+            // Get hedge side ask price
+            let hedge_price = match self.state.market_data.order_books.get(&hedge_token_id) {
+                Some(book) => book.best_ask,
+                None => continue, // No orderbook, skip
+            };
+
+            // Price gate — skip if hedge side is too expensive
+            if hedge_price > tier_max_prices[tier] || hedge_price <= Decimal::ZERO {
+                info!(
+                    "Hedge tier {} skipped for {} {}: price {} > max {}",
+                    tier, event_id_owned, asset, hedge_price, tier_max_prices[tier]
+                );
+                // Log price-gated skip to decision log
+                let spot = self.spot_prices.get(&asset).copied().unwrap_or(Decimal::ZERO);
+                if let Some(ref logger) = self.decision_logger {
+                    logger.log_hedge(
+                        Utc::now(), &event_id_owned, asset, spot, strike_price,
+                        seconds_remaining, *signal, current_confidence, peak_confidence,
+                        tier, drop_pct, signal_flipped, hedge_side_label,
+                        hedge_price, tier_max_prices[tier], Decimal::ZERO,
+                        "HEDGE_SKIP_PRICE",
+                    );
+                }
+                continue;
+            }
+
+            // Calculate hedge shares
+            let mut hedge_shares = (directional_shares * tier_size_pcts[tier]).floor();
+            if hedge_shares < min_order_size {
+                hedge_shares = min_order_size;
+            }
+
+            info!(
+                "🛡️ Hedge tier {} triggered for {} {}: drop={:.1}% flip={} shares={} price={} (max {})",
+                tier, event_id_owned, asset,
+                drop_pct * dec!(100), signal_flipped,
+                hedge_shares, hedge_price, tier_max_prices[tier]
+            );
+
+            // Place hedge order (IOC/market order — we want immediate fill)
+            let req_id = self.decision_counter;
+            self.decision_counter += 1;
+            let order = OrderRequest {
+                request_id: format!("hedge-{}-t{}", req_id, tier),
+                event_id: event_id_owned.clone(),
+                token_id: hedge_token_id.clone(),
+                outcome: hedge_outcome,
+                side: Side::Buy,
+                size: hedge_shares,
+                price: Some(hedge_price),
+                order_type: OrderType::Ioc, // Always IOC for hedges — want immediate fill
+                timeout_ms: None,
+                timestamp: Utc::now(),
+            };
+
+            let result = self.executor.place_order(order).await;
+
+            // Mark tier as triggered regardless of fill outcome
+            if let Some(market) = self.markets.get_mut(event_id) {
+                market.hedge_tiers_triggered[tier] = true;
+            }
+
+            match result {
+                Ok(result) if result.is_filled() => {
+                    let filled_size = result.filled_size();
+                    let filled_cost = result.filled_cost();
+                    let filled_fee = result.filled_fee();
+
+                    if let Some(market) = self.markets.get_mut(event_id) {
+                        market.inventory.record_fill(hedge_outcome, filled_size, filled_cost);
+
+                        // Log to trades log
+                        if let Some(ref logger) = self.trades_logger {
+                            let spot = self.spot_prices.get(&asset).copied().unwrap_or(Decimal::ZERO);
+                            let timestamp = market.window_end - chrono::Duration::seconds(market.state.seconds_remaining);
+                            let balance = self.executor.available_balance();
+                            let price = if filled_size > Decimal::ZERO { filled_cost / filled_size } else { Decimal::ZERO };
+                            let side_label = if hedge_outcome == Outcome::Yes { "YES" } else { "NO" };
+                            logger.log_fill(
+                                timestamp, event_id, asset, side_label,
+                                filled_size, price, filled_fee, filled_cost,
+                                market.strike_price, spot,
+                                &format!("hedge_t{}", tier), current_confidence, balance,
+                                market.inventory.yes_shares, market.inventory.no_shares,
+                                market.inventory.yes_cost_basis + market.inventory.no_cost_basis,
+                            );
+                        }
+
+                        // Update global state
+                        let pos = crate::state::InventoryPosition {
+                            event_id: event_id.to_string(),
+                            condition_id: market.condition_id.clone(),
+                            yes_shares: market.inventory.yes_shares,
+                            no_shares: market.inventory.no_shares,
+                            yes_cost_basis: market.inventory.yes_cost_basis,
+                            no_cost_basis: market.inventory.no_cost_basis,
+                            realized_pnl: market.inventory.realized_pnl,
+                        };
+                        self.state.market_data.update_inventory(event_id, pos);
+                    }
+
+                    let volume_cents = (filled_cost * Decimal::new(100, 0))
+                        .try_into()
+                        .unwrap_or(0u64);
+                    self.state.metrics.add_volume_cents(volume_cents);
+
+                    info!(
+                        "🛡️ Hedge tier {} filled for {} {}: {} shares at {}",
+                        tier, event_id_owned, asset, filled_size, hedge_price
+                    );
+
+                    // Log filled hedge to decision log
+                    if let Some(ref logger) = self.decision_logger {
+                        let spot = self.spot_prices.get(&asset).copied().unwrap_or(Decimal::ZERO);
+                        logger.log_hedge(
+                            Utc::now(), &event_id_owned, asset, spot, strike_price,
+                            seconds_remaining, *signal, current_confidence, peak_confidence,
+                            tier, drop_pct, signal_flipped, hedge_side_label,
+                            hedge_price, tier_max_prices[tier], filled_size,
+                            "HEDGE_FILL",
+                        );
+                    }
+                }
+                Ok(_) => {
+                    debug!("Hedge tier {} order not filled for {}", tier, event_id_owned);
+                    // Log unfilled hedge to decision log
+                    if let Some(ref logger) = self.decision_logger {
+                        let spot = self.spot_prices.get(&asset).copied().unwrap_or(Decimal::ZERO);
+                        logger.log_hedge(
+                            Utc::now(), &event_id_owned, asset, spot, strike_price,
+                            seconds_remaining, *signal, current_confidence, peak_confidence,
+                            tier, drop_pct, signal_flipped, hedge_side_label,
+                            hedge_price, tier_max_prices[tier], hedge_shares,
+                            "HEDGE_SKIP_NOFILL",
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!("Hedge tier {} order failed for {}: {}", tier, event_id_owned, e);
+                    // Log failed hedge to decision log
+                    if let Some(ref logger) = self.decision_logger {
+                        let spot = self.spot_prices.get(&asset).copied().unwrap_or(Decimal::ZERO);
+                        logger.log_hedge(
+                            Utc::now(), &event_id_owned, asset, spot, strike_price,
+                            seconds_remaining, *signal, current_confidence, peak_confidence,
+                            tier, drop_pct, signal_flipped, hedge_side_label,
+                            hedge_price, tier_max_prices[tier], hedge_shares,
+                            "HEDGE_FAIL",
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Execute a directional trade based on signal — single leg only (no default hedge).
+    ///
+    /// Goes 100% directional on entry. Hedges are added reactively via `check_reactive_hedge()`
+    /// when confidence deteriorates, buying the opposite side while it's still cheap.
     ///
     /// # Arguments
     ///
-    /// * `opportunity` - The detected directional opportunity with signal ratios
-    /// * `total_size` - Total USDC to deploy across UP and DOWN
+    /// * `opportunity` - The detected directional opportunity with signal
+    /// * `total_size` - Total USDC to deploy on the directional leg
     ///
     /// # Returns
     ///
@@ -2546,7 +2806,6 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             ),
             None => {
                 warn!("No tracked market for directional: {}", event_id);
-                // Clear pending tracking and release reservation since we won't place orders
                 self.pending_tracker.clear(&event_id, PendingOrderType::Directional);
                 if let Some(market) = self.markets.get_mut(&event_id) {
                     market.release_reservation(total_size, seconds_remaining);
@@ -2555,48 +2814,34 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             }
         };
 
-        // Use WebSocket orderbook cache for prices - it's updated in real-time
-        // CRITICAL: Use ASK prices since we're BUYING - we pay the ask, not the bid!
-        // NOTE: Previously used REST API fetch which blocked the event loop for 200-500ms per call,
-        // causing spot price updates to be missed. The WebSocket cache is sufficiently fresh.
-        let (up_price, down_price) = {
-            let up_price = match self.state.market_data.order_books.get(&yes_token_id) {
-                Some(live_book) => live_book.best_ask,
-                None => {
-                    warn!(token_id = %yes_token_id, "No orderbook for UP token, skipping");
-                    self.pending_tracker.clear(&event_id, PendingOrderType::Directional);
-                    if let Some(market) = self.markets.get_mut(&event_id) {
-                        market.release_reservation(total_size, seconds_remaining);
-                    }
-                    return Ok(TradeAction::SkipSizing);
-                }
-            };
-            let down_price = match self.state.market_data.order_books.get(&no_token_id) {
-                Some(live_book) => live_book.best_ask,
-                None => {
-                    warn!(token_id = %no_token_id, "No orderbook for DOWN token, skipping");
-                    self.pending_tracker.clear(&event_id, PendingOrderType::Directional);
-                    if let Some(market) = self.markets.get_mut(&event_id) {
-                        market.release_reservation(total_size, seconds_remaining);
-                    }
-                    return Ok(TradeAction::SkipSizing);
-                }
-            };
-            (up_price, down_price)
+        // Determine direction from signal — single leg, no split
+        let is_up = matches!(opportunity.signal, signal::Signal::StrongUp | signal::Signal::LeanUp);
+        let (token_id, outcome, other_token_id) = if is_up {
+            (yes_token_id.clone(), Outcome::Yes, no_token_id.clone())
+        } else {
+            (no_token_id.clone(), Outcome::No, yes_token_id.clone())
         };
+        let side_label = if is_up { "YES" } else { "NO" };
 
-        if up_price <= Decimal::ZERO {
-            debug!("Invalid UP price {} for {}", up_price, event_id);
-            // Clear pending tracking and release reservation
-            self.pending_tracker.clear(&event_id, PendingOrderType::Directional);
-            if let Some(market) = self.markets.get_mut(&event_id) {
-                market.release_reservation(total_size, seconds_remaining);
+        // Get directional side price from WebSocket orderbook cache
+        let dir_price = match self.state.market_data.order_books.get(&token_id) {
+            Some(live_book) => live_book.best_ask,
+            None => {
+                warn!(token_id = %token_id, "No orderbook for {} token, skipping", side_label);
+                self.pending_tracker.clear(&event_id, PendingOrderType::Directional);
+                if let Some(market) = self.markets.get_mut(&event_id) {
+                    market.release_reservation(total_size, seconds_remaining);
+                }
+                return Ok(TradeAction::SkipSizing);
             }
-            return Ok(TradeAction::SkipSizing);
-        }
-        if down_price <= Decimal::ZERO {
-            debug!("Invalid DOWN price {} for {}", down_price, event_id);
-            // Clear pending tracking and release reservation
+        };
+        // Get other side price for chase market-awareness (not for placing orders)
+        let other_price = self.state.market_data.order_books.get(&other_token_id)
+            .map(|b| b.best_ask)
+            .unwrap_or(Decimal::ZERO);
+
+        if dir_price <= Decimal::ZERO {
+            debug!("Invalid {} price {} for {}", side_label, dir_price, event_id);
             self.pending_tracker.clear(&event_id, PendingOrderType::Directional);
             if let Some(market) = self.markets.get_mut(&event_id) {
                 market.release_reservation(total_size, seconds_remaining);
@@ -2604,120 +2849,36 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             return Ok(TradeAction::SkipSizing);
         }
 
-        // Linear hedge sizing based on distance from strike
-        // Instead of discrete buckets (Strong=82%, Lean=65%), use continuous function
-        //
-        // directional_confidence ranges from -1.0 (100% DOWN) to +1.0 (100% UP)
-        // At 2x the strong threshold, we're at max confidence for that time bracket
-        let thresholds = get_thresholds(opportunity.minutes_remaining);
-        let max_distance = thresholds.strong * dec!(2); // 2x strong threshold = max confidence
-        let directional_confidence = if max_distance > Decimal::ZERO {
-            (opportunity.distance / max_distance).max(dec!(-1)).min(dec!(1))
-        } else {
-            Decimal::ZERO
-        };
-
-        // Linear ratio: 5% to 95% based on confidence
-        // up_ratio = 0.5 + confidence * 0.45
-        let up_ratio = dec!(0.5) + directional_confidence * dec!(0.45);
-        let down_ratio = Decimal::ONE - up_ratio;
-
-        let mut up_size = total_size * up_ratio;
-        let mut down_size = total_size * down_ratio;
-
-        // Calculate share counts to check for position flip
-        let up_shares = if up_price > Decimal::ZERO { up_size / up_price } else { Decimal::ZERO };
-        let down_shares = if down_price > Decimal::ZERO { down_size / down_price } else { Decimal::ZERO };
-
-        // Prevent position flip: hedge shares must not exceed main shares
-        if up_ratio > down_ratio {
-            // Main direction is UP - ensure down_shares < up_shares
-            if down_shares > up_shares && up_shares > Decimal::ZERO {
-                let max_hedge_dollars = up_shares * down_price;
-                down_size = max_hedge_dollars.min(down_size);
-                debug!(
-                    "Capped DOWN hedge to prevent flip: {} shares -> {} dollars",
-                    up_shares, down_size
-                );
-            }
-        } else if down_ratio > up_ratio {
-            // Main direction is DOWN - ensure up_shares < down_shares
-            if up_shares > down_shares && down_shares > Decimal::ZERO {
-                let max_hedge_dollars = down_shares * up_price;
-                up_size = max_hedge_dollars.min(up_size);
-                debug!(
-                    "Capped UP hedge to prevent flip: {} shares -> {} dollars",
-                    down_shares, up_size
-                );
-            }
+        // Convert USDC to shares for single directional leg
+        let mut shares = (total_size / dir_price).floor();
+        if shares < min_order_size {
+            shares = min_order_size;
         }
-
-        // token IDs and min_order_size already extracted above
-
-        // Convert USDC amounts to share counts
-        // The executor expects size in SHARES, not USDC
-        // shares = usdc_amount / price_per_share
-        let up_shares_raw = if up_price > Decimal::ZERO {
-            (up_size / up_price).floor()
-        } else {
-            Decimal::ZERO
-        };
-        let down_shares_raw = if down_price > Decimal::ZERO {
-            (down_size / down_price).floor()
-        } else {
-            Decimal::ZERO
-        };
-
-        // Ensure BOTH legs meet min_order_size by scaling proportionally.
-        // Without this, the minor (hedge) leg gets silently dropped at order placement,
-        // leaving the position 100% directional.
-        let (up_shares_final, down_shares_final) = {
-            let (mut up, mut down) = (up_shares_raw, down_shares_raw);
-
-            // Scale up if the minor leg is below minimum — scale both to preserve ratio
-            if up > Decimal::ZERO && up < min_order_size {
-                let scale = min_order_size / up;
-                up = min_order_size;
-                down = (down * scale).floor();
-            }
-            if down > Decimal::ZERO && down < min_order_size {
-                let scale = min_order_size / down;
-                down = min_order_size;
-                up = (up * scale).floor();
-            }
-
-            (up, down)
-        };
 
         info!(
-            "Directional trade: {} signal={:?} distance={:.4}% conf={:.2}x up_shares={} down_shares={} up_price={} down_price={} min_order_size={}",
+            "Directional trade: {} signal={:?} side={} distance={:.4}% conf={:.2}x shares={} price={} min_order_size={}",
             event_id,
             opportunity.signal,
+            side_label,
             opportunity.distance * Decimal::ONE_HUNDRED,
             opportunity.confidence.total_multiplier(),
-            up_shares_final,
-            down_shares_final,
-            up_price,
-            down_price,
+            shares,
+            dir_price,
             min_order_size
         );
 
-        // Generate request IDs
+        // Generate request ID
         let req_id_base = self.decision_counter;
         self.decision_counter += 1;
 
-        // Track total volume for metrics and fills for inventory
+        // Track volume and fills
         let mut total_volume = Decimal::ZERO;
-        let mut up_filled_size = Decimal::ZERO;
-        let mut up_filled_cost = Decimal::ZERO;
-        let mut down_filled_size = Decimal::ZERO;
-        let mut down_filled_cost = Decimal::ZERO;
-        // Track if orders are pending (not immediately filled) for flag management
-        let mut up_pending = false;
-        let mut down_pending = false;
+        let mut filled_size = Decimal::ZERO;
+        let mut filled_cost = Decimal::ZERO;
+        let mut filled_fee = Decimal::ZERO;
+        let mut order_pending = false;
 
         // Determine order type based on execution mode
-        // Chasing is disabled in backtest mode (simulated executor fills immediately)
         let (order_type, use_chase) = match self.config.execution.execution_mode {
             crate::config::ExecutionMode::Limit => {
                 let chase = self.config.execution.chase_enabled && !self.config.is_backtest;
@@ -2726,395 +2887,181 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             crate::config::ExecutionMode::Market => (OrderType::Ioc, false),
         };
 
-        // Place UP (YES) order if share count meets minimum
-        if up_shares_final >= min_order_size {
-            let up_order = OrderRequest {
-                request_id: format!("dir-{}-up", req_id_base),
-                event_id: event_id.clone(),
-                token_id: yes_token_id.clone(),
-                outcome: Outcome::Yes,
-                side: Side::Buy,
-                size: up_shares_final, // Size in SHARES, not USDC
-                price: Some(up_price),
-                order_type,
-                timeout_ms: None,
-                timestamp: Utc::now(),
-            };
+        // Place single directional order
+        let order = OrderRequest {
+            request_id: format!("dir-{}-{}", req_id_base, side_label.to_lowercase()),
+            event_id: event_id.clone(),
+            token_id: token_id.clone(),
+            outcome,
+            side: Side::Buy,
+            size: shares,
+            price: Some(dir_price),
+            order_type,
+            timeout_ms: None,
+            timestamp: Utc::now(),
+        };
 
-            // Clean up any orphaned orders for this token before placing new ones
-            // This must happen BEFORE placing orders, regardless of chase setting
-            match self.executor.cancel_orders_for_token(&yes_token_id).await {
-                Ok(count) if count > 0 => {
-                    info!(count = count, token_id = %yes_token_id, "Cleaned up orphan orders for UP token");
-                }
-                Err(e) => {
-                    warn!(error = %e, token_id = %yes_token_id, "Failed to cleanup orphan orders for UP token");
-                }
-                _ => {}
+        // Clean up any orphaned orders for this token
+        match self.executor.cancel_orders_for_token(&token_id).await {
+            Ok(count) if count > 0 => {
+                info!(count = count, token_id = %token_id, "Cleaned up orphan orders for {} token", side_label);
             }
+            Err(e) => {
+                warn!(error = %e, token_id = %token_id, "Failed to cleanup orphan orders for {} token", side_label);
+            }
+            _ => {}
+        }
 
-            // Submit order - use async order manager if available, otherwise use direct execution
-            let other_leg_price = down_price;
-            let up_result = if let Some(ref order_manager) = self.async_order_manager {
-                // ASYNC PATH: Submit to background task (non-blocking)
-                // Fills will be received via order_update_rx channel
-                let intent = OrderIntent::new(
-                    event_id.clone(),
-                    yes_token_id.clone(),
-                    Outcome::Yes,
-                    Side::Buy,
-                    up_shares_final,
-                    up_price,
-                );
-                match order_manager.submit(intent, other_leg_price).await {
-                    Ok(handle) => {
-                        debug!(
-                            handle_id = %handle.id,
-                            "UP order submitted to async order manager"
-                        );
-                        // Order is now managed by background task - mark as pending
-                        // Actual fill will come via order_update_rx
-                        up_pending = true;
-                        Ok(OrderResult::Pending(crate::executor::PendingOrder {
-                            request_id: format!("dir-{}-up", req_id_base),
-                            order_id: handle.id.0.clone(),
-                            timestamp: Utc::now(),
-                        }))
-                    }
-                    Err(rejected) => {
-                        warn!(reason = %rejected.reason, "UP order rejected by order manager");
-                        Ok(OrderResult::Rejected(crate::executor::OrderRejection {
-                            request_id: format!("dir-{}-up", req_id_base),
-                            reason: rejected.reason.to_string(),
-                            timestamp: Utc::now(),
-                        }))
-                    }
+        // Submit order — async order manager, chase, or direct
+        let order_result = if let Some(ref order_manager) = self.async_order_manager {
+            let intent = OrderIntent::new(
+                event_id.clone(),
+                token_id.clone(),
+                outcome,
+                Side::Buy,
+                shares,
+                dir_price,
+            );
+            match order_manager.submit(intent, other_price).await {
+                Ok(handle) => {
+                    debug!(handle_id = %handle.id, "{} order submitted to async order manager", side_label);
+                    order_pending = true;
+                    Ok(OrderResult::Pending(crate::executor::PendingOrder {
+                        request_id: format!("dir-{}-{}", req_id_base, side_label.to_lowercase()),
+                        order_id: handle.id.0.clone(),
+                        timestamp: Utc::now(),
+                    }))
                 }
-            } else if use_chase {
-                // SYNC CHASE PATH: Direct chasing (blocks event loop - legacy)
-                const MAX_POST_ONLY_RETRIES: u32 = 3;
-                let mut current_order = up_order;
-                let mut post_only_retries = 0u32;
-
-                // Use live state for fresh orderbook data during chase
-                let state_clone = self.state.clone();
-                let token_id_clone = yes_token_id.clone();
-                loop {
-                    // Price provider: get LIVE best bid from global state
-                    let get_best_price = || {
-                        state_clone.market_data.order_books.get(&token_id_clone)
-                            .map(|book| book.best_bid)
-                    };
-                    match self.chaser.chase_order_with_market(&mut self.executor, current_order.clone(), other_leg_price, get_best_price).await {
-                        Ok(chase_result) => {
-                            // Check if POST_ONLY rejection - retry with fresh price
-                            // Check if market closed - remove from tracking
-                            if chase_result.stop_reason == Some(ChaseStopReason::MarketClosed) {
-                                warn!(event_id = %event_id, "Market closed during UP order chase, removing from tracking");
-                                self.markets.remove(&event_id);
-                                self.state.market_data.active_windows.remove(&event_id);
-                                break Ok(OrderResult::Rejected(crate::executor::OrderRejection {
-                                    request_id: format!("dir-{}-up", req_id_base),
-                                    reason: "Market closed".to_string(),
-                                    timestamp: Utc::now(),
-                                }));
-                            }
-
-                            if chase_result.stop_reason == Some(ChaseStopReason::PostOnlyRejected) {
-                                post_only_retries += 1;
-                                if post_only_retries >= MAX_POST_ONLY_RETRIES {
-                                    debug!("POST_ONLY max retries reached for UP order");
-                                    // Return Rejected (not Pending) - no real order on exchange
-                                    break Ok(OrderResult::Rejected(crate::executor::OrderRejection {
-                                        request_id: format!("dir-{}-up", req_id_base),
-                                        reason: "POST_ONLY max retries reached".to_string(),
-                                        timestamp: Utc::now(),
-                                    }));
-                                }
-                                // Small delay before retry
-                                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                                // Get fresh price from LIVE state
-                                if let Some(live_book) = self.state.market_data.order_books.get(&yes_token_id) {
-                                    let fresh_price = live_book.best_bid;
-                                    if fresh_price > Decimal::ZERO {
-                                        current_order.price = Some(fresh_price);
-                                        debug!(retry = post_only_retries, fresh_price = %fresh_price, "Retrying UP order with fresh price");
-                                        continue;
-                                    }
-                                }
-                                debug!("No fresh price available for UP order retry");
-                                // Return Rejected (not Pending) - no real order on exchange
-                                break Ok(OrderResult::Rejected(crate::executor::OrderRejection {
-                                    request_id: format!("dir-{}-up", req_id_base),
-                                    reason: "No fresh price available".to_string(),
-                                    timestamp: Utc::now(),
-                                }));
-                            }
-
-                            if chase_result.success || chase_result.filled_size > Decimal::ZERO {
-                                break Ok(OrderResult::Filled(crate::executor::OrderFill {
-                                    request_id: format!("dir-{}-up", req_id_base),
-                                    order_id: "chased".to_string(),
-                                    size: chase_result.filled_size,
-                                    price: chase_result.avg_price,
-                                    fee: chase_result.total_fee,
-                                    timestamp: Utc::now(),
-                                }));
-                            } else {
-                                // Return Rejected (not Pending) - chase cancelled any orders
-                                let reason = chase_result.stop_reason
-                                    .map(|r| format!("Chase stopped: {:?}", r))
-                                    .unwrap_or_else(|| "Chase failed".to_string());
-                                break Ok(OrderResult::Rejected(crate::executor::OrderRejection {
-                                    request_id: format!("dir-{}-up", req_id_base),
-                                    reason,
-                                    timestamp: Utc::now(),
-                                }));
-                            }
+                Err(rejected) => {
+                    warn!(reason = %rejected.reason, "{} order rejected by order manager", side_label);
+                    Ok(OrderResult::Rejected(crate::executor::OrderRejection {
+                        request_id: format!("dir-{}-{}", req_id_base, side_label.to_lowercase()),
+                        reason: rejected.reason.to_string(),
+                        timestamp: Utc::now(),
+                    }))
+                }
+            }
+        } else if use_chase {
+            const MAX_POST_ONLY_RETRIES: u32 = 3;
+            let mut current_order = order;
+            let mut post_only_retries = 0u32;
+            let state_clone = self.state.clone();
+            let token_id_clone = token_id.clone();
+            loop {
+                let get_best_price = || {
+                    state_clone.market_data.order_books.get(&token_id_clone)
+                        .map(|book| book.best_bid)
+                };
+                match self.chaser.chase_order_with_market(&mut self.executor, current_order.clone(), other_price, get_best_price).await {
+                    Ok(chase_result) => {
+                        if chase_result.stop_reason == Some(ChaseStopReason::MarketClosed) {
+                            warn!(event_id = %event_id, "Market closed during {} order chase", side_label);
+                            self.markets.remove(&event_id);
+                            self.state.market_data.active_windows.remove(&event_id);
+                            break Ok(OrderResult::Rejected(crate::executor::OrderRejection {
+                                request_id: format!("dir-{}-{}", req_id_base, side_label.to_lowercase()),
+                                reason: "Market closed".to_string(),
+                                timestamp: Utc::now(),
+                            }));
                         }
-                        Err(e) => break Err(e),
+                        if chase_result.stop_reason == Some(ChaseStopReason::PostOnlyRejected) {
+                            post_only_retries += 1;
+                            if post_only_retries >= MAX_POST_ONLY_RETRIES {
+                                break Ok(OrderResult::Rejected(crate::executor::OrderRejection {
+                                    request_id: format!("dir-{}-{}", req_id_base, side_label.to_lowercase()),
+                                    reason: "POST_ONLY max retries reached".to_string(),
+                                    timestamp: Utc::now(),
+                                }));
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                            if let Some(live_book) = self.state.market_data.order_books.get(&token_id) {
+                                let fresh_price = live_book.best_bid;
+                                if fresh_price > Decimal::ZERO {
+                                    current_order.price = Some(fresh_price);
+                                    continue;
+                                }
+                            }
+                            break Ok(OrderResult::Rejected(crate::executor::OrderRejection {
+                                request_id: format!("dir-{}-{}", req_id_base, side_label.to_lowercase()),
+                                reason: "No fresh price available".to_string(),
+                                timestamp: Utc::now(),
+                            }));
+                        }
+                        if chase_result.success || chase_result.filled_size > Decimal::ZERO {
+                            break Ok(OrderResult::Filled(crate::executor::OrderFill {
+                                request_id: format!("dir-{}-{}", req_id_base, side_label.to_lowercase()),
+                                order_id: "chased".to_string(),
+                                size: chase_result.filled_size,
+                                price: chase_result.avg_price,
+                                fee: chase_result.total_fee,
+                                timestamp: Utc::now(),
+                            }));
+                        } else {
+                            let reason = chase_result.stop_reason
+                                .map(|r| format!("Chase stopped: {:?}", r))
+                                .unwrap_or_else(|| "Chase failed".to_string());
+                            break Ok(OrderResult::Rejected(crate::executor::OrderRejection {
+                                request_id: format!("dir-{}-{}", req_id_base, side_label.to_lowercase()),
+                                reason,
+                                timestamp: Utc::now(),
+                            }));
+                        }
                     }
+                    Err(e) => break Err(e),
                 }
-            } else {
-                // DIRECT PATH: Simple order placement (no chasing)
-                self.executor.place_order(up_order).await
-            };
-            match up_result {
-                Ok(result) if result.is_filled() => {
-                    up_filled_size = result.filled_size();
-                    up_filled_cost = result.filled_cost();
-                    total_volume += up_filled_cost;
-                    debug!("UP order filled: {} shares, cost={}", up_filled_size, up_filled_cost);
-                }
-                Ok(result) => {
-                    up_pending = result.is_pending();
-                    debug!("UP order not filled: {:?}", result);
-                }
-                Err(e) => {
-                    warn!("UP order failed: {}", e);
-                    // Only count system errors for circuit breaker, not FOK rejections
-                    if e.is_system_error() && self.state.record_failure(self.config.max_consecutive_failures) {
-                        self.state.trip_circuit_breaker();
-                        warn!("Circuit breaker tripped after consecutive failures");
-                    }
+            }
+        } else {
+            self.executor.place_order(order).await
+        };
+
+        match order_result {
+            Ok(result) if result.is_filled() => {
+                filled_size = result.filled_size();
+                filled_cost = result.filled_cost();
+                filled_fee = result.filled_fee();
+                total_volume += filled_cost;
+                debug!("{} order filled: {} shares, cost={}", side_label, filled_size, filled_cost);
+            }
+            Ok(result) => {
+                order_pending = result.is_pending();
+                debug!("{} order not filled: {:?}", side_label, result);
+            }
+            Err(e) => {
+                warn!("{} order failed: {}", side_label, e);
+                if e.is_system_error() && self.state.record_failure(self.config.max_consecutive_failures) {
+                    self.state.trip_circuit_breaker();
+                    warn!("Circuit breaker tripped after consecutive failures");
                 }
             }
         }
 
-        // Place DOWN (NO) order if share count meets minimum
-        if down_shares_final >= min_order_size {
-            let down_order = OrderRequest {
-                request_id: format!("dir-{}-down", req_id_base),
-                event_id: event_id.clone(),
-                token_id: no_token_id.clone(),
-                outcome: Outcome::No,
-                side: Side::Buy,
-                size: down_shares_final, // Size in SHARES, not USDC
-                price: Some(down_price),
-                order_type,
-                timeout_ms: None,
-                timestamp: Utc::now(),
-            };
-
-            // Clean up any orphaned orders for this token before placing new ones
-            // This must happen BEFORE placing orders, regardless of chase setting
-            match self.executor.cancel_orders_for_token(&no_token_id).await {
-                Ok(count) if count > 0 => {
-                    info!(count = count, token_id = %no_token_id, "Cleaned up orphan orders for DOWN token");
-                }
-                Err(e) => {
-                    warn!(error = %e, token_id = %no_token_id, "Failed to cleanup orphan orders for DOWN token");
-                }
-                _ => {}
-            }
-
-            // Submit order - use async order manager if available, otherwise use direct execution
-            let other_leg_price = up_price;
-            let down_result = if let Some(ref order_manager) = self.async_order_manager {
-                // ASYNC PATH: Submit to background task (non-blocking)
-                let intent = OrderIntent::new(
-                    event_id.clone(),
-                    no_token_id.clone(),
-                    Outcome::No,
-                    Side::Buy,
-                    down_shares_final,
-                    down_price,
-                );
-                match order_manager.submit(intent, other_leg_price).await {
-                    Ok(handle) => {
-                        debug!(
-                            handle_id = %handle.id,
-                            "DOWN order submitted to async order manager"
-                        );
-                        down_pending = true;
-                        Ok(OrderResult::Pending(crate::executor::PendingOrder {
-                            request_id: format!("dir-{}-down", req_id_base),
-                            order_id: handle.id.0.clone(),
-                            timestamp: Utc::now(),
-                        }))
-                    }
-                    Err(rejected) => {
-                        warn!(reason = %rejected.reason, "DOWN order rejected by order manager");
-                        Ok(OrderResult::Rejected(crate::executor::OrderRejection {
-                            request_id: format!("dir-{}-down", req_id_base),
-                            reason: rejected.reason.to_string(),
-                            timestamp: Utc::now(),
-                        }))
-                    }
-                }
-            } else if use_chase {
-                // SYNC CHASE PATH: Direct chasing (blocks event loop - legacy)
-                const MAX_POST_ONLY_RETRIES: u32 = 3;
-                let mut current_order = down_order;
-                let mut post_only_retries = 0u32;
-
-                // Use live state for fresh orderbook data during chase
-                let state_clone = self.state.clone();
-                let token_id_clone = no_token_id.clone();
-                loop {
-                    // Price provider: get LIVE best bid from global state
-                    let get_best_price = || {
-                        state_clone.market_data.order_books.get(&token_id_clone)
-                            .map(|book| book.best_bid)
-                    };
-                    match self.chaser.chase_order_with_market(&mut self.executor, current_order.clone(), other_leg_price, get_best_price).await {
-                        Ok(chase_result) => {
-                            // Check if market closed - remove from tracking
-                            if chase_result.stop_reason == Some(ChaseStopReason::MarketClosed) {
-                                warn!(event_id = %event_id, "Market closed during DOWN order chase, removing from tracking");
-                                self.markets.remove(&event_id);
-                                self.state.market_data.active_windows.remove(&event_id);
-                                break Ok(OrderResult::Rejected(crate::executor::OrderRejection {
-                                    request_id: format!("dir-{}-down", req_id_base),
-                                    reason: "Market closed".to_string(),
-                                    timestamp: Utc::now(),
-                                }));
-                            }
-
-                            // Check if POST_ONLY rejection - retry with fresh price
-                            if chase_result.stop_reason == Some(ChaseStopReason::PostOnlyRejected) {
-                                post_only_retries += 1;
-                                if post_only_retries >= MAX_POST_ONLY_RETRIES {
-                                    debug!("POST_ONLY max retries reached for DOWN order");
-                                    // Return Rejected (not Pending) - no real order on exchange
-                                    break Ok(OrderResult::Rejected(crate::executor::OrderRejection {
-                                        request_id: format!("dir-{}-down", req_id_base),
-                                        reason: "POST_ONLY max retries reached".to_string(),
-                                        timestamp: Utc::now(),
-                                    }));
-                                }
-                                // Small delay before retry
-                                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                                // Get fresh price from LIVE state
-                                if let Some(live_book) = self.state.market_data.order_books.get(&no_token_id) {
-                                    let fresh_price = live_book.best_bid;
-                                    if fresh_price > Decimal::ZERO {
-                                        current_order.price = Some(fresh_price);
-                                        debug!(retry = post_only_retries, fresh_price = %fresh_price, "Retrying DOWN order with fresh price");
-                                        continue;
-                                    }
-                                }
-                                debug!("No fresh price available for DOWN order retry");
-                                // Return Rejected (not Pending) - no real order on exchange
-                                break Ok(OrderResult::Rejected(crate::executor::OrderRejection {
-                                    request_id: format!("dir-{}-down", req_id_base),
-                                    reason: "No fresh price available".to_string(),
-                                    timestamp: Utc::now(),
-                                }));
-                            }
-
-                            if chase_result.success || chase_result.filled_size > Decimal::ZERO {
-                                break Ok(OrderResult::Filled(crate::executor::OrderFill {
-                                    request_id: format!("dir-{}-down", req_id_base),
-                                    order_id: "chased".to_string(),
-                                    size: chase_result.filled_size,
-                                    price: chase_result.avg_price,
-                                    fee: chase_result.total_fee,
-                                    timestamp: Utc::now(),
-                                }));
-                            } else {
-                                // Return Rejected (not Pending) - chase cancelled any orders
-                                let reason = chase_result.stop_reason
-                                    .map(|r| format!("Chase stopped: {:?}", r))
-                                    .unwrap_or_else(|| "Chase failed".to_string());
-                                break Ok(OrderResult::Rejected(crate::executor::OrderRejection {
-                                    request_id: format!("dir-{}-down", req_id_base),
-                                    reason,
-                                    timestamp: Utc::now(),
-                                }));
-                            }
-                        }
-                        Err(e) => break Err(e),
-                    }
-                }
-            } else {
-                // DIRECT PATH: Simple order placement (no chasing)
-                self.executor.place_order(down_order).await
-            };
-            match down_result {
-                Ok(result) if result.is_filled() => {
-                    down_filled_size = result.filled_size();
-                    down_filled_cost = result.filled_cost();
-                    total_volume += down_filled_cost;
-                    debug!("DOWN order filled: {} shares, cost={}", down_filled_size, down_filled_cost);
-                }
-                Ok(result) => {
-                    down_pending = result.is_pending();
-                    debug!("DOWN order not filled: {:?}", result);
-                }
-                Err(e) => {
-                    warn!("DOWN order failed: {}", e);
-                    // Only count system errors for circuit breaker, not FOK rejections
-                    if e.is_system_error() && self.state.record_failure(self.config.max_consecutive_failures) {
-                        self.state.trip_circuit_breaker();
-                        warn!("Circuit breaker tripped after consecutive failures");
-                    }
-                }
-            }
-        }
-
-        // CRITICAL: Update inventory immediately after fills to prevent over-trading.
-        // This ensures subsequent orderbook updates see the correct position.
-        if (up_filled_size > Decimal::ZERO || down_filled_size > Decimal::ZERO)
+        // Update inventory after fill
+        if filled_size > Decimal::ZERO
             && let Some(market) = self.markets.get_mut(&event_id)
         {
-            if up_filled_size > Decimal::ZERO {
-                market.inventory.record_fill(Outcome::Yes, up_filled_size, up_filled_cost);
-            }
-            if down_filled_size > Decimal::ZERO {
-                market.inventory.record_fill(Outcome::No, down_filled_size, down_filled_cost);
-            }
+            market.inventory.record_fill(outcome, filled_size, filled_cost);
 
-            // Log fills to trades log
+            // Set position direction and peak confidence for reactive hedge tracking
+            market.position_direction = Some(is_up);
+            market.peak_confidence = market.peak_confidence.max(opportunity.confidence.total_multiplier());
+
+            // Log fill to trades log
             if let Some(ref logger) = self.trades_logger {
                 let spot = self.spot_prices.get(&market.asset).copied().unwrap_or(Decimal::ZERO);
                 let timestamp = market.window_end - chrono::Duration::seconds(market.state.seconds_remaining);
                 let balance = self.executor.available_balance();
-                if up_filled_size > Decimal::ZERO {
-                    let price = if up_filled_size > Decimal::ZERO { up_filled_cost / up_filled_size } else { Decimal::ZERO };
-                    logger.log_fill(
-                        timestamp, &event_id, market.asset, "YES",
-                        up_filled_size, price, Decimal::ZERO, up_filled_cost,
-                        market.strike_price, spot,
-                        &market.last_signal, market.last_confidence, balance,
-                        market.inventory.yes_shares, market.inventory.no_shares,
-                        market.inventory.yes_cost_basis + market.inventory.no_cost_basis,
-                    );
-                }
-                if down_filled_size > Decimal::ZERO {
-                    let price = if down_filled_size > Decimal::ZERO { down_filled_cost / down_filled_size } else { Decimal::ZERO };
-                    logger.log_fill(
-                        timestamp, &event_id, market.asset, "NO",
-                        down_filled_size, price, Decimal::ZERO, down_filled_cost,
-                        market.strike_price, spot,
-                        &market.last_signal, market.last_confidence, balance,
-                        market.inventory.yes_shares, market.inventory.no_shares,
-                        market.inventory.yes_cost_basis + market.inventory.no_cost_basis,
-                    );
-                }
+                let price = if filled_size > Decimal::ZERO { filled_cost / filled_size } else { Decimal::ZERO };
+                logger.log_fill(
+                    timestamp, &event_id, market.asset, side_label,
+                    filled_size, price, filled_fee, filled_cost,
+                    market.strike_price, spot,
+                    &market.last_signal, market.last_confidence, balance,
+                    market.inventory.yes_shares, market.inventory.no_shares,
+                    market.inventory.yes_cost_basis + market.inventory.no_cost_basis,
+                );
             }
 
-            // Update global state inventory for sizing calculations
+            // Update global state inventory
             let pos = crate::state::InventoryPosition {
                 event_id: event_id.clone(),
                 condition_id: market.condition_id.clone(),
@@ -3126,10 +3073,11 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             };
             self.state.market_data.update_inventory(&event_id, pos);
 
-            // Record trade in position manager to update phase budgets
+            // Commit reservation
             let seconds_remaining = market.state.seconds_remaining;
-            // Commit reservation: release the reserved amount and record the filled amount
-            market.commit_reservation(total_size, total_volume, up_filled_cost, down_filled_cost, seconds_remaining);
+            let up_cost = if is_up { filled_cost } else { Decimal::ZERO };
+            let down_cost = if is_up { Decimal::ZERO } else { filled_cost };
+            market.commit_reservation(total_size, total_volume, up_cost, down_cost, seconds_remaining);
 
             debug!(
                 "Inventory updated for {}: YES={} NO={} total_exposure={}",
@@ -3140,7 +3088,7 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             );
         }
 
-        // Update metrics after trade
+        // Update metrics
         if total_volume > Decimal::ZERO {
             let volume_cents = (total_volume * Decimal::new(100, 0))
                 .try_into()
@@ -3149,15 +3097,11 @@ impl<D: DataSource, E: Executor> StrategyLoop<D, E> {
             self.state.record_success();
         }
 
-        // Clear pending tracking only if orders are NOT pending (i.e., filled or rejected)
-        // If orders are pending on the exchange, keep tracking to prevent duplicates
-        if !up_pending && !down_pending {
+        // Clear pending tracking if order is NOT pending
+        if !order_pending {
             self.pending_tracker.clear(&event_id, PendingOrderType::Directional);
 
-            // If no fills occurred, release the reservation (budget stays reserved until here)
             if total_volume == Decimal::ZERO && self.markets.contains_key(&event_id) {
-                // Note: commit_reservation already released the reservation above,
-                // but if we didn't enter that block, we need to release here
                 debug!(
                     "Trade attempt for {} completed without fills, budget reservation released",
                     event_id

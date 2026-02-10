@@ -824,21 +824,6 @@ pub struct DirectionalEngineConfig {
     /// Default: 0.01% (10 bps)
     pub lean_threshold_late_bps: u32,
 
-    // --- Allocation Ratios ---
-    // Ratios for UP allocation based on signal strength.
-
-    /// UP allocation for StrongUp signal (as ratio 0-1).
-    /// Default: 0.78 (78% UP, 22% DOWN)
-    pub strong_up_ratio: Decimal,
-
-    /// UP allocation for LeanUp signal (as ratio 0-1).
-    /// Default: 0.60 (60% UP, 40% DOWN)
-    pub lean_up_ratio: Decimal,
-
-    /// UP allocation for Neutral signal (as ratio 0-1).
-    /// Default: 0.50 (50% UP, 50% DOWN)
-    pub neutral_ratio: Decimal,
-
     // --- Confidence / Edge Params ---
     // Optional overrides for strategy-level confidence params.
     // If None, code defaults are used.
@@ -864,10 +849,6 @@ impl Default for DirectionalEngineConfig {
             // Signal thresholds (in bps of strike)
             strong_threshold_late_bps: 30, // 0.03%
             lean_threshold_late_bps: 10,   // 0.01%
-            // Allocation ratios
-            strong_up_ratio: Decimal::new(78, 2),  // 0.78
-            lean_up_ratio: Decimal::new(60, 2),    // 0.60
-            neutral_ratio: Decimal::new(50, 2),    // 0.50
             time_conf_floor: None,
             dist_conf_floor: None,
             dist_conf_per_atr: None,
@@ -877,52 +858,12 @@ impl Default for DirectionalEngineConfig {
 }
 
 impl DirectionalEngineConfig {
-    /// Get the DOWN ratio for a given UP ratio.
-    #[inline]
-    pub fn down_ratio_for(&self, up_ratio: Decimal) -> Decimal {
-        Decimal::ONE - up_ratio
-    }
-
     /// Calculate the required confidence for a trade at the given price.
     ///
     /// Since EV = confidence - price, we need confidence > price to have positive EV.
-    ///
-    /// # Arguments
-    /// * `favorable_price` - The price of the side we're buying (0-1)
-    ///
-    /// # Returns
-    /// The minimum confidence required to trade (equal to the price)
     #[inline]
     pub fn required_confidence(&self, favorable_price: Decimal) -> Decimal {
         favorable_price
-    }
-
-    /// Get allocation ratios for StrongUp signal.
-    #[inline]
-    pub fn strong_up_allocation(&self) -> (Decimal, Decimal) {
-        (self.strong_up_ratio, self.down_ratio_for(self.strong_up_ratio))
-    }
-
-    /// Get allocation ratios for LeanUp signal.
-    #[inline]
-    pub fn lean_up_allocation(&self) -> (Decimal, Decimal) {
-        (self.lean_up_ratio, self.down_ratio_for(self.lean_up_ratio))
-    }
-
-    /// Get allocation ratios for StrongDown signal.
-    /// Inverts the StrongUp ratios.
-    #[inline]
-    pub fn strong_down_allocation(&self) -> (Decimal, Decimal) {
-        let (up, down) = self.strong_up_allocation();
-        (down, up)
-    }
-
-    /// Get allocation ratios for LeanDown signal.
-    /// Inverts the LeanUp ratios.
-    #[inline]
-    pub fn lean_down_allocation(&self) -> (Decimal, Decimal) {
-        let (up, down) = self.lean_up_allocation();
-        (down, up)
     }
 }
 
@@ -1165,10 +1106,6 @@ impl BotConfig {
 pub struct SweepConfig {
     /// Base order size values to sweep (key parameter for trade frequency).
     pub base_order_sizes: Vec<f64>,
-    /// Strong UP ratio values to sweep.
-    pub strong_ratios: Vec<f64>,
-    /// Lean UP ratio values to sweep.
-    pub lean_ratios: Vec<f64>,
     /// Time confidence floor values to sweep.
     /// This is the minimum confidence from time at window start.
     pub time_conf_floors: Vec<f64>,
@@ -1197,8 +1134,6 @@ impl SweepConfig {
             .context("Failed to parse strategy.toml")?;
         Ok(Self {
             base_order_sizes: toml.sweep.base_order_sizes,
-            strong_ratios: toml.sweep.strong_ratios,
-            lean_ratios: toml.sweep.lean_ratios,
             time_conf_floors: toml.sweep.time_conf_floors,
             dist_conf_floors: toml.sweep.dist_conf_floors,
             dist_conf_per_atrs: toml.sweep.dist_conf_per_atrs,
@@ -1225,14 +1160,6 @@ impl SweepConfig {
 
         // Base order size (key parameter for trade frequency)
         if let Some(p) = make_param("base_order_size", &self.base_order_sizes) {
-            params.push(p);
-        }
-
-        // Allocation ratios
-        if let Some(p) = make_param("strong_up_ratio", &self.strong_ratios) {
-            params.push(p);
-        }
-        if let Some(p) = make_param("lean_up_ratio", &self.lean_ratios) {
             params.push(p);
         }
 
@@ -1726,9 +1653,6 @@ struct DirectionalEngineToml {
     min_favorable_depth: f64,
     strong_threshold_late_bps: u32,
     lean_threshold_late_bps: u32,
-    strong_up_ratio: f64,
-    lean_up_ratio: f64,
-    neutral_ratio: f64,
     // Confidence / edge params (optional, use code defaults if not set)
     time_conf_floor: Option<f64>,
     dist_conf_floor: Option<f64>,
@@ -1746,9 +1670,6 @@ impl Default for DirectionalEngineToml {
             min_favorable_depth: 100.0,
             strong_threshold_late_bps: 30,
             lean_threshold_late_bps: 10,
-            strong_up_ratio: 0.78,
-            lean_up_ratio: 0.60,
-            neutral_ratio: 0.50,
             time_conf_floor: None,
             dist_conf_floor: None,
             dist_conf_per_atr: None,
@@ -1965,8 +1886,6 @@ impl BotConfig {
                 decision_log_path: toml.backtest.decision_log_path,
                 sweep_params: SweepConfig {
                     base_order_sizes: toml.backtest.sweep.base_order_sizes,
-                    strong_ratios: toml.backtest.sweep.strong_ratios,
-                    lean_ratios: toml.backtest.sweep.lean_ratios,
                     time_conf_floors: toml.backtest.sweep.time_conf_floors,
                     dist_conf_floors: toml.backtest.sweep.dist_conf_floors,
                     dist_conf_per_atrs: toml.backtest.sweep.dist_conf_per_atrs,
@@ -1999,9 +1918,6 @@ impl BotConfig {
                     ),
                     strong_threshold_late_bps: toml.engines.directional.strong_threshold_late_bps,
                     lean_threshold_late_bps: toml.engines.directional.lean_threshold_late_bps,
-                    strong_up_ratio: f64_to_decimal(toml.engines.directional.strong_up_ratio),
-                    lean_up_ratio: f64_to_decimal(toml.engines.directional.lean_up_ratio),
-                    neutral_ratio: f64_to_decimal(toml.engines.directional.neutral_ratio),
                     time_conf_floor: toml.engines.directional.time_conf_floor.map(f64_to_decimal),
                     dist_conf_floor: toml.engines.directional.dist_conf_floor.map(f64_to_decimal),
                     dist_conf_per_atr: toml.engines.directional.dist_conf_per_atr.map(f64_to_decimal),
@@ -2285,34 +2201,6 @@ mod tests {
         assert_eq!(config.max_combined_cost, dec!(0.995));
         assert_eq!(config.max_spread_bps, 1000);
         assert_eq!(config.min_favorable_depth, dec!(100));
-        assert_eq!(config.strong_up_ratio, dec!(0.78));
-        assert_eq!(config.lean_up_ratio, dec!(0.60));
-        assert_eq!(config.neutral_ratio, dec!(0.50));
-    }
-
-    #[test]
-    fn test_directional_engine_config_allocations() {
-        let config = DirectionalEngineConfig::default();
-
-        // Strong up: 78% UP, 22% DOWN
-        let (up, down) = config.strong_up_allocation();
-        assert_eq!(up, dec!(0.78));
-        assert_eq!(down, dec!(0.22));
-
-        // Strong down: 22% UP, 78% DOWN (inverted)
-        let (up, down) = config.strong_down_allocation();
-        assert_eq!(up, dec!(0.22));
-        assert_eq!(down, dec!(0.78));
-
-        // Lean up: 60% UP, 40% DOWN
-        let (up, down) = config.lean_up_allocation();
-        assert_eq!(up, dec!(0.60));
-        assert_eq!(down, dec!(0.40));
-
-        // Lean down: 40% UP, 60% DOWN (inverted)
-        let (up, down) = config.lean_down_allocation();
-        assert_eq!(up, dec!(0.40));
-        assert_eq!(down, dec!(0.60));
     }
 
     #[test]
@@ -2402,8 +2290,6 @@ mod tests {
             enabled = true
             min_seconds_remaining = 120
             max_spread_bps = 500
-            strong_up_ratio = 0.80
-            lean_up_ratio = 0.65
 
             [engines.maker]
             enabled = true
@@ -2428,8 +2314,6 @@ mod tests {
         assert!(config.engines.directional.enabled);
         assert_eq!(config.engines.directional.min_seconds_remaining, 120);
         assert_eq!(config.engines.directional.max_spread_bps, 500);
-        assert_eq!(config.engines.directional.strong_up_ratio, dec!(0.80));
-        assert_eq!(config.engines.directional.lean_up_ratio, dec!(0.65));
 
         // Maker config
         assert!(config.engines.maker.enabled);

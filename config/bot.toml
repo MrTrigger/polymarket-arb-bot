@@ -227,11 +227,6 @@ strong_threshold_late_bps = 9
 # ATR threshold for "lean" signal in late phase (bps)
 lean_threshold_late_bps = 6
 
-# Allocation ratios for signal strength
-strong_up_ratio = 0.82  # Strong UP: 82% YES, 18% NO
-lean_up_ratio = 0.65    # Lean UP: 65% YES, 35% NO
-neutral_ratio = 0.50    # Neutral: 50/50
-
 [engines.maker]
 # Market making - provide liquidity, collect spread
 # Usually disabled: requires careful inventory management

@@ -280,6 +280,15 @@ impl OrderResult {
         }
     }
 
+    /// Get the fee paid on this fill.
+    pub fn filled_fee(&self) -> Decimal {
+        match self {
+            OrderResult::Filled(f) => f.fee,
+            OrderResult::PartialFill(f) => f.fee,
+            _ => Decimal::ZERO,
+        }
+    }
+
     /// Get the order ID, if assigned.
     pub fn order_id(&self) -> Option<&str> {
         match self {

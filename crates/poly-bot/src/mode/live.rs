@@ -381,8 +381,6 @@ impl LiveMode {
                 available_balance: self.config.initial_balance,
                 max_edge_factor: self.config.strategy.max_edge_factor,
                 window_duration_secs: self.config.strategy.window_duration_secs,
-                strong_up_ratio: self.config.strategy.strong_up_ratio,
-                lean_up_ratio: self.config.strategy.lean_up_ratio,
             };
             match crate::strategy::decision_log::DecisionLogger::with_config(
                 decisions_path.to_str().unwrap_or("decisions.csv"), "live", Some(&log_config),

@@ -980,8 +980,6 @@ impl BacktestMode {
                     available_balance: self.config.initial_balance,
                     max_edge_factor: self.config.strategy.max_edge_factor,
                     window_duration_secs: self.config.strategy.window_duration_secs,
-                    strong_up_ratio: self.config.strategy.strong_up_ratio,
-                    lean_up_ratio: self.config.strategy.lean_up_ratio,
                 };
                 match crate::strategy::decision_log::DecisionLogger::with_config(decisions_path, "backtest", Some(&log_config)) {
                     Ok(logger) => {
@@ -1603,15 +1601,6 @@ fn apply_parameter(config: &mut BacktestModeConfig, name: &str, value: f64) {
         // Edge requirement (quality filter)
         "max_edge_factor" => {
             config.strategy.max_edge_factor =
-                Decimal::from_f64_retain(value).unwrap_or_default();
-        }
-        // Allocation ratios
-        "strong_up_ratio" => {
-            config.strategy.strong_up_ratio =
-                Decimal::from_f64_retain(value).unwrap_or_default();
-        }
-        "lean_up_ratio" => {
-            config.strategy.lean_up_ratio =
                 Decimal::from_f64_retain(value).unwrap_or_default();
         }
         _ => {
