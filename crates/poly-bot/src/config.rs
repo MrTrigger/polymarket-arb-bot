@@ -31,6 +31,9 @@ pub struct BotConfig {
     /// File logging level.
     pub file_log_level: String,
 
+    /// Whether ClickHouse is enabled.
+    pub clickhouse_enabled: bool,
+
     /// ClickHouse configuration.
     pub clickhouse: ClickHouseConfig,
 
@@ -375,7 +378,7 @@ impl Default for ExecutionConfig {
 /// Observability configuration with enable/disable flags.
 #[derive(Debug, Clone)]
 pub struct ObservabilityConfig {
-    /// Enable decision capture.
+    /// Enable decision capture (CSV log in session directory + ClickHouse pipeline).
     pub capture_decisions: bool,
 
     /// Enable counterfactual analysis.
@@ -992,6 +995,7 @@ impl Default for BotConfig {
             window_duration: WindowDuration::OneHour, // Default to 1h since 15min not available
             console_log_level: "info".to_string(),
             file_log_level: "debug".to_string(),
+            clickhouse_enabled: false,
             clickhouse: ClickHouseConfig::default(),
             trading: TradingConfig::default(),
             risk: RiskConfig::default(),
@@ -1357,6 +1361,7 @@ impl Default for GeneralToml {
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 struct ClickHouseToml {
+    enabled: bool,
     url: String,
     database: String,
     max_rows: u64,
@@ -1367,6 +1372,7 @@ struct ClickHouseToml {
 impl Default for ClickHouseToml {
     fn default() -> Self {
         Self {
+            enabled: false,
             url: "http://localhost:8123".to_string(),
             database: "polymarket".to_string(),
             max_rows: 10000,
@@ -1851,6 +1857,7 @@ impl BotConfig {
             window_duration,
             console_log_level,
             file_log_level: toml.general.file_log_level,
+            clickhouse_enabled: toml.clickhouse.enabled,
             clickhouse: ClickHouseConfig {
                 url: toml.clickhouse.url,
                 database: toml.clickhouse.database,

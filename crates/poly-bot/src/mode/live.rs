@@ -150,6 +150,8 @@ pub struct LiveMode {
     session: SharedSessionManager,
     /// Dashboard integration for P&L capture.
     dashboard: Option<DashboardIntegration>,
+    /// Session directory paths for output files.
+    session_paths: Option<common::SessionPaths>,
 }
 
 impl LiveMode {
@@ -186,12 +188,19 @@ impl LiveMode {
             clickhouse: None,
             session,
             dashboard: None,
+            session_paths: None,
         })
     }
 
     /// Set the ClickHouse client for data storage.
     pub fn with_clickhouse(mut self, client: ClickHouseClient) -> Self {
         self.clickhouse = Some(client);
+        self
+    }
+
+    /// Set session directory paths for output files.
+    pub fn with_session(mut self, session: common::SessionPaths) -> Self {
+        self.session_paths = Some(session);
         self
     }
 
@@ -354,8 +363,16 @@ impl LiveMode {
         )
         .with_market_client(crate::api::MarketClient::production());
 
-        // Add decision logger if DECISION_LOG_PATH env var is set (for comparing live vs backtest)
-        if let Ok(path) = std::env::var("DECISION_LOG_PATH") {
+        // Use session directory from main (or create one as fallback)
+        let session = self.session_paths.take().unwrap_or_else(|| {
+            common::create_session_dir("live").expect("Failed to create session directory")
+        });
+
+        // Enable decision logging if configured
+        if self.config.observability.capture_decisions {
+            let decisions_path = std::env::var("DECISION_LOG_PATH")
+                .map(std::path::PathBuf::from)
+                .unwrap_or(session.decisions);
             let log_config = crate::strategy::decision_log::DecisionLogConfig {
                 base_order_size: self.config.strategy.sizing_config.base_order_size,
                 min_order_size: self.config.strategy.sizing_config.min_order_size,
@@ -367,27 +384,32 @@ impl LiveMode {
                 strong_up_ratio: self.config.strategy.strong_up_ratio,
                 lean_up_ratio: self.config.strategy.lean_up_ratio,
             };
-            match crate::strategy::decision_log::DecisionLogger::with_config(&path, "live", Some(&log_config)) {
+            match crate::strategy::decision_log::DecisionLogger::with_config(
+                decisions_path.to_str().unwrap_or("decisions.csv"), "live", Some(&log_config),
+            ) {
                 Ok(logger) => {
-                    info!("Decision logging enabled: {}", path);
+                    info!("Decision logging enabled: {}", decisions_path.display());
                     strategy = strategy.with_decision_logger(logger);
                 }
                 Err(e) => {
-                    warn!("Failed to create decision logger at {}: {}", path, e);
+                    warn!("Failed to create decision logger at {}: {}", decisions_path.display(), e);
                 }
             }
         }
 
         // Always enable trades logging
-        let trades_log_path = std::env::var("TRADES_LOG_PATH")
-            .unwrap_or_else(|_| "logs/trades_live.csv".to_string());
-        match crate::strategy::trades_log::TradesLogger::new(&trades_log_path, "live", self.config.initial_balance) {
-            Ok(logger) => {
-                info!("Trades logging enabled: {}", trades_log_path);
-                strategy = strategy.with_trades_logger(logger);
-            }
-            Err(e) => {
-                warn!("Failed to create trades logger at {}: {}", trades_log_path, e);
+        {
+            let trades_path = std::env::var("TRADES_LOG_PATH")
+                .map(std::path::PathBuf::from)
+                .unwrap_or(session.trades);
+            match crate::strategy::trades_log::TradesLogger::new(&trades_path, "live", self.config.initial_balance) {
+                Ok(logger) => {
+                    info!("Trades logging enabled: {}", trades_path.display());
+                    strategy = strategy.with_trades_logger(logger);
+                }
+                Err(e) => {
+                    warn!("Failed to create trades logger at {}: {}", trades_path.display(), e);
+                }
             }
         }
 

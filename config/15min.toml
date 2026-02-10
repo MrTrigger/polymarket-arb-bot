@@ -14,7 +14,7 @@ mode = "live"
 assets = ["BTC", "ETH", "SOL", "XRP"]
 window_duration = "15min"
 console_log_level = "warn"
-file_log_level = "info"
+file_log_level = "debug"
 
 [trading]
 max_market_exposure = 250.0

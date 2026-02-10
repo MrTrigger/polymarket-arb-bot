@@ -164,13 +164,16 @@ async fn run() -> Result<()> {
         _ => Level::DEBUG,
     };
 
-    // Create logs directory if it doesn't exist
-    let log_dir = std::path::Path::new("logs");
-    std::fs::create_dir_all(log_dir).context("Failed to create logs directory")?;
+    // Create session directory for all output files
+    let mode_str = config.mode.to_string();
+    let session_dir = poly_bot::mode::common::create_session_dir(&mode_str)
+        .context("Failed to create session directory")?;
 
-    // File appender with daily rotation
-    let file_appender = tracing_appender::rolling::daily(log_dir, "poly-bot.log");
-    let (non_blocking_file, _guard) = tracing_appender::non_blocking(file_appender);
+    // File appender: write to session directory (no rotation — one file per session)
+    let log_path = session_dir.dir.join("poly-bot.log");
+    let log_file = std::fs::File::create(&log_path)
+        .context("Failed to create log file")?;
+    let (non_blocking_file, _guard) = tracing_appender::non_blocking(log_file);
 
     // Console layer: configurable level, compact format
     let console_layer = fmt::layer()
@@ -204,6 +207,7 @@ async fn run() -> Result<()> {
     // =========================================================================
     // SESSION START - Log all important configuration
     // =========================================================================
+    info!("Session directory: {}", session_dir.dir.display());
     info!("================================================================================");
     info!("                         POLY-BOT SESSION START");
     info!("================================================================================");
@@ -287,25 +291,26 @@ async fn run() -> Result<()> {
     // Create ClickHouse client
     let clickhouse = ClickHouseClient::new(config.clickhouse.clone());
 
-    // Test connection
-    info!("Testing ClickHouse connection...");
-    match clickhouse.ping().await {
-        Ok(()) => {
-            info!("ClickHouse connection successful");
-            // Create tables if needed
-            if let Err(e) = clickhouse.create_tables().await {
-                warn!("Failed to create tables: {}", e);
+    // Test connection (only if enabled)
+    if config.clickhouse_enabled {
+        info!("Testing ClickHouse connection...");
+        match clickhouse.ping().await {
+            Ok(()) => {
+                info!("ClickHouse connection successful");
+                // Create tables if needed
+                if let Err(e) = clickhouse.create_tables().await {
+                    warn!("Failed to create tables: {}", e);
+                }
             }
-        }
-        Err(e) => {
-            if config.mode != TradingMode::Shadow {
-                // Shadow mode can run without DB
+            Err(e) => {
                 warn!(
                     "ClickHouse not available: {}. Some features may not work.",
                     e
                 );
             }
         }
+    } else {
+        info!("ClickHouse disabled");
     }
 
     // Create shared GlobalState for dashboard and mode to share
@@ -320,12 +325,15 @@ async fn run() -> Result<()> {
         None
     };
 
+    // Only pass ClickHouse to modes when enabled (avoids connection error spam)
+    let ch_for_modes = if config.clickhouse_enabled { Some(clickhouse.clone()) } else { None };
+
     // Run the selected mode
     let result = match config.mode {
-        TradingMode::Live => run_live_mode(config, clickhouse, shared_state).await,
-        TradingMode::Paper => run_paper_mode(config, clickhouse, shared_state).await,
+        TradingMode::Live => run_live_mode(config, ch_for_modes, shared_state, session_dir).await,
+        TradingMode::Paper => run_paper_mode(config, ch_for_modes, shared_state, session_dir).await,
         TradingMode::Shadow => run_shadow_mode(config, clickhouse, shared_state).await,
-        TradingMode::Backtest => run_backtest_mode(config, clickhouse, args.data_source).await,
+        TradingMode::Backtest => run_backtest_mode(config, clickhouse, args.data_source, session_dir).await,
     };
 
     // Shutdown dashboard servers
@@ -379,8 +387,9 @@ async fn start_dashboard_servers(
 /// Run live trading mode.
 async fn run_live_mode(
     config: BotConfig,
-    clickhouse: ClickHouseClient,
+    clickhouse: Option<ClickHouseClient>,
     shared_state: Arc<poly_bot::state::GlobalState>,
+    session: poly_bot::mode::common::SessionPaths,
 ) -> Result<()> {
     info!("Initializing live trading mode");
 
@@ -391,7 +400,10 @@ async fn run_live_mode(
     let mut mode = LiveMode::new(mode_config, config)
         .context("Failed to create live mode")?
         .with_state(shared_state)
-        .with_clickhouse(clickhouse);
+        .with_session(session);
+    if let Some(ch) = clickhouse {
+        mode = mode.with_clickhouse(ch);
+    }
 
     // Set up shutdown handler
     let state = mode.state();
@@ -413,8 +425,9 @@ async fn run_live_mode(
 /// Run paper trading mode.
 async fn run_paper_mode(
     config: BotConfig,
-    clickhouse: ClickHouseClient,
+    clickhouse: Option<ClickHouseClient>,
     shared_state: Arc<poly_bot::state::GlobalState>,
+    session: poly_bot::mode::common::SessionPaths,
 ) -> Result<()> {
     info!("Initializing paper trading mode");
 
@@ -425,7 +438,10 @@ async fn run_paper_mode(
     let mut mode = PaperMode::new(mode_config, &config)
         .context("Failed to create paper mode")?
         .with_state(shared_state)
-        .with_clickhouse(clickhouse);
+        .with_session(session);
+    if let Some(ch) = clickhouse {
+        mode = mode.with_clickhouse(ch);
+    }
 
     // Set up shutdown handler
     let state = mode.state();
@@ -477,7 +493,7 @@ async fn run_shadow_mode(
 }
 
 /// Run backtest mode.
-async fn run_backtest_mode(config: BotConfig, clickhouse: ClickHouseClient, data_source_override: Option<String>) -> Result<()> {
+async fn run_backtest_mode(config: BotConfig, clickhouse: ClickHouseClient, data_source_override: Option<String>, session: poly_bot::mode::common::SessionPaths) -> Result<()> {
     info!("Initializing backtest mode");
 
     // Log backtest parameters
@@ -514,6 +530,13 @@ async fn run_backtest_mode(config: BotConfig, clickhouse: ClickHouseClient, data
             }
             mode_config.sweep_params = sweep_params;
         }
+    }
+
+    // Use session directory for logs if no explicit path set
+    if mode_config.decision_log_path.is_none() {
+        mode_config.decision_log_path = Some(
+            session.decisions.to_str().unwrap_or("decisions.csv").to_string()
+        );
     }
 
     // Create backtest mode runner

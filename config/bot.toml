@@ -250,7 +250,7 @@ max_spread_bps = 1000
 default_order_size = 50.0
 
 [observability]
-# Capture trading decisions to ClickHouse
+# Capture trading decisions (CSV log in session directory + ClickHouse pipeline)
 capture_decisions = true
 
 # Capture counterfactual analysis (what-if scenarios)

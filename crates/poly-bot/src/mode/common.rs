@@ -3,6 +3,7 @@
 //! This module contains common code used by both paper and live trading modes
 //! to ensure identical behavior except for the executor.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -330,4 +331,29 @@ where
     });
 
     strategy
+}
+
+/// Paths for session output files within a session directory.
+pub struct SessionPaths {
+    /// Directory for all session files (e.g., `logs/live_2026-02-10T12-30-00/`).
+    pub dir: PathBuf,
+    /// Path for decisions CSV.
+    pub decisions: PathBuf,
+    /// Path for trades CSV.
+    pub trades: PathBuf,
+}
+
+/// Create a timestamped session directory and return paths for all output files.
+///
+/// Creates `logs/{mode}_{YYYY-MM-DDTHH-MM-SS}/` containing decisions.csv and trades.csv.
+/// The session summary is automatically placed as a sibling of trades.csv by TradesLogger.
+pub fn create_session_dir(mode: &str) -> std::io::Result<SessionPaths> {
+    let timestamp = chrono::Utc::now().format("%Y-%m-%dT%H-%M-%S");
+    let dir = PathBuf::from(format!("logs/{mode}_{timestamp}"));
+    std::fs::create_dir_all(&dir)?;
+
+    let decisions = dir.join("decisions.csv");
+    let trades = dir.join("trades.csv");
+
+    Ok(SessionPaths { dir, decisions, trades })
 }

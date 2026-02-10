@@ -76,6 +76,8 @@ pub struct BacktestModeConfig {
     pub max_duration: Option<chrono::Duration>,
     /// Minimum interval between orderbook snapshots per event (ms). Downsamples L2 data.
     pub book_interval_ms: Option<u64>,
+    /// Skip session directory creation (used by sweep runner to avoid hundreds of dirs).
+    pub skip_session_dir: bool,
 }
 
 impl Default for BacktestModeConfig {
@@ -95,6 +97,7 @@ impl Default for BacktestModeConfig {
             decision_log_path: None,
             max_duration: None,
             book_interval_ms: None,
+            skip_session_dir: false,
         }
     }
 }
@@ -163,6 +166,7 @@ impl BacktestModeConfig {
             decision_log_path: config.backtest.decision_log_path.clone(),
             max_duration,
             book_interval_ms: config.backtest.book_interval_ms,
+            skip_session_dir: false,
         })
     }
 
@@ -949,42 +953,56 @@ impl BacktestMode {
             info!("No warmup prices available - ATR will warm up from event data");
         }
 
-        // Add decision logger if configured (for comparing live vs backtest behavior)
-        if let Some(ref path) = self.config.decision_log_path {
-            let log_config = crate::strategy::decision_log::DecisionLogConfig {
-                base_order_size: self.config.strategy.sizing_config.base_order_size,
-                min_order_size: self.config.strategy.sizing_config.min_order_size,
-                max_market_exposure: self.config.strategy.sizing_config.max_market_exposure,
-                max_total_exposure: self.config.strategy.sizing_config.max_total_exposure,
-                available_balance: self.config.initial_balance,
-                max_edge_factor: self.config.strategy.max_edge_factor,
-                window_duration_secs: self.config.strategy.window_duration_secs,
-                strong_up_ratio: self.config.strategy.strong_up_ratio,
-                lean_up_ratio: self.config.strategy.lean_up_ratio,
-            };
-            match crate::strategy::decision_log::DecisionLogger::with_config(path, "backtest", Some(&log_config)) {
+        // Create session directory (or use explicit decision_log_path if configured)
+        // Sweep runs skip session dir to avoid creating hundreds of directories.
+        let session_paths = if let Some(ref path) = self.config.decision_log_path {
+            let trades = path.replace("decisions_", "trades_");
+            Some((path.clone(), trades))
+        } else if !self.config.skip_session_dir {
+            let session = super::common::create_session_dir("backtest")
+                .expect("Failed to create session directory");
+            Some((
+                session.decisions.to_str().unwrap_or("decisions.csv").to_string(),
+                session.trades.to_str().unwrap_or("trades.csv").to_string(),
+            ))
+        } else {
+            None
+        };
+
+        if let Some((ref decisions_path, ref trades_path)) = session_paths {
+            // Enable decision logging
+            {
+                let log_config = crate::strategy::decision_log::DecisionLogConfig {
+                    base_order_size: self.config.strategy.sizing_config.base_order_size,
+                    min_order_size: self.config.strategy.sizing_config.min_order_size,
+                    max_market_exposure: self.config.strategy.sizing_config.max_market_exposure,
+                    max_total_exposure: self.config.strategy.sizing_config.max_total_exposure,
+                    available_balance: self.config.initial_balance,
+                    max_edge_factor: self.config.strategy.max_edge_factor,
+                    window_duration_secs: self.config.strategy.window_duration_secs,
+                    strong_up_ratio: self.config.strategy.strong_up_ratio,
+                    lean_up_ratio: self.config.strategy.lean_up_ratio,
+                };
+                match crate::strategy::decision_log::DecisionLogger::with_config(decisions_path, "backtest", Some(&log_config)) {
+                    Ok(logger) => {
+                        info!("Decision logging enabled: {}", decisions_path);
+                        strategy = strategy.with_decision_logger(logger);
+                    }
+                    Err(e) => {
+                        warn!("Failed to create decision logger at {}: {}", decisions_path, e);
+                    }
+                }
+            }
+
+            // Enable trades logging
+            match crate::strategy::trades_log::TradesLogger::new(trades_path, "backtest", self.config.initial_balance) {
                 Ok(logger) => {
-                    info!("Decision logging enabled: {}", path);
-                    strategy = strategy.with_decision_logger(logger);
+                    info!("Trades logging enabled: {}", trades_path);
+                    strategy = strategy.with_trades_logger(logger);
                 }
                 Err(e) => {
-                    warn!("Failed to create decision logger at {}: {}", path, e);
+                    warn!("Failed to create trades logger at {}: {}", trades_path, e);
                 }
-            }
-        }
-
-        // Always enable trades logging for backtest
-        let trades_log_path = self.config.decision_log_path
-            .as_ref()
-            .map(|p| p.replace("decisions_", "trades_"))
-            .unwrap_or_else(|| "logs/trades_backtest.csv".to_string());
-        match crate::strategy::trades_log::TradesLogger::new(&trades_log_path, "backtest", self.config.initial_balance) {
-            Ok(logger) => {
-                info!("Trades logging enabled: {}", trades_log_path);
-                strategy = strategy.with_trades_logger(logger);
-            }
-            Err(e) => {
-                warn!("Failed to create trades logger at {}: {}", trades_log_path, e);
             }
         }
 
@@ -1179,6 +1197,7 @@ impl BacktestMode {
         for (run_idx, params) in combinations.into_iter().enumerate() {
             let mut run_config = self.config.clone();
             run_config.decision_log_path = None;
+            run_config.skip_session_dir = true;
             for (name, value) in &params {
                 apply_parameter(&mut run_config, name, *value);
             }
