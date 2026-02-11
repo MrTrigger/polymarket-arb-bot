@@ -65,8 +65,10 @@ pub struct CsvWriter {
     price_history: Mutex<Option<csv::Writer<File>>>,
     aligned_prices: Mutex<Option<csv::Writer<File>>>,
     chainlink_prices: Mutex<Option<csv::Writer<File>>>,
-    /// Market windows are buffered in memory and only written on finalize,
-    /// filtered to events that actually have L2 orderbook data.
+    market_windows: Mutex<Option<csv::Writer<File>>>,
+    /// Market windows already written to CSV (dedup by event_id).
+    written_windows: Mutex<HashSet<String>>,
+    /// Market windows buffered in memory for finalize (L2-filtered rewrite).
     pending_windows: Mutex<HashMap<String, MarketWindow>>,
     /// Event IDs that have received at least one orderbook snapshot.
     seen_orderbook_events: Mutex<HashSet<String>>,
@@ -95,6 +97,8 @@ impl CsvWriter {
             price_history: Mutex::new(None),
             aligned_prices: Mutex::new(None),
             chainlink_prices: Mutex::new(None),
+            market_windows: Mutex::new(None),
+            written_windows: Mutex::new(HashSet::new()),
             pending_windows: Mutex::new(HashMap::new()),
             seen_orderbook_events: Mutex::new(HashSet::new()),
             spot_price_count: AtomicU64::new(0),
@@ -233,11 +237,36 @@ impl CsvWriter {
             return Ok(());
         }
 
+        // Buffer for finalize (L2-filtered rewrite)
         let mut pending = self.pending_windows.lock().unwrap();
         for window in windows {
-            // Dedup by event_id (keep latest discovery)
             pending.insert(window.event_id.clone(), window.clone());
         }
+        drop(pending);
+
+        // Write new (unseen) windows to CSV immediately so file is always available
+        let mut written = self.written_windows.lock().unwrap();
+        let new_windows: Vec<&MarketWindow> = windows
+            .iter()
+            .filter(|w| !written.contains(&w.event_id))
+            .collect();
+
+        if new_windows.is_empty() {
+            return Ok(());
+        }
+
+        let path = self.output_dir.join(POLYMARKET_WINDOWS_FILE);
+        Self::get_or_create_writer(&self.market_windows, &path)?;
+
+        let mut guard = self.market_windows.lock().unwrap();
+        let writer = guard.as_mut().unwrap();
+
+        for window in &new_windows {
+            writer.serialize(window)?;
+            written.insert(window.event_id.clone());
+        }
+        writer.flush()?;
+        self.window_count.fetch_add(new_windows.len() as u64, Ordering::Relaxed);
 
         Ok(())
     }
@@ -324,6 +353,9 @@ impl CsvWriter {
             writer.flush()?;
         }
         if let Some(ref mut writer) = *self.chainlink_prices.lock().unwrap() {
+            writer.flush()?;
+        }
+        if let Some(ref mut writer) = *self.market_windows.lock().unwrap() {
             writer.flush()?;
         }
         Ok(())

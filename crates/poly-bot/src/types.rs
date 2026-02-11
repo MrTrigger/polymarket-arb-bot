@@ -1016,6 +1016,36 @@ impl Inventory {
         }
     }
 
+    /// Record a sell (early exit). Reduces shares and records realized P&L.
+    /// `proceeds` is the total USDC received from selling.
+    pub fn record_sell(&mut self, outcome: Outcome, shares: Decimal, proceeds: Decimal) {
+        match outcome {
+            Outcome::Yes => {
+                // Proportional cost basis for the shares being sold
+                let cost_per_share = if self.yes_shares > Decimal::ZERO {
+                    self.yes_cost_basis / self.yes_shares
+                } else {
+                    Decimal::ZERO
+                };
+                let cost_of_sold = cost_per_share * shares;
+                self.yes_shares = (self.yes_shares - shares).max(Decimal::ZERO);
+                self.yes_cost_basis = (self.yes_cost_basis - cost_of_sold).max(Decimal::ZERO);
+                self.realized_pnl += proceeds - cost_of_sold;
+            }
+            Outcome::No => {
+                let cost_per_share = if self.no_shares > Decimal::ZERO {
+                    self.no_cost_basis / self.no_shares
+                } else {
+                    Decimal::ZERO
+                };
+                let cost_of_sold = cost_per_share * shares;
+                self.no_shares = (self.no_shares - shares).max(Decimal::ZERO);
+                self.no_cost_basis = (self.no_cost_basis - cost_of_sold).max(Decimal::ZERO);
+                self.realized_pnl += proceeds - cost_of_sold;
+            }
+        }
+    }
+
     /// Calculate unrealized P&L given current prices.
     ///
     /// Assumes settlement pays $1.00 for winning side.

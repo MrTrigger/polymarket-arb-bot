@@ -91,6 +91,27 @@ impl Signal {
     pub fn bias_strength(&self) -> Decimal {
         (self.up_ratio() - dec!(0.50)).abs()
     }
+
+    /// Check if this signal is bullish (up-biased).
+    #[inline]
+    pub fn is_up(&self) -> bool {
+        matches!(self, Signal::StrongUp | Signal::LeanUp)
+    }
+
+    /// Check if this signal reverses the direction of the entry signal.
+    /// A reversal means the signal has flipped to the opposite direction
+    /// (e.g., entered on StrongUp, now LeanDown/StrongDown, or vice versa).
+    /// Neutral also counts as a reversal since the directional edge is gone.
+    #[inline]
+    pub fn is_reversal_of(&self, entry: &Signal) -> bool {
+        if entry.is_up() {
+            // Entered long (UP): exit if signal is now neutral or down
+            matches!(self, Signal::Neutral | Signal::LeanDown | Signal::StrongDown)
+        } else {
+            // Entered short (DOWN): exit if signal is now neutral or up
+            matches!(self, Signal::Neutral | Signal::LeanUp | Signal::StrongUp)
+        }
+    }
 }
 
 impl std::fmt::Display for Signal {
@@ -121,34 +142,86 @@ impl SignalThresholds {
     }
 }
 
+/// Configurable base thresholds for signal detection (late window, <3 min).
+///
+/// Other time brackets scale these up by a factor.
+/// Values are in project-specific "bps" units where 1 unit = 0.001% = 0.00001 fraction.
+/// Example: strong_bps=13 means 0.013% threshold, lean_bps=6 means 0.006%.
+#[derive(Debug, Clone, Copy)]
+pub struct SignalConfig {
+    /// Strong signal base threshold (default: 13 = 0.013%).
+    pub strong_bps: u32,
+    /// Lean signal base threshold (default: 6 = 0.006%).
+    pub lean_bps: u32,
+}
+
+impl Default for SignalConfig {
+    fn default() -> Self {
+        Self {
+            strong_bps: 13, // 0.013%
+            lean_bps: 6,    // 0.006%
+        }
+    }
+}
+
+impl SignalConfig {
+    /// Convert bps thresholds to Decimal fractions for the late bracket.
+    /// 1 unit = 0.001% = 0.00001 as a fraction.
+    fn late_thresholds(&self) -> SignalThresholds {
+        let strong = Decimal::from(self.strong_bps) / dec!(100000); // unit -> fraction (e.g., 13 -> 0.00013)
+        let lean = Decimal::from(self.lean_bps) / dec!(100000);
+        SignalThresholds::new(strong, lean)
+    }
+}
+
 /// Get the signal thresholds based on minutes remaining.
 ///
-/// OPTIMIZED via parameter sweep (5m, 15m, 1h markets):
-/// - Best config: Lean=$20, Conviction=$40 (for BTC ~$95k = 0.021%/0.042%)
-/// - Higher lean ratio (0.65) and strong ratio (0.82) for better edge
+/// Uses configurable base thresholds (late bracket) and scales up for earlier brackets:
+/// - >30 min: base * 3.23 (wider, less certainty)
+/// - 10-30 min: base * 2.23 (factor 0.7 of original)
+/// - 3-10 min: base * 1.62 (factor 0.5 of original)
+/// - <3 min: base * 1.0 (tight thresholds, high certainty)
 ///
-/// Time brackets and thresholds (percentage distance from strike):
-/// - >30 min: Strong=0.042%, Lean=0.021% (base thresholds)
-/// - 10-30 min: Strong=0.029%, Lean=0.015% (factor 0.7)
-/// - 3-10 min: Strong=0.021%, Lean=0.011% (factor 0.5)
-/// - <3 min: Strong=0.013%, Lean=0.006% (factor 0.3, high certainty)
-///
+/// Default base: Strong=13bps (0.013%), Lean=6bps (0.006%).
 /// These percentage-based thresholds work across all assets (BTC, ETH, SOL, etc.)
 /// and have been optimized via backtesting.
 #[inline]
 pub fn get_thresholds(minutes_remaining: Decimal) -> SignalThresholds {
+    get_thresholds_with_config(minutes_remaining, &SignalConfig::default())
+}
+
+/// Get signal thresholds with custom base config.
+///
+/// Default ratios (matching original hardcoded values with strong_bps=13, lean_bps=6):
+/// - >30 min: strong=42/100000, lean=21/100000 (factors: 42/13, 21/6 = 3.5)
+/// - 10-30:   strong=29/100000, lean=15/100000 (factors: 29/13, 15/6 = 2.5)
+/// - 3-10:    strong=21/100000, lean=11/100000 (factors: 21/13, 11/6 ≈ 1.833)
+/// - <3:      strong=13/100000, lean=6/100000  (base)
+///
+/// For non-default configs, we scale proportionally using the same ratios.
+#[inline]
+pub fn get_thresholds_with_config(minutes_remaining: Decimal, config: &SignalConfig) -> SignalThresholds {
+    let base = config.late_thresholds();
+    // Use exact integer ratios to avoid Decimal rounding artifacts.
+    // Ratios derived from original hardcoded thresholds: late/base = scale factor.
+    // strong: 42/13, 29/13, 21/13, 13/13  lean: 21/6, 15/6, 11/6, 6/6
     if minutes_remaining > dec!(30) {
-        // Early: >30 min - base thresholds (optimized via sweep)
-        SignalThresholds::new(dec!(0.00042), dec!(0.00021))
+        SignalThresholds::new(
+            base.strong * dec!(42) / dec!(13),
+            base.lean * dec!(21) / dec!(6),
+        )
     } else if minutes_remaining > dec!(10) {
-        // Mid: 10-30 min - factor 0.7
-        SignalThresholds::new(dec!(0.00029), dec!(0.00015))
+        SignalThresholds::new(
+            base.strong * dec!(29) / dec!(13),
+            base.lean * dec!(15) / dec!(6),
+        )
     } else if minutes_remaining > dec!(3) {
-        // Late: 3-10 min - factor 0.5
-        SignalThresholds::new(dec!(0.00021), dec!(0.00011))
+        SignalThresholds::new(
+            base.strong * dec!(21) / dec!(13),
+            base.lean * dec!(11) / dec!(6),
+        )
     } else {
-        // Very late: <3 min - factor 0.3, tight thresholds
-        SignalThresholds::new(dec!(0.00013), dec!(0.00006))
+        base
     }
 }
 
@@ -175,6 +248,17 @@ pub fn get_thresholds(minutes_remaining: Decimal) -> SignalThresholds {
 /// ```
 #[inline]
 pub fn get_signal(spot_price: Decimal, strike_price: Decimal, minutes_remaining: Decimal) -> Signal {
+    get_signal_with_config(spot_price, strike_price, minutes_remaining, &SignalConfig::default())
+}
+
+/// Calculate directional signal with custom threshold config.
+#[inline]
+pub fn get_signal_with_config(
+    spot_price: Decimal,
+    strike_price: Decimal,
+    minutes_remaining: Decimal,
+    config: &SignalConfig,
+) -> Signal {
     // Calculate percentage distance from strike
     // distance = (spot - strike) / strike
     let distance = if strike_price.is_zero() {
@@ -183,7 +267,7 @@ pub fn get_signal(spot_price: Decimal, strike_price: Decimal, minutes_remaining:
         (spot_price - strike_price) / strike_price
     };
 
-    let thresholds = get_thresholds(minutes_remaining);
+    let thresholds = get_thresholds_with_config(minutes_remaining, config);
     let abs_distance = distance.abs();
 
     if distance > Decimal::ZERO {

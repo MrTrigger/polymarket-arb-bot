@@ -18,7 +18,7 @@ use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 
 use super::confidence::{Confidence, ConfidenceCalculator, ConfidenceFactors};
-use super::signal::{calculate_distance, get_signal, Signal};
+use super::signal::{calculate_distance, get_signal_with_config, Signal, SignalConfig};
 use crate::types::{MarketState, OrderBook};
 
 /// Reason for skipping a directional opportunity.
@@ -38,6 +38,12 @@ pub enum DirectionalSkipReason {
     SpreadTooWide,
     /// Stale prices - YES+NO combined cost < 0.98 indicates one side hasn't updated.
     StalePrices,
+    /// Share price too low - deep OTM position, model can't reliably price this.
+    SharePriceTooLow,
+    /// Share price too high - catastrophic risk/reward, need unrealistic win rate.
+    SharePriceTooHigh,
+    /// Negative expected value - confidence below share price.
+    NegativeEV,
 }
 
 impl std::fmt::Display for DirectionalSkipReason {
@@ -50,6 +56,9 @@ impl std::fmt::Display for DirectionalSkipReason {
             Self::InsufficientTime => write!(f, "insufficient time"),
             Self::SpreadTooWide => write!(f, "spread too wide"),
             Self::StalePrices => write!(f, "stale prices"),
+            Self::SharePriceTooLow => write!(f, "share price too low"),
+            Self::SharePriceTooHigh => write!(f, "share price too high"),
+            Self::NegativeEV => write!(f, "negative EV"),
         }
     }
 }
@@ -140,6 +149,16 @@ pub struct DirectionalConfig {
     pub max_spread_ratio: Decimal,
     /// Minimum depth required on favorable side (in dollars).
     pub min_favorable_depth: Decimal,
+    /// Minimum share price to buy (prevents deep OTM gambling).
+    /// At $0.15, the market gives the outcome at least 15% probability.
+    /// Default: 0.15.
+    pub min_share_price: Decimal,
+    /// Maximum share price to buy (prevents catastrophic risk/reward).
+    /// At $0.90, you need 90% accuracy to break even.
+    /// Default: 1.0 (no cap).
+    pub max_share_price: Decimal,
+    /// Signal threshold configuration (bps-based).
+    pub signal_config: SignalConfig,
 }
 
 impl Default for DirectionalConfig {
@@ -149,6 +168,9 @@ impl Default for DirectionalConfig {
             max_combined_cost: dec!(0.995), // At least 0.5% margin
             max_spread_ratio: dec!(0.10), // Max 10% spread
             min_favorable_depth: dec!(100), // At least $100 depth
+            min_share_price: dec!(0.15), // Don't buy shares below $0.15
+            max_share_price: Decimal::ONE, // No cap by default
+            signal_config: SignalConfig::default(),
         }
     }
 }
@@ -234,17 +256,30 @@ impl DirectionalDetector {
 
         // Calculate signal
         let minutes_remaining = Decimal::from(state.seconds_remaining) / dec!(60);
-        let signal = get_signal(signal_price, signal_strike, minutes_remaining);
+        let signal = get_signal_with_config(signal_price, signal_strike, minutes_remaining, &self.config.signal_config);
 
         // Skip if neutral - no directional edge
         if !signal.is_directional() {
             return Err(DirectionalSkipReason::NeutralSignal);
         }
 
+        // Check minimum share price on our side (prevents deep OTM gambling)
+        let our_ask = match signal {
+            Signal::StrongUp | Signal::LeanUp => yes_ask,
+            Signal::StrongDown | Signal::LeanDown => no_ask,
+            Signal::Neutral => unreachable!(),
+        };
+        if our_ask < self.config.min_share_price {
+            return Err(DirectionalSkipReason::SharePriceTooLow);
+        }
+
+        // Check maximum share price (prevents catastrophic risk/reward)
+        if our_ask > self.config.max_share_price {
+            return Err(DirectionalSkipReason::SharePriceTooHigh);
+        }
+
         // Calculate distance using Chainlink (ground truth)
         let distance = calculate_distance(signal_price, signal_strike);
-        let distance_dollars = (signal_price - signal_strike).abs();
-
         // Calculate order book metrics
         let yes_imbalance = calculate_imbalance(&state.yes_book);
         let no_imbalance = calculate_imbalance(&state.no_book);
@@ -263,9 +298,10 @@ impl DirectionalDetector {
             Signal::Neutral => Decimal::ZERO,
         };
 
-        // Build confidence factors
+        // Build confidence factors (distance as percentage, not dollars)
+        let distance_pct = distance.abs() * dec!(100); // convert ratio to percentage
         let factors = ConfidenceFactors::new(
-            distance_dollars,
+            distance_pct,
             minutes_remaining,
             signal,
             book_imbalance,
@@ -307,6 +343,12 @@ impl DirectionalDetector {
             detected_at_ms: chrono::Utc::now().timestamp_millis(),
             binance_lead,
         })
+    }
+
+    /// Get the signal configuration for this detector.
+    #[inline]
+    pub fn signal_config(&self) -> &SignalConfig {
+        &self.config.signal_config
     }
 
     /// Quick check if directional opportunity might exist.

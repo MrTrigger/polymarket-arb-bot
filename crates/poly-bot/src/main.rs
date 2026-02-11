@@ -45,7 +45,7 @@ struct Args {
     mode: Option<String>,
 
     /// Config file path
-    #[arg(short, long, default_value = "config/bot.toml")]
+    #[arg(short, long, default_value = "config/15min.toml")]
     config: PathBuf,
 
     /// ClickHouse HTTP URL (overrides config file)
@@ -658,7 +658,7 @@ mod tests {
     fn test_cli_parsing() {
         // Test default config path
         let args = Args::try_parse_from(["poly-bot"]).unwrap();
-        assert_eq!(args.config.to_str().unwrap(), "config/bot.toml");
+        assert_eq!(args.config.to_str().unwrap(), "config/15min.toml");
         assert!(args.mode.is_none());
     }
 

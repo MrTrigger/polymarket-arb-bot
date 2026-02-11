@@ -628,6 +628,12 @@ pub struct OracleConfig {
     pub lead_confirm_boost: Decimal,
     /// Confidence cut when Binance lead opposes signal direction (e.g. 0.25 = -25%).
     pub lead_oppose_cut: Decimal,
+    /// HTF trend confidence boost when trend confirms signal (e.g. 0.10 = +10%).
+    pub htf_trend_confirm_boost: Decimal,
+    /// HTF trend confidence cut when trend opposes signal (e.g. 0.20 = -20%).
+    pub htf_trend_oppose_cut: Decimal,
+    /// HTF trend window in minutes (default: 30).
+    pub htf_trend_window_min: u64,
 }
 
 impl Default for OracleConfig {
@@ -637,6 +643,9 @@ impl Default for OracleConfig {
             binance_lead_enabled: true,
             lead_confirm_boost: Decimal::new(15, 2), // 0.15
             lead_oppose_cut: Decimal::new(25, 2),    // 0.25
+            htf_trend_confirm_boost: Decimal::ZERO,  // disabled by default
+            htf_trend_oppose_cut: Decimal::ZERO,
+            htf_trend_window_min: 30,
         }
     }
 }
@@ -863,6 +872,26 @@ pub struct DirectionalEngineConfig {
     pub dist_conf_per_atr: Option<Decimal>,
     /// Maximum edge required at window start (decays to 0).
     pub max_edge_factor: Option<Decimal>,
+
+    /// Minimum share price to buy (prevents deep OTM gambling).
+    /// At $0.15, the market gives the outcome at least 15% probability.
+    /// Default: 0.15.
+    pub min_share_price: Option<Decimal>,
+
+    /// Maximum share price to buy (prevents catastrophic risk/reward).
+    /// At $0.90, you need 90% accuracy to break even. Shares above this
+    /// have negative expected value at realistic win rates.
+    /// Default: None (no cap).
+    pub max_share_price: Option<Decimal>,
+
+    /// Kelly fraction for position sizing (0.0 = disabled/flat sizing, 1.0 = full Kelly).
+    /// Fractional Kelly (e.g. 0.25) is safer. Size = base_order_size * kelly_fraction * kelly_f.
+    /// Default: 0.0 (disabled).
+    pub kelly_fraction: Option<Decimal>,
+
+    /// Enable early exit when signal reverses after entry.
+    /// Default: false.
+    pub early_exit_enabled: Option<bool>,
 }
 
 impl Default for DirectionalEngineConfig {
@@ -880,6 +909,10 @@ impl Default for DirectionalEngineConfig {
             dist_conf_floor: None,
             dist_conf_per_atr: None,
             max_edge_factor: None,
+            min_share_price: None,
+            max_share_price: None,
+            kelly_fraction: None,
+            early_exit_enabled: None,
         }
     }
 }
@@ -1146,6 +1179,20 @@ pub struct SweepConfig {
     /// Edge factor values to sweep (quality filter).
     /// This is the minimum EV required at window start.
     pub edge_factors: Vec<f64>,
+    /// Minimum share price to buy (prevents deep OTM gambling).
+    pub min_share_prices: Vec<f64>,
+    /// Maximum share price to buy (prevents catastrophic risk/reward).
+    pub max_share_prices: Vec<f64>,
+    /// Kelly fraction for position sizing (0.0 = disabled).
+    pub kelly_fractions: Vec<f64>,
+    /// HTF trend confirm boost values.
+    pub htf_trend_confirm_boosts: Vec<f64>,
+    /// HTF trend oppose cut values.
+    pub htf_trend_oppose_cuts: Vec<f64>,
+    /// Strong signal threshold (bps) for late window.
+    pub strong_threshold_late_bps: Vec<f64>,
+    /// Lean signal threshold (bps) for late window.
+    pub lean_threshold_late_bps: Vec<f64>,
 }
 
 impl SweepConfig {
@@ -1166,6 +1213,13 @@ impl SweepConfig {
             dist_conf_floors: toml.sweep.dist_conf_floors,
             dist_conf_per_atrs: toml.sweep.dist_conf_per_atrs,
             edge_factors: toml.sweep.edge_factors,
+            min_share_prices: toml.sweep.min_share_prices,
+            max_share_prices: toml.sweep.max_share_prices,
+            kelly_fractions: toml.sweep.kelly_fractions,
+            htf_trend_confirm_boosts: toml.sweep.htf_trend_confirm_boosts,
+            htf_trend_oppose_cuts: toml.sweep.htf_trend_oppose_cuts,
+            strong_threshold_late_bps: toml.sweep.strong_threshold_late_bps,
+            lean_threshold_late_bps: toml.sweep.lean_threshold_late_bps,
         })
     }
 
@@ -1174,13 +1228,10 @@ impl SweepConfig {
         use crate::mode::backtest::SweepParameter;
         let mut params = Vec::new();
 
-        // Helper to create sweep param from values
+        // Helper: create sweep param from explicit value list (preserves exact values).
         fn make_param(name: &str, values: &[f64]) -> Option<SweepParameter> {
             if values.len() > 1 {
-                let min = values.iter().cloned().fold(f64::INFINITY, f64::min);
-                let max = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-                let step = (max - min) / (values.len() - 1) as f64;
-                Some(SweepParameter::new(name, min, max, step))
+                Some(SweepParameter::from_values(name, values.to_vec()))
             } else {
                 None
             }
@@ -1207,6 +1258,37 @@ impl SweepConfig {
             params.push(p);
         }
 
+        // Minimum share price (OTM filter)
+        if let Some(p) = make_param("min_share_price", &self.min_share_prices) {
+            params.push(p);
+        }
+
+        // Maximum share price (risk/reward filter)
+        if let Some(p) = make_param("max_share_price", &self.max_share_prices) {
+            params.push(p);
+        }
+
+        // Kelly fraction (position sizing)
+        if let Some(p) = make_param("kelly_fraction", &self.kelly_fractions) {
+            params.push(p);
+        }
+
+        // HTF trend params
+        if let Some(p) = make_param("htf_trend_confirm_boost", &self.htf_trend_confirm_boosts) {
+            params.push(p);
+        }
+        if let Some(p) = make_param("htf_trend_oppose_cut", &self.htf_trend_oppose_cuts) {
+            params.push(p);
+        }
+
+        // Signal thresholds
+        if let Some(p) = make_param("strong_threshold_late_bps", &self.strong_threshold_late_bps) {
+            params.push(p);
+        }
+        if let Some(p) = make_param("lean_threshold_late_bps", &self.lean_threshold_late_bps) {
+            params.push(p);
+        }
+
         params
     }
 }
@@ -1229,6 +1311,13 @@ struct SweepToml {
     dist_conf_floors: Vec<f64>,
     dist_conf_per_atrs: Vec<f64>,
     edge_factors: Vec<f64>,
+    min_share_prices: Vec<f64>,
+    max_share_prices: Vec<f64>,
+    kelly_fractions: Vec<f64>,
+    htf_trend_confirm_boosts: Vec<f64>,
+    htf_trend_oppose_cuts: Vec<f64>,
+    strong_threshold_late_bps: Vec<f64>,
+    lean_threshold_late_bps: Vec<f64>,
 }
 
 impl Default for SweepToml {
@@ -1241,6 +1330,13 @@ impl Default for SweepToml {
             dist_conf_floors: Vec::new(),
             dist_conf_per_atrs: Vec::new(),
             edge_factors: Vec::new(),
+            min_share_prices: Vec::new(),
+            max_share_prices: Vec::new(),
+            kelly_fractions: Vec::new(),
+            htf_trend_confirm_boosts: Vec::new(),
+            htf_trend_oppose_cuts: Vec::new(),
+            strong_threshold_late_bps: Vec::new(),
+            lean_threshold_late_bps: Vec::new(),
         }
     }
 }
@@ -1629,6 +1725,9 @@ struct OracleToml {
     binance_lead_enabled: bool,
     lead_confirm_boost: f64,
     lead_oppose_cut: f64,
+    htf_trend_confirm_boost: f64,
+    htf_trend_oppose_cut: f64,
+    htf_trend_window_min: u64,
 }
 
 impl Default for OracleToml {
@@ -1638,6 +1737,9 @@ impl Default for OracleToml {
             binance_lead_enabled: true,
             lead_confirm_boost: 0.15,
             lead_oppose_cut: 0.25,
+            htf_trend_confirm_boost: 0.0,
+            htf_trend_oppose_cut: 0.0,
+            htf_trend_window_min: 30,
         }
     }
 }
@@ -1710,6 +1812,10 @@ struct DirectionalEngineToml {
     dist_conf_floor: Option<f64>,
     dist_conf_per_atr: Option<f64>,
     max_edge_factor: Option<f64>,
+    min_share_price: Option<f64>,
+    max_share_price: Option<f64>,
+    kelly_fraction: Option<f64>,
+    early_exit_enabled: Option<bool>,
 }
 
 impl Default for DirectionalEngineToml {
@@ -1726,6 +1832,10 @@ impl Default for DirectionalEngineToml {
             dist_conf_floor: None,
             dist_conf_per_atr: None,
             max_edge_factor: None,
+            min_share_price: None,
+            max_share_price: None,
+            kelly_fraction: None,
+            early_exit_enabled: None,
         }
     }
 }
@@ -1942,6 +2052,13 @@ impl BotConfig {
                     dist_conf_floors: toml.backtest.sweep.dist_conf_floors,
                     dist_conf_per_atrs: toml.backtest.sweep.dist_conf_per_atrs,
                     edge_factors: toml.backtest.sweep.edge_factors,
+                    min_share_prices: toml.backtest.sweep.min_share_prices,
+                    max_share_prices: toml.backtest.sweep.max_share_prices,
+                    kelly_fractions: toml.backtest.sweep.kelly_fractions,
+                    htf_trend_confirm_boosts: toml.backtest.sweep.htf_trend_confirm_boosts,
+                    htf_trend_oppose_cuts: toml.backtest.sweep.htf_trend_oppose_cuts,
+                    strong_threshold_late_bps: toml.backtest.sweep.strong_threshold_late_bps,
+                    lean_threshold_late_bps: toml.backtest.sweep.lean_threshold_late_bps,
                 },
                 book_interval_ms: toml.backtest.book_interval_ms,
                 fill_delay_ms: toml.backtest.fill_delay_ms,
@@ -1974,6 +2091,10 @@ impl BotConfig {
                     dist_conf_floor: toml.engines.directional.dist_conf_floor.map(f64_to_decimal),
                     dist_conf_per_atr: toml.engines.directional.dist_conf_per_atr.map(f64_to_decimal),
                     max_edge_factor: toml.engines.directional.max_edge_factor.map(f64_to_decimal),
+                    min_share_price: toml.engines.directional.min_share_price.map(f64_to_decimal),
+                    max_share_price: toml.engines.directional.max_share_price.map(f64_to_decimal),
+                    kelly_fraction: toml.engines.directional.kelly_fraction.map(f64_to_decimal),
+                    early_exit_enabled: toml.engines.directional.early_exit_enabled,
                 },
                 maker: MakerEngineConfig {
                     enabled: toml.engines.maker.enabled,
@@ -2000,6 +2121,9 @@ impl BotConfig {
                 binance_lead_enabled: toml.oracle.binance_lead_enabled,
                 lead_confirm_boost: f64_to_decimal(toml.oracle.lead_confirm_boost),
                 lead_oppose_cut: f64_to_decimal(toml.oracle.lead_oppose_cut),
+                htf_trend_confirm_boost: f64_to_decimal(toml.oracle.htf_trend_confirm_boost),
+                htf_trend_oppose_cut: f64_to_decimal(toml.oracle.htf_trend_oppose_cut),
+                htf_trend_window_min: toml.oracle.htf_trend_window_min,
             },
         })
     }

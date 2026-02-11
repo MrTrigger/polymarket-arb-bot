@@ -39,8 +39,8 @@ pub const MAX_MULTIPLIER: Decimal = dec!(3.0);
 /// These are the raw market conditions that determine sizing.
 #[derive(Debug, Clone)]
 pub struct ConfidenceFactors {
-    /// Distance from spot price to strike (in absolute dollars).
-    /// Larger values = more confidence in outcome direction.
+    /// Distance from spot price to strike as percentage (e.g., 0.15 = 0.15%).
+    /// Normalized across all assets. Larger values = more confidence in outcome direction.
     pub distance_to_strike: Decimal,
 
     /// Minutes remaining in the market window.
@@ -84,7 +84,7 @@ impl ConfidenceFactors {
     /// confidence-based sizing with a baseline size.
     pub fn neutral() -> Self {
         Self {
-            distance_to_strike: Decimal::new(25, 0), // $25 from strike
+            distance_to_strike: dec!(0.10), // 0.10% from strike
             minutes_remaining: Decimal::new(7, 0),   // Mid-market
             signal: Signal::Neutral,
             book_imbalance: Decimal::ZERO,           // No imbalance
@@ -223,14 +223,14 @@ impl ConfidenceCalculator {
             dec!(1.6) // Final minutes: high confidence
         };
 
-        // Only apply full time confidence if we're far from strike
+        // Only apply full time confidence if we're far from strike (percentage-based)
         let abs_distance = distance.abs();
-        let distance_modifier = if abs_distance > dec!(50) {
-            dec!(1.0) // Far: full time confidence applies
-        } else if abs_distance > dec!(20) {
-            dec!(0.8)
+        let distance_modifier = if abs_distance > dec!(0.15) {
+            dec!(1.0) // Far (>0.15%): full time confidence applies
+        } else if abs_distance > dec!(0.05) {
+            dec!(0.8) // Moderate (0.05%-0.15%)
         } else {
-            dec!(0.5) // Close to strike: time doesn't help
+            dec!(0.5) // Close to strike (<0.05%): time doesn't help
         };
 
         time_factor * distance_modifier
@@ -238,21 +238,22 @@ impl ConfidenceCalculator {
 
     /// Distance confidence: Further from strike = more certain outcome.
     ///
+    /// Uses percentage distance, normalized across all assets.
     /// Ranges from 0.6 (at strike) to 1.5 (very far).
     pub fn distance_confidence(distance: Decimal) -> Decimal {
         let abs_distance = distance.abs();
-        if abs_distance > dec!(100) {
-            dec!(1.5) // Very far: high confidence
-        } else if abs_distance > dec!(50) {
+        if abs_distance > dec!(0.30) {
+            dec!(1.5) // Very far (>0.30%): high confidence
+        } else if abs_distance > dec!(0.20) {
             dec!(1.3)
-        } else if abs_distance > dec!(30) {
+        } else if abs_distance > dec!(0.10) {
             dec!(1.1)
-        } else if abs_distance > dec!(20) {
-            dec!(1.0) // Baseline
-        } else if abs_distance > dec!(10) {
+        } else if abs_distance > dec!(0.05) {
+            dec!(1.0) // Baseline (0.05%-0.10%)
+        } else if abs_distance > dec!(0.02) {
             dec!(0.8)
         } else {
-            dec!(0.6) // At strike: low confidence
+            dec!(0.6) // At strike (<0.02%): low confidence
         }
     }
 
@@ -328,14 +329,14 @@ mod tests {
     #[test]
     fn test_confidence_factors_new() {
         let factors = ConfidenceFactors::new(
-            dec!(50),
+            dec!(0.15),
             dec!(5),
             Signal::StrongUp,
             dec!(0.2),
             dec!(25000),
         );
 
-        assert_eq!(factors.distance_to_strike, dec!(50));
+        assert_eq!(factors.distance_to_strike, dec!(0.15));
         assert_eq!(factors.minutes_remaining, dec!(5));
         assert_eq!(factors.signal, Signal::StrongUp);
         assert_eq!(factors.book_imbalance, dec!(0.2));
@@ -445,49 +446,43 @@ mod tests {
 
     #[test]
     fn test_time_confidence_early_market() {
-        // >12 minutes, far from strike
-        let conf = ConfidenceCalculator::time_confidence(dec!(14), dec!(80));
+        // >12 minutes, far from strike (0.20% distance)
+        let conf = ConfidenceCalculator::time_confidence(dec!(14), dec!(0.20));
         assert_eq!(conf, dec!(0.6)); // Early: 0.6 * 1.0
     }
 
     #[test]
     fn test_time_confidence_mid_market() {
-        // 6-9 minutes, far from strike
-        // time_factor = 0.8 (7 minutes is in 6-9 range)
-        // distance_modifier = 1.0 (60 > 50)
-        // result = 0.8 * 1.0 = 0.8
-        // But wait, 7 is in the 6-9 range, so time_factor = 0.8
-        // Actually 7 > 6, so it's in the 6-9 range where time_factor = 1.0 (baseline)
-        // Wait - the check is minutes_remaining > 6, so 7 > 6 is true, giving 1.0
-        let conf = ConfidenceCalculator::time_confidence(dec!(7), dec!(60));
-        assert_eq!(conf, dec!(1.0)); // 1.0 * 1.0 (7 > 6 means mid baseline, 60 > 50 means full distance modifier)
+        // 6-9 minutes, far from strike (0.20% distance)
+        let conf = ConfidenceCalculator::time_confidence(dec!(7), dec!(0.20));
+        assert_eq!(conf, dec!(1.0)); // 1.0 * 1.0 (7 > 6 means mid baseline, 0.20 > 0.15 means full distance modifier)
     }
 
     #[test]
     fn test_time_confidence_late_market() {
-        // 3-6 minutes, far from strike
-        let conf = ConfidenceCalculator::time_confidence(dec!(4), dec!(80));
+        // 3-6 minutes, far from strike (0.20% distance)
+        let conf = ConfidenceCalculator::time_confidence(dec!(4), dec!(0.20));
         assert_eq!(conf, dec!(1.3)); // 1.3 * 1.0
     }
 
     #[test]
     fn test_time_confidence_final_minutes() {
-        // <3 minutes, far from strike
-        let conf = ConfidenceCalculator::time_confidence(dec!(1), dec!(100));
+        // <3 minutes, far from strike (0.30% distance)
+        let conf = ConfidenceCalculator::time_confidence(dec!(1), dec!(0.30));
         assert_eq!(conf, dec!(1.6)); // 1.6 * 1.0
     }
 
     #[test]
     fn test_time_confidence_close_to_strike() {
-        // Late market but close to strike - time factor is diminished
-        let conf = ConfidenceCalculator::time_confidence(dec!(1), dec!(10));
+        // Late market but close to strike (<0.05%) - time factor is diminished
+        let conf = ConfidenceCalculator::time_confidence(dec!(1), dec!(0.03));
         assert_eq!(conf, dec!(0.8)); // 1.6 * 0.5
     }
 
     #[test]
     fn test_time_confidence_medium_distance() {
-        // Late market, medium distance
-        let conf = ConfidenceCalculator::time_confidence(dec!(2), dec!(30));
+        // Late market, medium distance (0.10% - between 0.05 and 0.15)
+        let conf = ConfidenceCalculator::time_confidence(dec!(2), dec!(0.10));
         // 1.6 * 0.8 = 1.28
         assert_eq!(conf, dec!(1.28));
     }
@@ -498,44 +493,50 @@ mod tests {
 
     #[test]
     fn test_distance_confidence_very_far() {
-        let conf = ConfidenceCalculator::distance_confidence(dec!(150));
+        // >0.30% → 1.5
+        let conf = ConfidenceCalculator::distance_confidence(dec!(0.50));
         assert_eq!(conf, dec!(1.5));
     }
 
     #[test]
     fn test_distance_confidence_far() {
-        let conf = ConfidenceCalculator::distance_confidence(dec!(60));
+        // 0.20-0.30% → 1.3
+        let conf = ConfidenceCalculator::distance_confidence(dec!(0.25));
         assert_eq!(conf, dec!(1.3));
     }
 
     #[test]
     fn test_distance_confidence_medium() {
-        let conf = ConfidenceCalculator::distance_confidence(dec!(35));
+        // 0.10-0.20% → 1.1
+        let conf = ConfidenceCalculator::distance_confidence(dec!(0.15));
         assert_eq!(conf, dec!(1.1));
     }
 
     #[test]
     fn test_distance_confidence_baseline() {
-        let conf = ConfidenceCalculator::distance_confidence(dec!(25));
+        // 0.05-0.10% → 1.0
+        let conf = ConfidenceCalculator::distance_confidence(dec!(0.07));
         assert_eq!(conf, dec!(1.0));
     }
 
     #[test]
     fn test_distance_confidence_close() {
-        let conf = ConfidenceCalculator::distance_confidence(dec!(15));
+        // 0.02-0.05% → 0.8
+        let conf = ConfidenceCalculator::distance_confidence(dec!(0.03));
         assert_eq!(conf, dec!(0.8));
     }
 
     #[test]
     fn test_distance_confidence_at_strike() {
-        let conf = ConfidenceCalculator::distance_confidence(dec!(5));
+        // <0.02% → 0.6
+        let conf = ConfidenceCalculator::distance_confidence(dec!(0.01));
         assert_eq!(conf, dec!(0.6));
     }
 
     #[test]
     fn test_distance_confidence_negative() {
         // Negative distance (below strike) should use absolute value
-        let conf = ConfidenceCalculator::distance_confidence(dec!(-80));
+        let conf = ConfidenceCalculator::distance_confidence(dec!(-0.25));
         assert_eq!(conf, dec!(1.3));
     }
 
@@ -629,7 +630,7 @@ mod tests {
     #[test]
     fn test_calculate_full_confidence() {
         let factors = ConfidenceFactors::new(
-            dec!(80),   // Far from strike
+            dec!(0.25), // Far from strike (0.25%)
             dec!(2),    // 2 minutes remaining
             Signal::StrongUp,
             dec!(0.4),  // High imbalance
@@ -638,9 +639,9 @@ mod tests {
 
         let conf = ConfidenceCalculator::calculate(&factors);
 
-        // Time: 1.6 (final minutes, far from strike)
+        // Time: 1.6 (final minutes, 0.25% > 0.15% so full distance modifier)
         assert_eq!(conf.time, dec!(1.6));
-        // Distance: 1.3 (far)
+        // Distance: 1.3 (0.20-0.30% range)
         assert_eq!(conf.distance, dec!(1.3));
         // Signal: 1.4 (strong)
         assert_eq!(conf.signal, dec!(1.4));
@@ -651,7 +652,7 @@ mod tests {
     #[test]
     fn test_calculate_low_confidence_scenario() {
         let factors = ConfidenceFactors::new(
-            dec!(5),    // Very close to strike
+            dec!(0.01), // Very close to strike (<0.02%)
             dec!(14),   // Early in market
             Signal::Neutral,
             dec!(0.05), // Low imbalance
@@ -660,9 +661,9 @@ mod tests {
 
         let conf = ConfidenceCalculator::calculate(&factors);
 
-        // Time: 0.6 * 0.5 = 0.3 (early, close to strike)
+        // Time: 0.6 * 0.5 = 0.3 (early, close to strike <0.05%)
         assert_eq!(conf.time, dec!(0.3));
-        // Distance: 0.6 (at strike)
+        // Distance: 0.6 (at strike <0.02%)
         assert_eq!(conf.distance, dec!(0.6));
         // Signal: 0.7 (neutral)
         assert_eq!(conf.signal, dec!(0.7));
@@ -677,7 +678,7 @@ mod tests {
     #[test]
     fn test_calculate_high_confidence_scenario() {
         let factors = ConfidenceFactors::new(
-            dec!(120),  // Very far from strike
+            dec!(0.50), // Very far from strike (>0.30%)
             dec!(1),    // Final minute
             Signal::StrongDown,
             dec!(0.6),  // High imbalance
@@ -727,7 +728,7 @@ mod tests {
         // Scenario 1 from spec: Early market, close to strike, weak signal
         // Expected: ~0.7x multiplier → $0.70 order on $1 base
         let factors = ConfidenceFactors::new(
-            dec!(15),   // Close to strike
+            dec!(0.03), // Close to strike (0.03%)
             dec!(13),   // Early
             Signal::Neutral,
             dec!(0.0),  // No imbalance
@@ -746,7 +747,7 @@ mod tests {
         // Scenario 2 from spec: Late market, far from strike, strong signal
         // Expected: ~2.5x multiplier → $2.50 order on $1 base
         let factors = ConfidenceFactors::new(
-            dec!(80),   // Far from strike
+            dec!(0.25), // Far from strike (0.25%)
             dec!(2),    // Late
             Signal::StrongDown,
             dec!(-0.4), // Favorable imbalance

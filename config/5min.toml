@@ -57,8 +57,10 @@ min_margin_late_bps = 25      # 0.25%
 
 [engines.directional]
 enabled = true
+early_exit_enabled = false
+kelly_fraction = 0.10
 min_seconds_remaining = 20    # Shorter min for 5-min windows
-max_combined_cost = 1.02
+max_combined_cost = 0.995
 max_spread_bps = 1500
 min_favorable_depth = 25.0
 

@@ -11,13 +11,13 @@
 
 [general]
 mode = "live"
-assets = ["BTC", "ETH", "SOL", "XRP"]
+assets = ["BTC", "ETH"]    #, "SOL", "XRP"]
 window_duration = "15min"
 console_log_level = "warn"
 file_log_level = "info"
 
 [trading]
-max_market_exposure = 250.0
+max_market_exposure = 150.0
 max_total_exposure = 1000.0
 base_order_size = 10.0
 available_balance = 1000.0
@@ -41,6 +41,8 @@ emergency_close_threshold = 0.15
 risk_mode = "directional"
 max_consecutive_failures = 3
 circuit_breaker_cooldown_secs = 300
+max_imbalance_ratio = 0.7
+toxic_flow_threshold = 80
 
 [execution]
 # LIMIT ORDERS PREFERRED - earn rebates instead of paying fees
@@ -49,6 +51,23 @@ chase_enabled = true
 chase_step_size = 0.01
 chase_check_interval_ms = 500
 max_chase_time_ms = 5000
+order_timeout_ms = 10000
+paper_fill_latency_ms = 50
+test_trade_on_startup = false
+
+[live]
+auto_claim_interval = 15
+
+[shadow]
+enabled = true
+price_offset_bps = 50
+max_wait_ms = 2000
+
+[oracle]
+chainlink_stale_threshold_secs = 30
+binance_lead_enabled = true
+lead_confirm_boost = 0.15
+lead_oppose_cut = 0.25
 
 [engines]
 priority = ["directional", "arbitrage", "maker"]
@@ -62,10 +81,13 @@ min_margin_late_bps = 200  # 2.0%
 
 [engines.directional]
 enabled = true
+early_exit_enabled = true
+kelly_fraction = 0.10
 min_seconds_remaining = 60
-max_combined_cost = 1.02
+max_combined_cost = 0.995
 max_spread_bps = 1500
 min_favorable_depth = 50.0
+max_share_price = 0.75
 
 strong_threshold_late_bps = 9
 lean_threshold_late_bps = 6
@@ -83,11 +105,12 @@ min_seconds_remaining = 120
 min_spread_bps = 100
 
 [backtest]
-data_dir = "analysis/session_2026-02-09T12-19"
+data_dir = "data/live_2026-02-11T11-02-55"
 speed = 0.0
 sweep_enabled = true
 fill_delay_ms = 500
-# book_interval_ms = 1000  # Data already pre-downsampled to 1s
+decision_log_path = "logs/decisions_backtest.csv"
+sweep_parallel_workers = 8
 
 [backtest.trading]
 available_balance = 1000.0
@@ -96,17 +119,9 @@ max_total_exposure = 1000.0
 base_order_size = 10.0
 
 [backtest.sweep]
-# Re-sweep with 500ms fill delay to find optimal params under realistic latency
-# Fix time_conf at best known value, sweep edge and dist_conf
-edge_factors = [0.01, 0.03, 0.05]
-time_conf_floors = [0.20]
-dist_conf_per_atrs = [0.40, 0.60, 0.80]
-
-[oracle]
-chainlink_stale_threshold_secs = 30
-binance_lead_enabled = true
-lead_confirm_boost = 0.15
-lead_oppose_cut = 0.25
+# Iteration 1: Sweep max_share_price only (3 values)
+# early_exit=true, kelly_fraction=0.10 (fixed)
+max_share_prices = [0.60, 0.70, 0.80]
 
 [observability]
 capture_decisions = true

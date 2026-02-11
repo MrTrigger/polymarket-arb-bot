@@ -1,0 +1,208 @@
+{
+  "project": "Polymarket Scalp Strategy",
+  "branchName": "ralph/scalp-strategy",
+  "description": "Pluggable TradingStrategy trait with a new ScalpStrategy that uses drift conviction signals, fair value pricing, postOnly maker orders, and 4 exit paths. Replaces binary hold-to-settlement with bounded TP/SL scalping and maker rebate optimization.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Define TradingStrategy trait and dispatch point",
+      "description": "As a developer, I need a TradingStrategy trait so strategies can be plugged in without modifying the event loop. Add a dispatch point in the strategy loop: if strategy='scalp', call the trait; else run existing code unchanged.",
+      "acceptanceCriteria": [
+        "New file strategy/traits.rs with TradingStrategy trait (evaluate, on_fill, on_cancel, name methods)",
+        "MarketContext struct defined with all read-only fields: event_id, asset, strike_price, window_start/end, seconds_remaining, current_time, binance_price, chainlink_price, chainlink_age_secs, yes_book, no_book, inventory, has_position, atr, realized_vol_15m",
+        "StrategyAction enum defined with Hold, Enter, Exit, Cancel, CancelAll variants",
+        "strategy/mod.rs registers the new module",
+        "GeneralConfig gains strategy: String field (default 'binary')",
+        "In check_opportunities_for_markets(): if strategy='scalp' and trait is Some, call strategy.evaluate() and handle returned actions; else run existing code path",
+        "StrategyLoop gains optional Box<dyn TradingStrategy> field, initialized to None when strategy='binary'",
+        "cargo check -p poly-bot passes",
+        "cargo test -p poly-bot passes (no behavior change when strategy='binary')"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": "This is the foundation. Existing binary strategy code stays inline — NOT extracted into trait. The trait dispatch is an if/else branch, not a full abstraction replacement. MarketContext is constructed from TrackedMarket + shared state before calling evaluate()."
+    },
+    {
+      "id": "US-002",
+      "title": "Implement VolEstimator for realized volatility",
+      "description": "As a strategy, I need a VolEstimator that computes rolling 15-minute realized volatility (σ_15m) from Binance price feed so drift conviction can be properly normalized across volatility regimes.",
+      "acceptanceCriteria": [
+        "New file strategy/vol.rs with VolEstimator struct",
+        "Ring buffer of (timestamp_ms: i64, log_return: Decimal) pairs — uses event timestamps, NOT wall clock (backtest safe)",
+        "Configurable lookback_secs (default 3600) and sampling_interval_secs (default 60)",
+        "update(timestamp_ms, price) samples at interval cadence, computes log return from last sample",
+        "sigma_15m() returns annualized vol scaled to 15-minute window: per_interval_vol × sqrt(intervals_per_15m)",
+        "Returns Decimal::ZERO or a min fallback (0.001) when insufficient data (<10 samples)",
+        "regime() returns Low/Normal/High/Extreme based on configurable thresholds",
+        "Per-asset instances (HashMap<CryptoAsset, VolEstimator>) on StrategyLoop",
+        "Fed from handle_spot_price() using event timestamp (same pattern as ATR tracker)",
+        "sigma_15m value accessible in MarketContext.realized_vol_15m",
+        "Unit tests: verify sigma calculation with known inputs, verify regime detection",
+        "cargo check -p poly-bot passes",
+        "cargo test -p poly-bot passes"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": "Pattern follows strategy/atr.rs (event-timestamp windowing, per-asset instances). Log returns use Decimal for the return value but can use f64 intermediate for ln() since this is not money math. Critical: must use event timestamps, not Instant::now() — see MEMORY.md ATR bug."
+    },
+    {
+      "id": "US-003",
+      "title": "Implement fair value model and oracle risk functions",
+      "description": "As a scalp strategy, I need a fair probability model (Normal CDF), edge calculation, rebate zone scoring, and oracle stale multiplier so I can price orders with known edge and manage oracle timing risk.",
+      "acceptanceCriteria": [
+        "New file strategy/fair_value.rs",
+        "normal_cdf(x: f64) -> f64 using Abramowitz & Stegun rational approximation (no external dependency)",
+        "fair_probability_up(drift: Decimal, sigma_remaining: Decimal) -> Decimal: Φ(drift / σ_remaining)",
+        "sigma_remaining(sigma_15m, time_frac, start_price) -> Decimal: σ_15m × √time_frac × start_price",
+        "edge_cents(fair_p, book_price, is_yes_side) -> Decimal: fair_p - book_price (YES) or (1-fair_p) - book_price (NO)",
+        "rebate_zone_score(price) -> Decimal: (p × (1-p))² / 0.0625, normalized to [0, 1]",
+        "adjusted_min_edge(fair_p, base_min_edge) -> Decimal: ×0.75 if rebate_score > 0.65, ×1.50 if < 0.15, else base",
+        "oracle_stale_multiplier(chainlink_age_secs, heartbeat_secs) -> Decimal: 1.0/1.5/2.5/infinity based on age brackets",
+        "Unit tests: verify CDF against known values (Φ(0)=0.5, Φ(1)≈0.8413, Φ(-1)≈0.1587), verify edge calc, verify rebate zone peaks at 0.50",
+        "cargo check -p poly-bot passes",
+        "cargo test -p poly-bot passes"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": "f64 is acceptable for Normal CDF computation (probability estimate, not money math). Convert result back to Decimal for downstream use. The CDF approximation should be accurate to 4+ decimal places."
+    },
+    {
+      "id": "US-004",
+      "title": "Add ScalpConfig with TOML parsing and defaults",
+      "description": "As a developer, I need a ScalpConfig struct with all tunable parameters, TOML deserialization, and sweep parameter wiring so the scalp strategy is fully configurable.",
+      "acceptanceCriteria": [
+        "ScalpConfig struct in config.rs with all fields from Config Reference in prd.md",
+        "ScalpConfigToml struct for TOML deserialization with f64 fields and Option wrappers",
+        "Default impl with values from Config Reference",
+        "GeneralToml gains strategy: Option<String> field",
+        "New [strategy.scalp] section parsed in TomlConfig (add StrategyToml wrapper)",
+        "Conversion from ScalpConfigToml to ScalpConfig (f64 → Decimal)",
+        "BotConfig gains scalp_config: ScalpConfig field",
+        "Sweep fields added to SweepToml: scalp_min_edges, scalp_base_sizes, scalp_min_convictions (all Vec<f64>)",
+        "to_sweep_parameters() generates SweepParameter entries for scalp fields",
+        "cargo check -p poly-bot passes",
+        "cargo test -p poly-bot passes"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": "Follow existing pattern: DirectionalEngineConfig/DirectionalEngineToml. All Decimal fields use Decimal::from_f64_retain() for conversion. Sweep params only activate when len > 1."
+    },
+    {
+      "id": "US-005",
+      "title": "Implement ScalpStrategy signal engine and entry logic",
+      "description": "As a scalp trader, I need a drift conviction signal normalized by remaining volatility, with fair-value-based postOnly limit order placement, so I enter at favorable prices and earn maker rebates.",
+      "acceptanceCriteria": [
+        "New file strategy/scalp.rs with ScalpStrategy struct implementing TradingStrategy",
+        "ScalpStrategy holds ScalpConfig, per-market ScalpState (entry_price, direction, round_trips, last_exit, resting_orders)",
+        "drift_conviction(ctx): drift / (σ_15m × √time_frac × start_price) where drift = chainlink_price - strike",
+        "Entry gates: |conviction| < min_conviction → Hold; |drift_bps| < dead_zone → Hold; oracle_stale = infinity → Hold; chainlink lag sign disagrees with drift → Hold; time < min_seconds → Hold; round_trips >= max → Hold; cooldown not elapsed → Hold",
+        "Fair value: fair_p = fair_probability_up(); edge = edge_cents(fair_p, book_price); skip if edge < adjusted_min_edge",
+        "Limit price: if conviction >= high_conviction: best_ask - 1 tick (aggressive); else best_bid + 1 tick (passive). Clamped to ceiling = fair_value - adjusted_min_edge",
+        "Price rounded to $0.01 increments",
+        "Order type: OrderType::Gtc (postOnly maker order)",
+        "Size: base_size × min(conviction, 4.0), capped at max_size and max_position headroom",
+        "Returns StrategyAction::Enter with all fields populated",
+        "ScalpStrategy wired into StrategyLoop: instantiated when strategy='scalp', stored as Box<dyn TradingStrategy>",
+        "on_fill() records entry_price, direction in ScalpState",
+        "cargo check -p poly-bot passes"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": "Uses chainlink_price for drift (settlement oracle), not binance_price. Binance is used only for momentum confirmation (future enhancement). The resting_orders tracking enables cancel/repost of stale orders. ScalpState is stored per event_id in a HashMap inside ScalpStrategy."
+    },
+    {
+      "id": "US-006",
+      "title": "Implement ScalpStrategy four exit paths",
+      "description": "As a scalp trader, I need 4 distinct exit paths (hold to resolution, scalp out, soft stop, hard stop) so I take profits early, cut losses fast, and avoid theta decay.",
+      "acceptanceCriteria": [
+        "Exit path 1 (Hold to Resolution): if conviction still strong AND seconds_remaining < 120 → Hold (let binary settlement resolve)",
+        "Exit path 2 (Scalp Out / TP): compute capture_ratio = unrealised_edge / max_gain; exit threshold = 0.40 if >600s, 0.55 if 300-600s, 0.70 if <300s; if capture_ratio >= threshold → Exit at fair_p - 1 tick (maker limit)",
+        "Exit path 3 (Soft Stop / Theta Decay): if hold_duration > soft_stop_hold_secs AND edge_captured < soft_stop_min_edge → Exit at entry_price (break-even, maker limit). Rebate makes round-trip free.",
+        "Exit path 4 (Hard Stop): if signal reversed (drift conviction flipped sign) OR unrealised_loss > max_loss_per_trade → Exit at best_bid (maker limit). If unfilled after stale_order_timeout → repost more aggressive. If spot moves > hard_stop_spot_move_pct against → IOC (taker) as last resort.",
+        "Time exit: if seconds_remaining < force_exit_secs and still holding → return Hold (accept resolution, don't chase)",
+        "After exit fill: increment round_trips, set last_exit time, clear entry_price/direction",
+        "Re-entry allowed after exit (no permanent exit_triggered flag)",
+        "Exit paths checked in order: 1, 2, 3, 4 (first match wins)",
+        "Each exit logs reason string for trades_log",
+        "cargo check -p poly-bot passes"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": "Unrealised edge = current_fair_p - entry_price (YES) or (1-current_fair_p) - entry_price (NO). Max gain = 1.0 - entry_price. For hard stop, the stale order tracking from US-005 (resting_orders) is used to detect unfilled exit orders and repost."
+    },
+    {
+      "id": "US-007",
+      "title": "Add dynamic sizing with rebate zone awareness",
+      "description": "As a scalp trader, I need conviction-based sizing that scales up near $0.50 (peak rebate zone) so I maximize volume where maker rebates are highest.",
+      "acceptanceCriteria": [
+        "Size formula: base_size × min(|conviction|, 4.0), capped at max_size",
+        "Position headroom check: size = min(size, max_position - current_exposure)",
+        "Global exposure check: respect max_total_exposure from trading config",
+        "Rebate zone bonus integrated into min_edge adjustment (not sizing): tighter min_edge near $0.50 allows more fills, wider at extremes requires stronger signals",
+        "Volatility regime adjustment: if regime = Extreme → return Hold (sit out entirely); if regime = High → cap conviction multiplier at 2.0 (reduce size)",
+        "Unit test: verify sizing at various conviction levels",
+        "Unit test: verify rebate zone score at $0.50 vs $0.20 vs $0.80",
+        "cargo check -p poly-bot passes",
+        "cargo test -p poly-bot passes"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": "The rebate zone awareness works through min_edge (tighter edge = easier to enter = more trades = more volume) NOT through direct size scaling. This is more robust than my original midprice_bonus approach since it's the edge requirement that drives fill probability."
+    },
+    {
+      "id": "US-008",
+      "title": "Wire backtest sweep parameters for scalp strategy",
+      "description": "As a developer, I need scalp parameters integrated into the backtest sweep system so I can optimize strategy parameters via parameter sweep.",
+      "acceptanceCriteria": [
+        "apply_parameter() in mode/backtest.rs handles: scalp_min_edge, scalp_base_size, scalp_min_conviction, scalp_max_round_trips, scalp_cooldown_secs",
+        "SweepToml fields: scalp_min_edges, scalp_base_sizes, scalp_min_convictions (Vec<f64> with Default empty)",
+        "to_sweep_parameters() creates SweepParameter entries for each (only when len > 1)",
+        "When sweeping scalp params, strategy is forced to 'scalp' mode",
+        "Config/15min.toml updated with [strategy.scalp] section and [backtest.sweep] scalp params",
+        "Directional engine disabled in 15min.toml when scalp is enabled",
+        "cargo check -p poly-bot passes",
+        "cargo test -p poly-bot passes"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": "Follow existing pattern in apply_parameter() — match on string name, set config field. The sweep system generates cartesian product of all params with len > 1. Keep sweep small initially: 3 values per param max."
+    },
+    {
+      "id": "US-009",
+      "title": "Simulate postOnly behavior in backtest executor",
+      "description": "As a backtester, I need the SimulatedExecutor to reject GTC orders that would cross the spread so postOnly fills are accurately simulated.",
+      "acceptanceCriteria": [
+        "SimulatedExecutor: for GTC/Limit orders with postOnly semantics, check if the limit price would result in immediate fill (crosses the spread)",
+        "Buy orders: reject if limit_price >= best_ask (would cross)",
+        "Sell orders: reject if limit_price <= best_bid (would cross)",
+        "When rejected, return OrderResult::Rejected with reason 'PostOnlyWouldCross'",
+        "Add config flag: simulate_post_only: bool (default true when strategy='scalp')",
+        "When simulate_post_only is false, existing behavior preserved (fill at limit price)",
+        "For orders that pass the postOnly check: simulate fill when a subsequent book update shows the market price has reached the limit price (passive fill simulation)",
+        "cargo check -p poly-bot passes",
+        "cargo test -p poly-bot passes with test for postOnly rejection and passive fill"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": "The passive fill simulation is tricky — in the current backtest, GTC fills happen instantly. For accurate scalp backtesting, a GTC order should rest until a future book update shows a price at or better than our limit. This may require tracking resting orders in the simulated executor. Simplest v1: just add the cross-spread rejection check. Passive fill delay can be approximated with fill_delay_ms config."
+    },
+    {
+      "id": "US-010",
+      "title": "End-to-end integration test on backtest data",
+      "description": "As a developer, I need to verify the scalp strategy works end-to-end: signals fire, orders place, exits trigger, P&L is tracked correctly, and sweep produces results.",
+      "acceptanceCriteria": [
+        "Single backtest run with strategy='scalp' on small dataset (data/live_2026-02-11T19-21-45, ~1 min) completes without errors",
+        "Session summary shows: total trades > 0, some TP and SL exits, P&L tracked",
+        "Trades log CSV contains SCALP_TP, SCALP_SL, SCALP_SOFT, SCALP_HARD entries",
+        "Decision log shows scalp signal evaluations",
+        "Sweep with 3 min_conviction values produces 3 results with different P&L",
+        "Compare: binary strategy baseline vs scalp on same dataset (both produce results)",
+        "No panics, no Decimal overflow, no infinite loops",
+        "cargo test -p poly-bot passes"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": "This is the validation story. Run the small dataset first (~1 min backtest) then optionally the large dataset (~15 min). The comparison between binary and scalp strategies validates that both paths work independently."
+    }
+  ]
+}

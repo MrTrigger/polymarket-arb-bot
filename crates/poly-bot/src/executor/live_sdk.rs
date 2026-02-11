@@ -18,14 +18,15 @@ use rust_decimal::Decimal;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
-use poly_common::types::Side;
+use poly_common::types::{Outcome, Side};
 
 use super::allowance::{AllowanceConfig, AllowanceManager, SharedAllowanceManager};
 use super::live::LiveExecutorConfig;
+use super::position_manager::{PositionManager, RiskConfig};
 use super::shadow::{ShadowManager, SharedShadowManager};
 use super::{
     Executor, ExecutorError, OrderCancellation, OrderFill, OrderRejection, OrderRequest,
-    OrderResult, OrderType, PartialOrderFill, PendingOrder,
+    OrderResult, OrderType, PartialOrderFill, PendingOrder, PositionSnapshot,
 };
 use crate::config::{ShadowConfig, WalletConfig};
 
@@ -49,8 +50,10 @@ pub struct LiveSdkExecutor {
     allowance_manager: Option<SharedAllowanceManager>,
     /// Handle to the allowance monitoring task.
     allowance_task: Option<tokio::task::JoinHandle<()>>,
-    /// Current USDC balance.
+    /// Current USDC balance (async-safe, updated on fetch_balance and fills).
     balance: Arc<RwLock<Decimal>>,
+    /// Position and risk management (single source of truth for exposure tracking).
+    position_manager: PositionManager,
     /// Order timeout in milliseconds.
     #[allow(dead_code)]
     order_timeout_ms: u64,
@@ -170,6 +173,13 @@ impl LiveSdkExecutor {
         );
         let allowance_task = Some(allowance_manager.clone().ensure_and_start_monitoring().await);
 
+        // Create position manager for exposure tracking and risk limits
+        let risk_config = RiskConfig {
+            max_market_exposure: config.max_market_exposure,
+            max_total_exposure: config.max_total_exposure,
+        };
+        let position_manager = PositionManager::new(risk_config);
+
         Ok(Self {
             signer,
             private_key_hex,
@@ -177,6 +187,7 @@ impl LiveSdkExecutor {
             allowance_manager: Some(allowance_manager),
             allowance_task,
             balance: Arc::new(RwLock::new(initial_balance)),
+            position_manager,
             order_timeout_ms: config.order_timeout_ms,
             orders: Arc::new(RwLock::new(HashMap::new())),
             request_to_order: Arc::new(RwLock::new(HashMap::new())),
@@ -251,6 +262,24 @@ impl LiveSdkExecutor {
     /// Get wallet address.
     pub fn wallet_address(&self) -> &str {
         &self.wallet_address
+    }
+
+    /// Record a fill in the position manager and deduct from balance.
+    fn record_fill_internal(&mut self, event_id: &str, outcome: Outcome, size: Decimal, price: Decimal) {
+        let is_yes = matches!(outcome, Outcome::Yes);
+        let cost = size * price;
+        self.position_manager.record_fill(event_id, is_yes, size, cost);
+
+        // Deduct cost from cached balance
+        if let Ok(mut balance) = self.balance.try_write() {
+            *balance = (*balance - cost).max(Decimal::ZERO);
+        } else {
+            tracing::warn!(
+                event_id = %event_id,
+                cost = %cost,
+                "Balance lock contended during fill recording - cached balance may drift"
+            );
+        }
     }
 
     /// Convert our Side to SDK Side.
@@ -443,6 +472,7 @@ impl Executor for LiveSdkExecutor {
                             price = %fill.price,
                             "Market order filled"
                         );
+                        self.record_fill_internal(&request.event_id, request.outcome, fill.size, fill.price);
                         return Ok(OrderResult::Filled(fill));
                     }
                     OrderResult::PartialFill(pf) => {
@@ -453,6 +483,7 @@ impl Executor for LiveSdkExecutor {
                             requested = %pf.requested_size,
                             "Market order partially filled (FAK)"
                         );
+                        self.record_fill_internal(&request.event_id, request.outcome, pf.filled_size, pf.avg_price);
                         // Return as Filled with the partial amount
                         return Ok(OrderResult::Filled(OrderFill {
                             request_id: pf.request_id,
@@ -471,11 +502,12 @@ impl Executor for LiveSdkExecutor {
                                 filled = %cancel.filled_size,
                                 "Market order partially filled then cancelled"
                             );
+                            self.record_fill_internal(&request.event_id, request.outcome, cancel.filled_size, price);
                             return Ok(OrderResult::Filled(OrderFill {
                                 request_id: cancel.request_id,
                                 order_id: cancel.order_id,
                                 size: cancel.filled_size,
-                                price: Decimal::ZERO, // price unknown from cancel response
+                                price,
                                 fee: Decimal::ZERO,
                                 timestamp: cancel.timestamp,
                             }));
@@ -501,8 +533,11 @@ impl Executor for LiveSdkExecutor {
                         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                         if let Some(retry_result) = self.order_status(&order_id).await {
                             if let OrderResult::Filled(fill) = retry_result {
-                                let mut pending = self.pending.write().await;
-                                pending.retain(|p| p.order_id != order_id);
+                                {
+                                    let mut pending = self.pending.write().await;
+                                    pending.retain(|p| p.order_id != order_id);
+                                }
+                                self.record_fill_internal(&request.event_id, request.outcome, fill.size, fill.price);
                                 return Ok(OrderResult::Filled(fill));
                             }
                         }
@@ -699,33 +734,60 @@ impl Executor for LiveSdkExecutor {
     }
 
     fn pending_orders(&self) -> Vec<PendingOrder> {
-        // This is synchronous, so we can't await. Return empty for now.
-        Vec::new()
+        // Non-blocking sync access to pending orders
+        match self.pending.try_read() {
+            Ok(pending) => pending.clone(),
+            Err(_) => Vec::new(),
+        }
     }
 
     fn available_balance(&self) -> Decimal {
-        // Synchronous access - would need restructuring
-        Decimal::ZERO
+        // Non-blocking sync access to cached balance
+        match self.balance.try_read() {
+            Ok(balance) => *balance,
+            Err(_) => Decimal::ZERO, // Lock contended (rare), return zero as safe fallback
+        }
     }
 
-    fn market_exposure(&self, _event_id: &str) -> Decimal {
-        // TODO: Add position manager for proper tracking
-        Decimal::ZERO
+    fn market_exposure(&self, event_id: &str) -> Decimal {
+        self.position_manager.market_exposure(event_id)
     }
 
     fn total_exposure(&self) -> Decimal {
-        // TODO: Add position manager for proper tracking
-        Decimal::ZERO
+        self.position_manager.total_exposure()
     }
 
     fn remaining_capacity(&self) -> Decimal {
-        // TODO: Add position manager for proper tracking
-        Decimal::MAX
+        self.position_manager.remaining_capacity()
     }
 
-    fn get_position(&self, _event_id: &str) -> Option<crate::executor::PositionSnapshot> {
-        // TODO: Add position manager for proper tracking
-        None
+    fn get_position(&self, event_id: &str) -> Option<PositionSnapshot> {
+        self.position_manager.get_position(event_id).map(|p| PositionSnapshot {
+            yes_shares: p.yes_shares,
+            no_shares: p.no_shares,
+            cost_basis: p.cost_basis,
+        })
+    }
+
+    async fn settle_market(&mut self, event_id: &str, yes_wins: bool) -> Decimal {
+        // Get payout before settle removes the position
+        let payout = self.position_manager.get_position(event_id)
+            .map(|p| if yes_wins { p.yes_shares } else { p.no_shares })
+            .unwrap_or(Decimal::ZERO);
+
+        let pnl = self.position_manager.settle_market(event_id, yes_wins);
+
+        // Credit the payout (not pnl) back to balance.
+        // Cost was already deducted at fill time, so we add back the full payout.
+        // payout = winning_shares * $1, pnl = payout - cost_basis.
+        if payout > Decimal::ZERO {
+            if let Ok(mut balance) = self.balance.try_write() {
+                *balance += payout;
+            } else {
+                tracing::warn!(event_id = %event_id, payout = %payout, "Failed to update balance after settlement (lock contended)");
+            }
+        }
+        pnl
     }
 
     async fn shutdown(&mut self) {

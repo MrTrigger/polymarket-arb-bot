@@ -89,7 +89,7 @@ async fn main() -> anyhow::Result<()> {
     println!("Setting allowance to: {}", format_usdc(allowance_amount));
 
     // Load private key from config file + env var override
-    let mut bot_config = BotConfig::from_file("config/bot.toml")?;
+    let mut bot_config = BotConfig::from_file("config/15min.toml")?;
     bot_config.apply_env_overrides();
     let private_key = bot_config.wallet.private_key
         .ok_or_else(|| anyhow::anyhow!("No private key - set POLY_PRIVATE_KEY env var"))?;

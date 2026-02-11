@@ -151,6 +151,8 @@ impl BacktestModeConfig {
         if let Some(v) = dir.dist_conf_floor { strategy.dist_conf_floor = v; }
         if let Some(v) = dir.dist_conf_per_atr { strategy.dist_conf_per_atr = v; }
         if let Some(v) = dir.max_edge_factor { strategy.max_edge_factor = v; }
+        if let Some(v) = dir.kelly_fraction { strategy.kelly_fraction = v; }
+        if let Some(v) = dir.early_exit_enabled { strategy.early_exit_enabled = v; }
 
         Ok(Self {
             data_source: replay_config,
@@ -219,30 +221,50 @@ impl BacktestModeConfig {
 pub struct SweepParameter {
     /// Parameter name.
     pub name: String,
-    /// Starting value.
+    /// Starting value (used with end/step for uniform ranges).
     pub start: f64,
     /// Ending value.
     pub end: f64,
     /// Step size.
     pub step: f64,
+    /// Explicit values list (overrides start/end/step if non-empty).
+    #[serde(default)]
+    pub explicit_values: Vec<f64>,
 }
 
 impl SweepParameter {
-    /// Create a new sweep parameter.
+    /// Create a new sweep parameter with uniform range.
     pub fn new(name: &str, start: f64, end: f64, step: f64) -> Self {
         Self {
             name: name.to_string(),
             start,
             end,
             step,
+            explicit_values: Vec::new(),
+        }
+    }
+
+    /// Create a sweep parameter with explicit values.
+    pub fn from_values(name: &str, values: Vec<f64>) -> Self {
+        let start = values.first().copied().unwrap_or(0.0);
+        let end = values.last().copied().unwrap_or(0.0);
+        Self {
+            name: name.to_string(),
+            start,
+            end,
+            step: 0.0,
+            explicit_values: values,
         }
     }
 
     /// Generate all values for this parameter.
     pub fn values(&self) -> Vec<f64> {
+        if !self.explicit_values.is_empty() {
+            return self.explicit_values.clone();
+        }
         let mut values = Vec::new();
         let mut current = self.start;
-        while current <= self.end {
+        while current <= self.end + self.step * 0.01 {
             values.push(current);
             current += self.step;
         }
@@ -1603,6 +1625,44 @@ fn apply_parameter(config: &mut BacktestModeConfig, name: &str, value: f64) {
         "max_edge_factor" => {
             config.strategy.max_edge_factor =
                 Decimal::from_f64_retain(value).unwrap_or_default();
+        }
+        // Minimum share price (OTM filter)
+        "min_share_price" => {
+            config.engines.directional.min_share_price =
+                Some(Decimal::from_f64_retain(value).unwrap_or_default());
+        }
+        // HTF trend params
+        "htf_trend_confirm_boost" => {
+            let v = Decimal::from_f64_retain(value).unwrap_or_default();
+            config.strategy.htf_trend_confirm_boost = v;
+        }
+        "htf_trend_oppose_cut" => {
+            let v = Decimal::from_f64_retain(value).unwrap_or_default();
+            config.strategy.htf_trend_oppose_cut = v;
+        }
+        // Maximum share price (risk/reward filter)
+        "max_share_price" => {
+            config.engines.directional.max_share_price =
+                Some(Decimal::from_f64_retain(value).unwrap_or_default());
+        }
+        // Kelly fraction (position sizing)
+        "kelly_fraction" => {
+            let v = Decimal::from_f64_retain(value).unwrap_or_default();
+            config.engines.directional.kelly_fraction = Some(v);
+            config.strategy.kelly_fraction = v;
+        }
+        // Early exit on signal reversal
+        "early_exit_enabled" => {
+            let enabled = value > 0.5;
+            config.engines.directional.early_exit_enabled = Some(enabled);
+            config.strategy.early_exit_enabled = enabled;
+        }
+        // Signal thresholds
+        "strong_threshold_late_bps" => {
+            config.engines.directional.strong_threshold_late_bps = value as u32;
+        }
+        "lean_threshold_late_bps" => {
+            config.engines.directional.lean_threshold_late_bps = value as u32;
         }
         _ => {
             warn!("Unknown sweep parameter: {}", name);

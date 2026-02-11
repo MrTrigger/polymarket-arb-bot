@@ -1592,33 +1592,25 @@ impl Executor for LiveExecutor {
 
     async fn settle_market(&mut self, event_id: &str, yes_wins: bool) -> Decimal {
         let mut pm = self.position_manager.write().await;
+
+        // Get payout before settle removes the position
+        let payout = pm.get_position(event_id)
+            .map(|p| if yes_wins { p.yes_shares } else { p.no_shares })
+            .unwrap_or(Decimal::ZERO);
+
         let pnl = pm.settle_market(event_id, yes_wins);
+        drop(pm);
 
-        // Update balance with payout if there was a position
-        if pnl != Decimal::ZERO {
+        // Credit the payout (not pnl) back to balance.
+        // Cost was already deducted at fill time, so we add back the full payout.
+        if payout > Decimal::ZERO {
             let mut balance = self.balance.write().await;
-            // Payout is already calculated in PnL - add cost basis back + pnl
-            // Actually, settle_market returns pnl = payout - cost_basis
-            // So we need to add payout to balance, which is cost_basis + pnl
-            // But the position info is gone after settle. For simplicity,
-            // we'll just add the pnl (profit or loss) to balance since
-            // cost was already deducted when we bought.
-            // Actually cost_basis was already deducted, so we add back payout:
-            // pnl = payout - cost_basis, so payout = pnl + cost_basis
-            // But cost_basis is gone... Let's use a simpler model:
-            // The balance was reduced by cost when buying.
-            // At settlement, we receive payout (either yes_shares or no_shares worth $1 each)
-            // So balance += payout. But pnl = payout - cost_basis.
-            // We don't have payout directly anymore. Let's reconsider.
-
-            // For live trading, the actual settlement happens on-chain via Polymarket.
-            // We just update our local tracking. The actual balance will be updated
-            // when we fetch from the API. For now, we'll adjust by pnl.
-            *balance += pnl;
+            *balance += payout;
 
             info!(
                 event_id = %event_id,
                 yes_wins = %yes_wins,
+                payout = %payout,
                 realized_pnl = %pnl,
                 new_balance = %*balance,
                 "Market settled (local tracking)"
