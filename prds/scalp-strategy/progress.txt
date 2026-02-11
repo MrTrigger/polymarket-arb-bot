@@ -1,0 +1,17 @@
+# Ralph Progress Log
+PRD: scalp-strategy
+Started: 2026-02-11
+
+## Codebase Patterns
+
+- All money math uses `rust_decimal::Decimal`, never f64 (CLAUDE.md rule)
+- Event timestamps (not wall-clock) for all time-windowed calculations (ATR bug lesson)
+- Per-asset instances stored in `HashMap<CryptoAsset, T>` on StrategyLoop
+- Config pattern: `FooConfig` (Decimal fields) + `FooToml` (f64 fields) + conversion via `Decimal::from_f64_retain()`
+- Sweep params: add `Vec<f64>` to `SweepToml`, generate `SweepParameter` entries in `to_sweep_parameters()`, handle in `apply_parameter()` match
+- Executor trait: `place_order()` returns `OrderResult` (Filled/Pending/Rejected)
+- OrderType::Gtc for maker/limit orders, OrderType::Ioc for taker/market orders
+- TrackedMarket holds per-market state, keyed by event_id in `self.markets` HashMap
+- Trades log: strategies provide reason strings for fill/exit logging
+
+---
